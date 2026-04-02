@@ -49,17 +49,7 @@ The tool can identify and display these statuses:
 - .NET Framework 4.8
 - Appropriate permissions to read solution metadata in the source and target environments
 
-## How to Build
-
-1. Clone or download the repository.
-2. Open `D365SolutionComparer.sln` in Visual Studio 2019.
-3. Restore NuGet packages if prompted.
-4. Build the solution.
-5. For packaging, build in `Release` configuration.
-6. If creating a NuGet package, use the included `.nuspec` file.
-
 ## How to Use
-
 1. Open XrmToolBox.
 2. Open **D365 Solution Comparer**.
 3. Connect to your source environment.
@@ -75,7 +65,6 @@ The tool can identify and display these statuses:
 10. Export visible results to Excel if needed.
 
 ## Excel Export
-
 The tool exports the currently visible filtered rows to Excel.
 
 Export includes:
@@ -92,7 +81,6 @@ Export includes:
 - Overall Status
 
 ## Repository
-
 GitHub project:
 `https://github.com/Lucarian77/D365SolutionComparer`
 
@@ -100,15 +88,12 @@ NuGet package:
 `https://www.nuget.org/packages/D365SolutionComparer`
 
 ## Current Version
-
 `1.0.0.1`
 
 ## Notes
-
 - Package Type in the tool is derived from the solution managed state.
 - If metadata changes do not appear after a rebuild, confirm that the latest DLL is being loaded and remove stale plugin manifest files if needed.
 - NuGet package version and assembly version should remain aligned for clean update behavior.
 
 ## Author
-
 Adrian Lucaci
