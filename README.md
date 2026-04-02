@@ -1,25 +1,37 @@
-# Purpose
-D365 Solution Comparer is a custom XrmToolBox plugin used to compare solutions across a source and a target Microsoft Dynamics 365 / Dataverse environment.
+# D365 Solution Comparer
 
-## Current Key Features
+D365 Solution Comparer is a custom XrmToolBox plugin for Microsoft Dynamics 365 and Dataverse. It helps compare solutions between a source environment and a target environment so teams can quickly spot differences before deployments, validation, or troubleshooting.
+
+## Overview
+
+This tool was built to simplify solution comparison across environments by providing a clear side by side view of key solution metadata.
+
+It compares:
+- Solution Unique Name
+- Display Name
+- Version
+- Publisher
+- Package Type based on managed or unmanaged state
+
+The plugin is designed for internal ALM checks, release validation, support reviews, and general environment comparison work.
+
+## Features
+
 - Load source environment solutions
-- Connect to target environment
+- Connect to a target environment
 - Load target environment solutions
 - Compare source and target solutions
-- Compare by:
-  - Solution Unique Name
-  - Display Name
-  - Publisher
-  - Version
-  - Package Type (Managed / Unmanaged)
+- Highlight differences by status
 - Multi-select result filtering
 - Package Type Differences filter
 - Managed/Unmanaged-only checkbox filter
-- Color-coded comparison results
-- Summary counts
-- Excel export of visible filtered rows
+- Summary counts for visible results
+- Excel export for visible filtered rows
 
-## Main Comparison Statuses
+## Comparison Statuses
+
+The tool can identify and display these statuses:
+
 - Match
 - Version Mismatch
 - Publisher Mismatch
@@ -29,11 +41,74 @@ D365 Solution Comparer is a custom XrmToolBox plugin used to compare solutions a
 - Missing in Source
 - Missing in Target
 
-## Typical Use
-1. Open the plugin in XrmToolBox.
-2. Load the source solutions.
-3. Connect to the target environment.
-4. Load the target solutions.
-5. Run Compare.
-6. Use the filters as needed.
-7. Export the visible results to Excel if required.
+## Requirements
+
+- Windows
+- XrmToolBox
+- Microsoft Dynamics 365 / Dataverse access
+- .NET Framework 4.8
+- Appropriate permissions to read solution metadata in the source and target environments
+
+## How to Build
+
+1. Clone or download the repository.
+2. Open `D365SolutionComparer.sln` in Visual Studio 2019.
+3. Restore NuGet packages if prompted.
+4. Build the solution.
+5. For packaging, build in `Release` configuration.
+6. If creating a NuGet package, use the included `.nuspec` file.
+
+## How to Use
+
+1. Open XrmToolBox.
+2. Open **D365 Solution Comparer**.
+3. Connect to your source environment.
+4. Click **Load Source**.
+5. Click **Connect Target** and connect to the target environment.
+6. Click **Load Target**.
+7. Click **Compare**.
+8. Review the results grid, summary counts, and status coloring.
+9. Use filters as needed:
+   - status filter
+   - package type differences
+   - managed/unmanaged differences only
+10. Export visible results to Excel if needed.
+
+## Excel Export
+
+The tool exports the currently visible filtered rows to Excel.
+
+Export includes:
+- Solution Unique Name
+- Source Display Name
+- Target Display Name
+- Source Version
+- Target Version
+- Source Publisher
+- Target Publisher
+- Source Package Type
+- Target Package Type
+- Package Type Status
+- Overall Status
+
+## Repository
+
+GitHub project:
+`https://github.com/Lucarian77/D365SolutionComparer`
+
+NuGet package:
+`https://www.nuget.org/packages/D365SolutionComparer`
+
+## Current Version
+
+`1.0.0.1`
+
+## Notes
+
+- Package Type in the tool is derived from the solution managed state.
+- If metadata changes do not appear after a rebuild, confirm that the latest DLL is being loaded and remove stale plugin manifest files if needed.
+- NuGet package version and assembly version should remain aligned for clean update behavior.
+
+## Author
+
+Adrian Lucaci
