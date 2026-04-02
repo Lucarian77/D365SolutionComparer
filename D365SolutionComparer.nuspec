@@ -1,0 +1,35 @@
+﻿<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>D365SolutionComparer</id>
+    <version>1.0.0.1</version>
+    <title>D365 Solution Comparer</title>
+    <authors>Adrian Lucaci</authors>
+    <owners>Adrian Lucaci</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+
+    <projectUrl>https://github.com/Lucarian77/D365SolutionComparer</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/Lucarian77/D365SolutionComparer/main/D365SolutionComparerLogo_64.png</iconUrl>
+
+    <description>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</description>
+    <summary>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</summary>
+
+    <releaseNotes>
+1.0.0.1
+- Initial internal release candidate
+- Compare solutions by unique name, display name, version, publisher, and package type
+- Added managed/unmanaged difference filtering
+- Added Excel export for visible filtered results
+    </releaseNotes>
+
+    <tags>XrmToolBox Dynamics365 Dataverse Solutions Compare ALM</tags>
+
+    <dependencies>
+      <dependency id="XrmToolBox" version="1.2025.9.64" />
+    </dependencies>
+  </metadata>
+
+  <files>
+    <file src="bin\Release\D365SolutionComparer.dll" target="lib\net48\Plugins" />
+  </files>
+</package>
