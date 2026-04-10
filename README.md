@@ -40,7 +40,8 @@ The tool can identify and display these statuses:
 - Multiple Differences
 - Missing in Source
 - Missing in Target
-<img width="3755" height="1266" alt="image" src="https://github.com/user-attachments/assets/5e941ccf-4918-4fc2-8c23-c0a7e65ac71e" />
+<img width="3770" height="1375" alt="image" src="https://github.com/user-attachments/assets/3779721e-2729-4b7d-801b-80f79ac227ba" />
+
 
 ## Requirements
 
