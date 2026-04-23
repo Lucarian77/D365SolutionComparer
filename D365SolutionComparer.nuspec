@@ -2,37 +2,55 @@
 <package>
   <metadata>
     <id>D365SolutionComparer</id>
-    <version>1.0.0.2</version>
+    <version>1.1.0.0</version>
     <title>D365 Solution Comparer</title>
     <authors>Adrian Lucaci</authors>
     <owners>Adrian Lucaci</owners>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
+	<license type="expression">MIT</license>
 
     <projectUrl>https://github.com/Lucarian77/D365SolutionComparer</projectUrl>
     <icon>Resources/D365SolutionComparerLogo_64.png</icon>
     <iconUrl>https://raw.githubusercontent.com/Lucarian77/D365SolutionComparer/main/D365SolutionComparerLogo_64.png</iconUrl>
     <readme>README.md</readme>
 
-    <description>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</description>
+    <description>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments, review differences, filter visible results, and export comparison output with Excel support when available and CSV fallback when Excel dependencies are not available in the XrmToolBox host.</description>
     <summary>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</summary>
 
     <releaseNotes>
-1.0.0.2
-- Added embedded package icon
-- Added packaged README
-- No functional changes to comparison logic
+1.1.0.0
+- Added safer export handling with Excel self-check and CSV fallback when Excel dependencies are unavailable
+- Added About dialog with version and dependency diagnostics
+- Added row details popup by double-clicking comparison rows
+- Added Changed only quick filter
+- Added Reset Filters button
+- Added saved filter state and improved filter/status behavior
+- Improved button enable/disable workflow for source, target, compare, and export actions
+- Improved export output and comparison usability
     </releaseNotes>
 
-    <tags>XrmToolBox Dynamics365 Dataverse Solutions Compare ALM</tags>
+    <tags>XrmToolBox Dynamics365 Dataverse Solutions Compare ALM CRM PowerPlatform</tags>
 
     <dependencies>
-      <dependency id="XrmToolBox" version="1.2025.9.64" />
+      <group targetFramework=".NETFramework4.8">
+        <dependency id="XrmToolBox" version="1.2025.9.64" />
+      </group>
     </dependencies>
   </metadata>
 
   <files>
-    <file src="bin\Release\D365SolutionComparer.dll" target="lib\net48\Plugins" />
-    <file src="Resources\D365SolutionComparerLogo_64.png" target="Resources" />
-    <file src="README.md" target="" />
+    <file src="bin\Release\D365SolutionComparer.dll" target="lib\net48\Plugins\D365SolutionComparer.dll" />
+
+    <file src="bin\Release\ClosedXML.dll" target="lib\net48\Plugins\ClosedXML.dll" />
+    <file src="bin\Release\ClosedXML.Parser.dll" target="lib\net48\Plugins\ClosedXML.Parser.dll" />
+    <file src="bin\Release\DocumentFormat.OpenXml.dll" target="lib\net48\Plugins\DocumentFormat.OpenXml.dll" />
+    <file src="bin\Release\ExcelNumberFormat.dll" target="lib\net48\Plugins\ExcelNumberFormat.dll" />
+    <file src="bin\Release\Microsoft.Bcl.HashCode.dll" target="lib\net48\Plugins\Microsoft.Bcl.HashCode.dll" />
+    <file src="bin\Release\RBush.dll" target="lib\net48\Plugins\RBush.dll" />
+    <file src="bin\Release\SixLabors.Fonts.dll" target="lib\net48\Plugins\SixLabors.Fonts.dll" />
+
+    <file src="Resources\D365SolutionComparerLogo_64.png" target="Resources\D365SolutionComparerLogo_64.png" />
+    <file src="bin\Release\README.md" target="README.md" />
+    <file src="bin\Release\LICENSE.txt" target="LICENSE" />
   </files>
 </package>
