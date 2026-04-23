@@ -90,6 +90,8 @@ The export includes the currently visible rows and includes:
 - Target Package Type
 - Package Type Status
 - Overall Status
+<img width="1902" height="881" alt="image" src="https://github.com/user-attachments/assets/1f306fa5-ab65-4312-817e-6e772569ee45" />
+
 
 When Excel export is available, the tool generates a formatted workbook with report metadata and filters applied.  
 When CSV export is used, the file is plain text and final column sizing or styling depends on the application used to open it.
