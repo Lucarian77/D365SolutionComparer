@@ -91,6 +91,7 @@ The export includes the currently visible rows and includes:
 - Package Type Status
 - Overall Status
 <img width="1902" height="881" alt="image" src="https://github.com/user-attachments/assets/1f306fa5-ab65-4312-817e-6e772569ee45" />
+<img width="1885" height="882" alt="image" src="https://github.com/user-attachments/assets/88045408-fee3-494d-9a0a-4aadad64605a" />
 
 
 When Excel export is available, the tool generates a formatted workbook with report metadata and filters applied.  
