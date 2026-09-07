@@ -16,14 +16,17 @@ namespace D365SolutionComparer.Services.Membership
             CancellationToken cancellationToken, Action<RetrievalProgress> progress = null)
         {
             if (solution == null) throw new ArgumentNullException(nameof(solution));
-            return ReadCore(service, solution.Environment, solution.UniqueName, solution.SolutionId, cancellationToken, progress);
+            var context = new DataverseReadContext(service, solution.Environment, cancellationToken);
+            return ReadCore(context, solution.Environment, solution.UniqueName, solution.SolutionId, cancellationToken, progress);
         }
 
         /// <summary>Look up the same Unique Name independently on each side, including absent solutions.</summary>
         public MembershipSnapshot Read(IOrganizationService service, EnvironmentIdentity environment, string uniqueName,
             CancellationToken cancellationToken, Action<RetrievalProgress> progress = null)
         {
-            return ReadCore(service, environment, uniqueName, null, cancellationToken, progress);
+            ValidateSelection(environment, uniqueName);
+            var context = new DataverseReadContext(service, environment, cancellationToken);
+            return ReadCore(context, environment, uniqueName, null, cancellationToken, progress);
         }
 
         /// <summary>
@@ -48,11 +51,28 @@ namespace D365SolutionComparer.Services.Membership
             }
         }
 
-        private static MembershipSnapshot ReadCore(IOrganizationService service, EnvironmentIdentity environment, string uniqueName,
+        internal MembershipSnapshot Read(DataverseReadContext context, SolutionIdentity solution,
+            CancellationToken cancellationToken, Action<RetrievalProgress> progress = null)
+        {
+            if (context == null) throw new ArgumentNullException(nameof(context));
+            if (solution == null) throw new ArgumentNullException(nameof(solution));
+            EnsureEnvironment(context, solution.Environment);
+            return ReadCore(context, solution.Environment, solution.UniqueName, solution.SolutionId, cancellationToken, progress);
+        }
+
+        internal MembershipSnapshot Read(DataverseReadContext context, EnvironmentIdentity environment, string uniqueName,
+            CancellationToken cancellationToken, Action<RetrievalProgress> progress = null)
+        {
+            if (context == null) throw new ArgumentNullException(nameof(context));
+            ValidateSelection(environment, uniqueName);
+            EnsureEnvironment(context, environment);
+            return ReadCore(context, environment, uniqueName, null, cancellationToken, progress);
+        }
+
+        private static MembershipSnapshot ReadCore(DataverseReadContext context, EnvironmentIdentity environment, string uniqueName,
             Guid? expectedSolutionId, CancellationToken cancellationToken, Action<RetrievalProgress> progress)
         {
             ValidateSelection(environment, uniqueName);
-            var context = new DataverseReadContext(service, environment, cancellationToken);
             // TopCount=2 distinguishes a unique selection from ambiguity; it is not an inventory query.
             var lookup = new QueryExpression("solution") { ColumnSet = new ColumnSet("solutionid", "uniquename"), TopCount = 2 };
             lookup.Criteria.AddCondition("uniquename", ConditionOperator.Equal, uniqueName);
@@ -73,7 +93,7 @@ namespace D365SolutionComparer.Services.Membership
                     "rootsolutioncomponentid", "ismetadata", "solutionid")
             };
             query.Criteria.AddCondition("solutionid", ConditionOperator.Equal, solution.SolutionId);
-            var rows = new DataversePagedReader(service).ReadAll(query, "solutioncomponentid", cancellationToken, progress);
+            var rows = new DataversePagedReader(context.Service).ReadAll(query, "solutioncomponentid", cancellationToken, progress);
             var components = new List<ComponentIdentity>();
             foreach (var entity in rows)
             {
@@ -89,6 +109,12 @@ namespace D365SolutionComparer.Services.Membership
             }
             cancellationToken.ThrowIfCancellationRequested();
             return MembershipSnapshot.Complete(solution, components, DateTimeOffset.UtcNow);
+        }
+
+        private static void EnsureEnvironment(DataverseReadContext context, EnvironmentIdentity environment)
+        {
+            if (context.Environment.OrganizationId != environment.OrganizationId)
+                throw new InvalidOperationException("The verified context belongs to a different environment.");
         }
 
         private static void ValidateSelection(EnvironmentIdentity environment, string uniqueName)

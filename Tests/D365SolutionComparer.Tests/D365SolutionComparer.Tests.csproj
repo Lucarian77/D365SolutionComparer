@@ -50,6 +50,7 @@
     <Compile Include="MembershipReaderTests.cs" />
     <Compile Include="ComponentIdentityResolverTests.cs" />
     <Compile Include="MembershipComparisonTests.cs" />
+    <Compile Include="MembershipPerformanceTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

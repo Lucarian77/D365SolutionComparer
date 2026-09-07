@@ -242,15 +242,16 @@ namespace D365SolutionComparer.Tests
                 }
                 Assert.AreEqual("connectionreference", query.EntityName);
                 identityCalls++;
-                return Rows(new Entity("connectionreference", (Guid)query.Criteria.Conditions.Single().Values.Single())
-                {
-                    ["connectionreferencelogicalname"] = "new_reference" + identityCalls
-                });
+                return Rows(query.Criteria.Conditions.Single().Values.Cast<Guid>().Select((id, index) =>
+                    new Entity("connectionreference", id)
+                    {
+                        ["connectionreferencelogicalname"] = "new_reference" + (index + 1)
+                    }).ToArray());
             });
             var snapshot = MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow);
             var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service, snapshot, CancellationToken.None);
             Assert.AreEqual(1, discoveryCalls);
-            Assert.AreEqual(2, identityCalls);
+            Assert.AreEqual(1, identityCalls);
             for (int index = 0; index < records.Length; index++)
             {
                 Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Components[index].Status);
