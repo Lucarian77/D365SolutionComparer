@@ -1,56 +1,51 @@
-<?xml version="1.0"?>
+﻿<?xml version="1.0"?>
 <package>
-  <metadata>
-    <id>D365SolutionComparer</id>
-    <version>1.1.0.0</version>
-    <title>D365 Solution Comparer</title>
-    <authors>Adrian Lucaci</authors>
-    <owners>Adrian Lucaci</owners>
-    <requireLicenseAcceptance>false</requireLicenseAcceptance>
-	<license type="expression">MIT</license>
+	<metadata>
+		<id>D365SolutionComparer</id>
+		<version>1.2026.1.3</version>
+		<title>D365 Solution Comparer</title>
+		<authors>Adrian Lucaci</authors>
+		<owners>Adrian Lucaci</owners>
+		<requireLicenseAcceptance>false</requireLicenseAcceptance>
+		<license type="expression">MIT</license>
 
-    <projectUrl>https://github.com/Lucarian77/D365SolutionComparer</projectUrl>
-    <icon>Resources/D365SolutionComparerLogo_64.png</icon>
-    <iconUrl>https://raw.githubusercontent.com/Lucarian77/D365SolutionComparer/main/D365SolutionComparerLogo_64.png</iconUrl>
-    <readme>README.md</readme>
+		<projectUrl>https://github.com/Lucarian77/D365SolutionComparer</projectUrl>
+		<icon>Resources/D365SolutionComparerLogo_64.png</icon>
+		<iconUrl>https://raw.githubusercontent.com/Lucarian77/D365SolutionComparer/main/D365SolutionComparerLogo_64.png</iconUrl>
+		<readme>README.md</readme>
 
-    <description>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments, review differences, filter visible results, and export comparison output with Excel support when available and CSV fallback when Excel dependencies are not available in the XrmToolBox host.</description>
-    <summary>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</summary>
+		<description>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments, review differences, filter visible results, inspect row details, and export the currently visible comparison output as XLSX, Excel XML Spreadsheet 2003, or CSV.</description>
+		<summary>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</summary>
 
-    <releaseNotes>
-1.1.0.0
-- Added safer export handling with Excel self-check and CSV fallback when Excel dependencies are unavailable
-- Added About dialog with version and dependency diagnostics
-- Added row details popup by double-clicking comparison rows
-- Added Changed only quick filter
-- Added Reset Filters button
-- Added saved filter state and improved filter/status behavior
-- Improved button enable/disable workflow for source, target, compare, and export actions
-- Improved export output and comparison usability
-    </releaseNotes>
+		<releaseNotes>
+			1.2026.1.3
+			- Added XLSX export as the default workbook export format
+			- Kept Excel XML Spreadsheet 2003 export as a readable Excel-friendly fallback
+			- Kept CSV export as a plain-text export option
+			- Added row details popup by double-clicking comparison rows
+			- Added Changed only quick filter
+			- Added Managed/unmanaged differences only filter
+			- Added Reset Filters button
+			- Added saved filter state and improved filter/status behavior
+			- Improved button enable/disable workflow for source, target, compare, and export actions
+			- Improved export output and comparison usability
+			- Added DocumentFormat.OpenXml.dll to support the XLSX export path in XrmToolBox
+		</releaseNotes>
 
-    <tags>XrmToolBox Dynamics365 Dataverse Solutions Compare ALM CRM PowerPlatform</tags>
+		<tags>XrmToolBox Dynamics365 Dataverse Solutions Compare ALM CRM PowerPlatform XLSX OpenXML XML CSV</tags>
 
-    <dependencies>
-      <group targetFramework=".NETFramework4.8">
-        <dependency id="XrmToolBox" version="1.2025.9.64" />
-      </group>
-    </dependencies>
-  </metadata>
+		<dependencies>
+			<group targetFramework=".NETFramework4.8">
+				<dependency id="XrmToolBox" version="1.2025.9.64" />
+			</group>
+		</dependencies>
+	</metadata>
 
-  <files>
-    <file src="bin\Release\D365SolutionComparer.dll" target="lib\net48\Plugins\D365SolutionComparer.dll" />
-
-    <file src="bin\Release\ClosedXML.dll" target="lib\net48\Plugins\ClosedXML.dll" />
-    <file src="bin\Release\ClosedXML.Parser.dll" target="lib\net48\Plugins\ClosedXML.Parser.dll" />
-    <file src="bin\Release\DocumentFormat.OpenXml.dll" target="lib\net48\Plugins\DocumentFormat.OpenXml.dll" />
-    <file src="bin\Release\ExcelNumberFormat.dll" target="lib\net48\Plugins\ExcelNumberFormat.dll" />
-    <file src="bin\Release\Microsoft.Bcl.HashCode.dll" target="lib\net48\Plugins\Microsoft.Bcl.HashCode.dll" />
-    <file src="bin\Release\RBush.dll" target="lib\net48\Plugins\RBush.dll" />
-    <file src="bin\Release\SixLabors.Fonts.dll" target="lib\net48\Plugins\SixLabors.Fonts.dll" />
-
-    <file src="Resources\D365SolutionComparerLogo_64.png" target="Resources\D365SolutionComparerLogo_64.png" />
-    <file src="bin\Release\README.md" target="README.md" />
-    <file src="bin\Release\LICENSE.txt" target="LICENSE" />
-  </files>
+	<files>
+		<file src="bin\Release\D365SolutionComparer.dll" target="lib\net48\Plugins\D365SolutionComparer.dll" />
+		<file src="bin\Release\DocumentFormat.OpenXml.dll" target="lib\net48\Plugins\DocumentFormat.OpenXml.dll" />
+		<file src="Resources\D365SolutionComparerLogo_64.png" target="Resources\D365SolutionComparerLogo_64.png" />
+		<file src="README.md" target="README.md" />
+		<file src="LICENSE.txt" target="LICENSE.txt" />
+	</files>
 </package>

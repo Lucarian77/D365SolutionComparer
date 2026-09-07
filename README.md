@@ -28,10 +28,11 @@ The plugin is designed for deployment validation, release readiness checks, ALM 
 - Reset Filters button
 - Summary counts for visible results
 - Double-click row details popup
-- About dialog with version and dependency information
+- About dialog with version information
 - Export visible filtered rows
-  - Excel export when the required runtime dependencies are available
-  - CSV export fallback when Excel dependencies are not available in the current XrmToolBox host
+  - XLSX export as the default workbook option
+  - Excel XML Spreadsheet 2003 export for improved Excel readability without heavier Excel library dependencies
+  - CSV export option for simple plain-text export
 
 ## Comparison Statuses
 
@@ -72,8 +73,9 @@ The tool can identify and display these statuses:
    - Reset Filters
 10. Double-click any comparison row to open detailed row information.
 11. Export the visible results when needed.
-   - On hosts where Excel export is available, the tool exports an Excel workbook.
-   - On hosts where Excel dependencies cannot be validated, the tool uses CSV export instead.
+   - XLSX is the default workbook export format.
+   - Excel XML export remains available as an Excel-friendly fallback.
+   - CSV export remains available when a plain-text export is preferred.
 
 ## Export Output
 
@@ -90,18 +92,17 @@ The export includes the currently visible rows and includes:
 - Target Package Type
 - Package Type Status
 - Overall Status
-<img width="1902" height="881" alt="image" src="https://github.com/user-attachments/assets/1f306fa5-ab65-4312-817e-6e772569ee45" />
-<img width="1885" height="882" alt="image" src="https://github.com/user-attachments/assets/88045408-fee3-494d-9a0a-4aadad64605a" />
 
-
-When Excel export is available, the tool generates a formatted workbook with report metadata and filters applied.  
+When XLSX export is used, the tool generates a native Excel workbook with preserved layout, filtering, and status styling.
+When Excel XML export is used, the tool generates a cleaner Excel-friendly report layout than CSV while avoiding heavier workbook library dependencies.
 When CSV export is used, the file is plain text and final column sizing or styling depends on the application used to open it.
 
 ## Notes
 
 - Package Type in the tool is derived from the solution managed state.
 - Filter state is saved between sessions.
-- On some machines, Excel export may not be available because of dependency resolution in the shared XrmToolBox host. In those cases the tool remains fully usable and exports CSV instead.
+- Solution matching should remain based on Unique Name, not Display Name.
+- On some machines, exported `.xml` files may open more reliably when opened from inside Excel first, depending on local file associations.
 - NuGet package version and assembly version should remain aligned for clean update behavior.
 
 ## Repository
@@ -114,7 +115,7 @@ NuGet package:
 
 ## Current Version
 
-`1.1.0.0`
+`1.2026.1.3`
 
 ## Author
 
