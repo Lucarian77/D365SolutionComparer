@@ -18,7 +18,7 @@ namespace D365SolutionComparer.Models.Membership
             bool targetResolved = target != null && target.Status == IdentityResolutionStatus.Resolved;
             if (presence == MembershipPresence.PresentInBoth && (!sourceResolved || !targetResolved))
                 throw new ArgumentException("Both identities must be resolved to establish shared presence.");
-            if (presence == MembershipPresence.PresentInBoth && source.Record.ComponentType != target.Record.ComponentType)
+            if (presence == MembershipPresence.PresentInBoth && !string.Equals(source.ComponentTypeKey, target.ComponentTypeKey, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Different component types cannot establish shared presence.");
             bool oneSided = presence == MembershipPresence.OnlyInSource || presence == MembershipPresence.OnlyInTarget;
             if (oneSided)

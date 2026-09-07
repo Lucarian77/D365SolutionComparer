@@ -46,6 +46,10 @@
     <Compile Include="MembershipModelTests.cs" />
     <Compile Include="DataversePagedReaderTests.cs" />
     <Compile Include="FakeOrganizationService.cs" />
+    <Compile Include="MembershipTestData.cs" />
+    <Compile Include="MembershipReaderTests.cs" />
+    <Compile Include="ComponentIdentityResolverTests.cs" />
+    <Compile Include="MembershipComparisonTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
