@@ -156,19 +156,164 @@ namespace D365SolutionComparer.Tests
         public void UnsupportedTypesKeepRawRecordsAndDiscoverMappingOnlyOncePerSnapshot()
         {
             var solution = Solution(); var first = Identity("unused", 99999).Record; var second = Identity("unused", 99998).Record;
+            int connectionDiscoveryCalls = 0; int familyDiscoveryCalls = 0;
             var service = Service(solution, query =>
             {
                 Assert.AreEqual("solutioncomponentdefinition", query.EntityName);
+                if (query.Criteria.Conditions.Single().AttributeName == "primaryentityname")
+                    connectionDiscoveryCalls++;
+                else
+                {
+                    familyDiscoveryCalls++;
+                    Assert.AreEqual("objecttypecode", query.Criteria.Conditions.Single().AttributeName);
+                    CollectionAssert.AreEquivalent(new[] { 99998, 99999 }, query.Criteria.Conditions.Single()
+                        .Values.Cast<int>().ToArray());
+                    CollectionAssert.AreEquivalent(new[] { "objecttypecode", "name", "primaryentityname" },
+                        query.ColumnSet.Columns.ToArray());
+                }
                 return Rows();
             });
             var input = MembershipSnapshot.Complete(solution, new[] { new ComponentIdentity(first, IdentityResolutionStatus.Unresolved),
                 new ComponentIdentity(second, IdentityResolutionStatus.Unresolved) }, DateTimeOffset.UtcNow);
             var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service, input, CancellationToken.None);
             Assert.IsTrue(result.Components.All(c => c.Status == IdentityResolutionStatus.Unsupported));
+            Assert.IsTrue(result.Components.All(c => c.SemanticKind == null));
             Assert.AreSame(first, result.Components[0].Record);
             Assert.AreSame(second, result.Components[1].Record);
-            Assert.AreEqual(1, service.Calls);
+            Assert.AreEqual(1, connectionDiscoveryCalls);
+            Assert.AreEqual(1, familyDiscoveryCalls);
+            Assert.AreEqual(2, service.Calls);
             Assert.AreEqual(input.CapturedAt, result.CapturedAt);
+        }
+
+        [TestMethod]
+        public void RegisteredFamilyUsesSameSemanticBucketAcrossEnvironmentLocalTypeCodes()
+        {
+            var results = new ComponentIdentity[2];
+            var solutions = new D365SolutionComparer.Models.Identity.SolutionIdentity[2];
+            for (int side = 0; side < 2; side++)
+            {
+                var solution = Solution(); int type = side == 0 ? 10266 : 10267;
+                solutions[side] = solution;
+                var record = Identity(null, type, IdentityResolutionStatus.Unresolved).Record;
+                var service = Service(solution, query =>
+                {
+                    if (query.Criteria.Conditions.Single().AttributeName == "primaryentityname") return Rows();
+                    return Rows(Definition(type, "Contoso.Education.Assessment", "contoso_assessment"));
+                });
+                results[side] = new DataverseComponentIdentityResolver().Resolve(service,
+                    solution.Environment, record, CancellationToken.None);
+                Assert.AreEqual(2, service.Calls);
+                Assert.AreEqual(IdentityResolutionStatus.Unsupported, results[side].Status);
+                Assert.IsNull(results[side].ComparisonKey);
+                Assert.AreEqual("componenttype:" + type, results[side].ComponentTypeKey);
+                Assert.AreEqual("Contoso.Education.Assessment", results[side].RegisteredDefinition.Name);
+                Assert.AreEqual("contoso_assessment", results[side].RegisteredDefinition.PrimaryEntityName);
+            }
+
+            Assert.AreEqual(results[0].SemanticKind, results[1].SemanticKind);
+            Assert.AreNotEqual(results[0].ComponentTypeKey, results[1].ComponentTypeKey);
+            var comparison = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(solutions[0], new[] { results[0] }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(solutions[1], new[] { results[1] }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(2, comparison.Count);
+            Assert.IsTrue(comparison.All(item => item.Presence == MembershipPresence.Indeterminate));
+        }
+
+        [TestMethod]
+        public void RepeatedRawTypeUsesOneGroupedDefinitionLookupAndRetainsEveryRow()
+        {
+            var solution = Solution(); const int type = 10075; int familyQueries = 0;
+            var records = Enumerable.Range(0, 15)
+                .Select(index => Identity(null, type, IdentityResolutionStatus.Unresolved)).ToArray();
+            var service = Service(solution, query =>
+            {
+                if (query.Criteria.Conditions.Single().AttributeName == "primaryentityname") return Rows();
+                familyQueries++;
+                return Rows(Definition(type, "Microsoft.Education.Component", "msdyn_educationcomponent"));
+            });
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            Assert.AreEqual(1, familyQueries);
+            Assert.AreEqual(15, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported));
+            Assert.AreEqual(1, result.Components.Select(item => item.SemanticKind).Distinct().Count());
+            Assert.IsTrue(result.Components.All(item => item.RegisteredDefinition != null));
+        }
+
+        [TestMethod]
+        public void MultipleDefinitionsForOneRawTypeRemainBroadAndAmbiguous()
+        {
+            var solution = Solution(); const int type = 10072;
+            var service = Service(solution, query => query.Criteria.Conditions.Single().AttributeName ==
+                "primaryentityname" ? Rows() : Rows(
+                    Definition(type, "Family.One", "family_one"),
+                    Definition(type, "Family.Two", "family_two")));
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                Identity(null, type, IdentityResolutionStatus.Unresolved).Record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.RegisteredDefinition);
+        }
+
+        [TestMethod]
+        public void IncompleteRegisteredDefinitionRemainsBroad()
+        {
+            var solution = Solution(); const int type = 511;
+            var service = Service(solution, query => query.Criteria.Conditions.Single().AttributeName ==
+                "primaryentityname" ? Rows() : Rows(new Entity("solutioncomponentdefinition", Guid.NewGuid())
+                {
+                    ["objecttypecode"] = type,
+                    ["primaryentityname"] = "msdyn_component"
+                }));
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                Identity(null, type, IdentityResolutionStatus.Unresolved).Record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.RegisteredDefinition);
+            StringAssert.Contains(result.Diagnostic, "stable name");
+        }
+
+        [TestMethod]
+        public void DefinitionDiscoveryFaultLeavesCandidateBroadAndUnresolved()
+        {
+            var solution = Solution(); const int type = 10276;
+            var service = Service(solution, query =>
+            {
+                if (query.Criteria.Conditions.Single().AttributeName == "primaryentityname") return Rows();
+                throw new FaultException("Definition access denied");
+            });
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                Identity(null, type, IdentityResolutionStatus.Unresolved).Record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            StringAssert.Contains(result.Diagnostic, "Definition access denied");
+        }
+
+        [TestMethod]
+        public void CancellationDuringDefinitionDiscoveryPropagates()
+        {
+            var solution = Solution(); const int type = 10276;
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = Service(solution, query =>
+                {
+                    if (query.Criteria.Conditions.Single().AttributeName == "primaryentityname") return Rows();
+                    cancellation.Cancel();
+                    return Rows(Definition(type, "Family.Cancelled", "cancelled_component"));
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        Identity(null, type, IdentityResolutionStatus.Unresolved).Record, cancellation.Token));
+            }
         }
 
         [DataTestMethod]
@@ -214,7 +359,7 @@ namespace D365SolutionComparer.Tests
             });
             var snapshot = MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow);
             var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service, snapshot, CancellationToken.None);
-            Assert.AreEqual(1, service.Calls);
+            Assert.AreEqual(2, service.Calls);
             for (int index = 0; index < records.Length; index++)
             {
                 Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[index].Status);
@@ -328,6 +473,16 @@ namespace D365SolutionComparer.Tests
             var unavailable = MembershipSnapshot.Unavailable(solution.Environment, solution.UniqueName, DateTimeOffset.UtcNow, "Disconnected");
             Assert.AreSame(absent, resolver.ResolveSnapshot(null, absent, CancellationToken.None));
             Assert.AreSame(unavailable, resolver.ResolveSnapshot(null, unavailable, CancellationToken.None));
+        }
+
+        private static Entity Definition(int objectTypeCode, string name, string primaryEntityName)
+        {
+            return new Entity("solutioncomponentdefinition", Guid.NewGuid())
+            {
+                ["objecttypecode"] = objectTypeCode,
+                ["name"] = name,
+                ["primaryentityname"] = primaryEntityName
+            };
         }
     }
 }

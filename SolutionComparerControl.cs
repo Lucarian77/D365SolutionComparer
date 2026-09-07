@@ -1,11 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using System.Xml;
 using X = DocumentFormat.OpenXml;
@@ -13,7 +16,10 @@ using Xp = DocumentFormat.OpenXml.Packaging;
 using Xs = DocumentFormat.OpenXml.Spreadsheet;
 using XrmToolBox.Extensibility;
 using McTools.Xrm.Connection;
+using D365SolutionComparer.Infrastructure;
+using D365SolutionComparer.Models.Membership;
 using D365SolutionComparer.Services;
+using D365SolutionComparer.Services.Membership;
 using ModelSolutionInfo = D365SolutionComparer.Models.SolutionInfo;
 using OrgService = Microsoft.Xrm.Sdk.IOrganizationService;
 using CompareResult = D365SolutionComparer.Models.SolutionCompareResult;
@@ -28,6 +34,7 @@ namespace D365SolutionComparer
         private Button btnConnectTarget;
         private Button btnLoadTarget;
         private Button btnCompare;
+        private Button btnCompareMembership;
         private Button btnExport;
         private Button btnFilter;
         private Button btnResetFilters;
@@ -54,12 +61,15 @@ namespace D365SolutionComparer
 
         private ConnectionDetail targetConnectionDetail;
         private OrgService targetService;
+        private OrgService sourceMembershipService;
+        private OrgService targetMembershipService;
 
         private string sourceConnectionName = "Current XrmToolBox connection";
         private string targetConnectionName = "Not connected";
 
         private bool sourceLoaded;
         private bool targetLoaded;
+        private bool membershipOperationInProgress;
         private bool suppressSettingsSave;
         private bool pendingTargetConnectedStatus;
 
@@ -105,6 +115,7 @@ namespace D365SolutionComparer
             btnConnectTarget = new Button { Text = "Connect Target", Width = 120, Height = 30 };
             btnLoadTarget = new Button { Text = "Load Target", Width = 110, Height = 30 };
             btnCompare = new Button { Text = "Compare", Width = 110, Height = 30 };
+            btnCompareMembership = new Button { Text = "Compare Membership", Width = 155, Height = 30 };
             btnExport = new Button { Text = "Export", Width = 110, Height = 30 };
             btnFilter = new Button { Text = "Filter: All", Width = 220, Height = 30 };
             btnResetFilters = new Button { Text = "Reset Filters", Width = 110, Height = 30 };
@@ -134,6 +145,7 @@ namespace D365SolutionComparer
             btnConnectTarget.Click += BtnConnectTarget_Click;
             btnLoadTarget.Click += BtnLoadTarget_Click;
             btnCompare.Click += BtnCompare_Click;
+            btnCompareMembership.Click += BtnCompareMembership_Click;
             btnExport.Click += BtnExport_Click;
             btnFilter.Click += BtnFilter_Click;
             btnResetFilters.Click += BtnResetFilters_Click;
@@ -145,6 +157,7 @@ namespace D365SolutionComparer
             topPanel.Controls.Add(btnConnectTarget);
             topPanel.Controls.Add(btnLoadTarget);
             topPanel.Controls.Add(btnCompare);
+            topPanel.Controls.Add(btnCompareMembership);
             topPanel.Controls.Add(btnExport);
             topPanel.Controls.Add(btnFilter);
             topPanel.Controls.Add(btnResetFilters);
@@ -218,6 +231,7 @@ namespace D365SolutionComparer
             dgvResults.CellFormatting += DgvResults_CellFormatting;
             dgvResults.CellDoubleClick += DgvResults_CellDoubleClick;
             dgvResults.CellToolTipTextNeeded += DgvResults_CellToolTipTextNeeded;
+            dgvResults.SelectionChanged += DgvResults_SelectionChanged;
             Resize += SolutionComparerControl_Resize;
 
             Controls.Add(dgvResults);
@@ -293,6 +307,18 @@ namespace D365SolutionComparer
                 btnCompare.Enabled = sourceLoaded && targetLoaded && sourceSolutions.Count > 0 && targetSolutions.Count > 0;
             }
 
+            if (btnCompareMembership != null)
+            {
+                var selected = GetSelectedComparisonResult();
+                var sourcePresent = selected != null && HasSolution(sourceSolutions, selected.UniqueName);
+                var targetPresent = selected != null && HasSolution(targetSolutions, selected.UniqueName);
+                btnCompareMembership.Enabled = MembershipCompareCommandEvaluator.CanExecute(
+                    selected != null, Service != null && ReferenceEquals(Service, sourceMembershipService),
+                    targetService != null && ReferenceEquals(targetService, targetMembershipService),
+                    sourceLoaded, targetLoaded,
+                    sourcePresent, targetPresent, membershipOperationInProgress);
+            }
+
             if (btnExport != null)
             {
                 btnExport.Enabled = GetVisibleComparisonResultCount() > 0;
@@ -347,6 +373,7 @@ namespace D365SolutionComparer
             btnConnectTarget.Width = compact ? 115 : 120;
             btnLoadTarget.Width = compact ? 105 : 110;
             btnCompare.Width = compact ? 105 : 110;
+            btnCompareMembership.Width = compact ? 145 : 155;
             btnExport.Width = compact ? 105 : 110;
             btnFilter.Width = compact ? 165 : 220;
             btnResetFilters.Width = compact ? 100 : 110;
@@ -399,6 +426,7 @@ namespace D365SolutionComparer
                 {
                     targetConnectionDetail = addedConnection;
                     targetService = addedConnection.GetCrmServiceClient();
+                    targetMembershipService = null;
                     targetSolutions = new List<ModelSolutionInfo>();
                     targetLoaded = false;
 
@@ -425,6 +453,7 @@ namespace D365SolutionComparer
                 {
                     targetConnectionDetail = null;
                     targetService = null;
+                    targetMembershipService = null;
                     targetSolutions = new List<ModelSolutionInfo>();
                     targetLoaded = false;
                     targetConnectionName = "Not connected";
@@ -470,6 +499,7 @@ namespace D365SolutionComparer
             {
                 var dataverseService = new DataverseSolutionService();
                 sourceSolutions = dataverseService.GetSolutions(Service);
+                sourceMembershipService = Service;
 
                 comparisonResults = new List<CompareResult>();
                 sourceLoaded = true;
@@ -512,6 +542,7 @@ namespace D365SolutionComparer
                     RemoveAdditionalOrganization(targetConnectionDetail);
                     targetConnectionDetail = null;
                     targetService = null;
+                    targetMembershipService = null;
                     targetSolutions = new List<ModelSolutionInfo>();
                     targetLoaded = false;
                     targetConnectionName = "Not connected";
@@ -554,6 +585,7 @@ namespace D365SolutionComparer
             {
                 var dataverseService = new DataverseSolutionService();
                 targetSolutions = dataverseService.GetSolutions(targetService);
+                targetMembershipService = targetService;
 
                 comparisonResults = new List<CompareResult>();
                 targetLoaded = true;
@@ -633,6 +665,183 @@ namespace D365SolutionComparer
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private void BtnCompareMembership_Click(object sender, EventArgs e)
+        {
+            var selected = GetSelectedComparisonResult();
+            var sourcePresent = selected != null && HasSolution(sourceSolutions, selected.UniqueName);
+            var targetPresent = selected != null && HasSolution(targetSolutions, selected.UniqueName);
+            if (!MembershipCompareCommandEvaluator.CanExecute(selected != null,
+                Service != null && ReferenceEquals(Service, sourceMembershipService),
+                targetService != null && ReferenceEquals(targetService, targetMembershipService),
+                sourceLoaded, targetLoaded, sourcePresent, targetPresent,
+                membershipOperationInProgress))
+            {
+                SetStatusMessage("Select a comparison row after loading both environments.", Color.DarkOrange);
+                return;
+            }
+
+            var solutionUniqueName = selected.UniqueName;
+            var sourceService = Service;
+            var destinationService = targetService;
+            var sourceName = sourceConnectionName;
+            var destinationName = targetConnectionName;
+            membershipOperationInProgress = true;
+            UpdateActionButtonStates();
+            SetStatusMessage("Loading membership for " + solutionUniqueName + "...", Color.DarkOrange);
+
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Loading and resolving solution membership...",
+                IsCancelable = true,
+                MessageWidth = 430,
+                MessageHeight = 150,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var cancellationWatcher = new System.Threading.Timer(_ =>
+                    {
+                        try
+                        {
+                            if (worker.CancellationPending) cancellation.Cancel();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // The worker completed while the cancellation callback was pending.
+                        }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var operation = new DataverseSolutionMembershipOperation();
+                            var source = ReadMembershipEnvironment(operation, sourceService, sourceName,
+                                solutionUniqueName, worker, cancellation, 2, 46);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            var target = ReadMembershipEnvironment(operation, destinationService, destinationName,
+                                solutionUniqueName, worker, cancellation, 51, 47);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = new MembershipResultPresenter().Create(source, target);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            args.Cancel = true;
+                        }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress == null) return;
+                    SetWorkingMessage(progress.Message, 430, 150);
+                    SetStatusMessage(progress.Message, Color.DarkOrange);
+                },
+                PostWorkCallBack = args =>
+                {
+                    membershipOperationInProgress = false;
+                    UpdateActionButtonStates();
+                    if (args.Cancelled)
+                    {
+                        SetStatusMessage("Membership comparison cancelled. No partial result was opened.", Color.DarkOrange);
+                        return;
+                    }
+                    if (args.Error != null)
+                    {
+                        SetStatusMessage("Membership comparison failed.", Color.Red);
+                        MessageBox.Show("Membership comparison failed.\n\n" + args.Error.Message,
+                            "Compare Membership", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    var presentation = args.Result as MembershipComparisonPresentation;
+                    if (presentation == null)
+                    {
+                        SetStatusMessage("Membership comparison did not return a result.", Color.Red);
+                        return;
+                    }
+                    var resultsForm = new MembershipResultsForm(presentation);
+                    var owner = FindForm();
+                    if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
+                    SetStatusMessage("Membership comparison completed for " + presentation.SolutionUniqueName + ".",
+                        Color.Green);
+                }
+            });
+        }
+
+        private static MembershipEnvironmentResult ReadMembershipEnvironment(
+            DataverseSolutionMembershipOperation operation, OrgService service, string environmentName,
+            string solutionUniqueName, BackgroundWorker worker, CancellationTokenSource cancellation,
+            int basePercent, int span)
+        {
+            var requestCounter = new DataverseRequestCounter();
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var snapshot = operation.ReadAndResolve(service, environmentName, solutionUniqueName,
+                    cancellation.Token, progress =>
+                    {
+                        if (worker.CancellationPending) cancellation.Cancel();
+                        cancellation.Token.ThrowIfCancellationRequested();
+                        var offset = ProgressOffset(progress.Stage, progress.RecordsRetrieved, span);
+                        worker.ReportProgress(Math.Min(99, basePercent + offset),
+                            new MembershipUiProgress(environmentName + ": " + progress.Message));
+                    }, requestCounter);
+                stopwatch.Stop();
+                return MembershipEnvironmentResult.FromSnapshot(environmentName, snapshot,
+                    requestCounter.TotalRequests, stopwatch.Elapsed);
+            }
+            catch (OperationCanceledException)
+            {
+                stopwatch.Stop();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                ThrowIfMembershipCancelled(worker, cancellation);
+                worker.ReportProgress(Math.Min(99, basePercent + span),
+                    new MembershipUiProgress(environmentName + ": membership retrieval is unavailable; continuing with the other environment..."));
+                return MembershipEnvironmentResult.Unavailable(environmentName, solutionUniqueName,
+                    requestCounter.TotalRequests, stopwatch.Elapsed, ex.GetType().Name + ": " + ex.Message);
+            }
+        }
+
+        private static void ThrowIfMembershipCancelled(BackgroundWorker worker,
+            CancellationTokenSource cancellation)
+        {
+            if (worker.CancellationPending) cancellation.Cancel();
+            cancellation.Token.ThrowIfCancellationRequested();
+        }
+
+        private static int ProgressOffset(MembershipOperationStage stage, int recordsRetrieved, int span)
+        {
+            switch (stage)
+            {
+                case MembershipOperationStage.ValidatingEnvironment: return 0;
+                case MembershipOperationStage.ReadingMembership:
+                    return Math.Min(span - 12, 7 + Math.Min(12, recordsRetrieved / 250));
+                case MembershipOperationStage.ResolvingIdentities: return span - 10;
+                case MembershipOperationStage.Completed: return span;
+                default: return 0;
+            }
+        }
+
+        private CompareResult GetSelectedComparisonResult()
+        {
+            if (dgvResults == null || dgvResults.SelectedRows.Count != 1) return null;
+            return dgvResults.SelectedRows[0].DataBoundItem as CompareResult;
+        }
+
+        private static bool HasSolution(IEnumerable<ModelSolutionInfo> solutions, string uniqueName)
+        {
+            return !string.IsNullOrWhiteSpace(uniqueName) && solutions != null &&
+                solutions.Any(item => string.Equals(item.UniqueName, uniqueName,
+                StringComparison.OrdinalIgnoreCase));
+        }
+
+        private sealed class MembershipUiProgress
+        {
+            public MembershipUiProgress(string message) { Message = message ?? string.Empty; }
+            public string Message { get; }
         }
 
         private void BtnFilter_Click(object sender, EventArgs e)
@@ -1405,6 +1614,11 @@ namespace D365SolutionComparer
             }
 
             ShowRowDetails(rowData);
+        }
+
+        private void DgvResults_SelectionChanged(object sender, EventArgs e)
+        {
+            UpdateActionButtonStates();
         }
 
         private void BtnExport_Click(object sender, EventArgs e)

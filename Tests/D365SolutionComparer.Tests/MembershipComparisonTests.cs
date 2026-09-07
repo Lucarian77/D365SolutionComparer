@@ -79,6 +79,152 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void UnresolvedWorkflowDoesNotBlockColumnSourceOnly()
+        {
+            var column = Identity("activitypointer.regardingobjectid", 2, kind: ComponentSemanticKinds.Column);
+            var workflow = Identity(null, 29, IdentityResolutionStatus.Unresolved,
+                ComponentSemanticKinds.Process);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(column), Snapshot(workflow));
+
+            var columnResult = results.Single(result => result.Source == column);
+            Assert.AreEqual(MembershipPresence.OnlyInSource, columnResult.Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.CompleteResolvedInventory, columnResult.AbsenceEvidence);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                results.Single(result => result.Target == workflow).Presence);
+        }
+
+        [TestMethod]
+        public void UnresolvedColumnBlocksColumnSourceOnly()
+        {
+            var sourceColumn = Identity("activitypointer.regardingobjectid", 2,
+                kind: ComponentSemanticKinds.Column);
+            var targetColumn = Identity(null, 2, IdentityResolutionStatus.Unresolved,
+                ComponentSemanticKinds.Column);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(sourceColumn), Snapshot(targetColumn));
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                results.Single(result => result.Source == sourceColumn).Presence);
+        }
+
+        [TestMethod]
+        public void KnownUnsupportedUnrelatedTypeDoesNotBlockColumnAbsence()
+        {
+            var column = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var optionSet = Identity(null, 9, IdentityResolutionStatus.Unsupported);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(optionSet.SemanticKind));
+            Assert.AreNotEqual(ComponentSemanticKinds.Column, optionSet.SemanticKind);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(column), Snapshot(optionSet));
+
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                results.Single(result => result.Source == column).Presence);
+        }
+
+        [TestMethod]
+        public void UnresolvedRelationshipDoesNotBlockWebResourceAbsence()
+        {
+            var webResource = Identity("new_/script.js", 61, kind: ComponentSemanticKinds.WebResource);
+            var relationship = Identity(null, 10, IdentityResolutionStatus.Unresolved,
+                ComponentSemanticKinds.Relationship);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(webResource), Snapshot(relationship));
+
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                results.Single(result => result.Source == webResource).Presence);
+        }
+
+        [TestMethod]
+        public void DuplicateColumnKeysBecomeAmbiguousAndBlockColumnAbsence()
+        {
+            var sourceColumn = Identity("contact.emailaddress1", 2, kind: ComponentSemanticKinds.Column);
+            var firstTargetColumn = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var secondTargetColumn = Identity("ACCOUNT.NAME", 2, kind: ComponentSemanticKinds.Column);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(sourceColumn),
+                Snapshot(firstTargetColumn, secondTargetColumn));
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                results.Single(result => result.Source == sourceColumn).Presence);
+            Assert.IsTrue(results.Where(result => result.Target != null)
+                .All(result => result.Target.Status == IdentityResolutionStatus.Ambiguous));
+        }
+
+        [TestMethod]
+        public void AmbiguousWorkflowDoesNotBlockColumnAbsence()
+        {
+            var column = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var firstWorkflow = Identity("new_process", 29, kind: ComponentSemanticKinds.Process);
+            var secondWorkflow = Identity("NEW_PROCESS", 29, kind: ComponentSemanticKinds.Process);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(column),
+                Snapshot(firstWorkflow, secondWorkflow));
+
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                results.Single(result => result.Source == column).Presence);
+            Assert.IsTrue(results.Where(result => result.Target != null)
+                .All(result => result.Target.Status == IdentityResolutionStatus.Ambiguous));
+        }
+
+        [TestMethod]
+        public void SolutionAbsentProvidesUniversalAbsenceEvidenceForSupportedKinds()
+        {
+            var present = Snapshot(
+                Identity("account", 1, kind: ComponentSemanticKinds.Table),
+                Identity("account.name", 2, kind: ComponentSemanticKinds.Column),
+                Identity("account_contact", 10, kind: ComponentSemanticKinds.Relationship),
+                Identity("new_/script.js", 61, kind: ComponentSemanticKinds.WebResource),
+                Identity("new_process", 29, kind: ComponentSemanticKinds.Process),
+                Identity(Guid.NewGuid().ToString("D"), 20, kind: ComponentSemanticKinds.SecurityRole),
+                Identity("new_setting", 380, kind: ComponentSemanticKinds.EnvironmentVariableDefinition),
+                Identity("new_shared", 10027, kind: ComponentSemanticKinds.ConnectionReference));
+            var absent = MembershipSnapshot.Absent(Solution().Environment, "sample", DateTimeOffset.UtcNow);
+
+            var results = new SolutionMembershipComparer().Compare(present, absent);
+
+            Assert.AreEqual(8, results.Count);
+            Assert.IsTrue(results.All(result => result.Presence == MembershipPresence.OnlyInSource));
+            Assert.IsTrue(results.All(result =>
+                result.AbsenceEvidence == MembershipAbsenceEvidence.OppositeSolutionAbsent));
+        }
+
+        [TestMethod]
+        public void UnknownUnclassifiableRawTypeBlocksAbsenceConservatively()
+        {
+            var column = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var unknown = Identity(null, 98765, IdentityResolutionStatus.Unsupported);
+            Assert.IsNull(unknown.SemanticKind);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(column), Snapshot(unknown));
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                results.Single(result => result.Source == column).Presence);
+        }
+
+        [TestMethod]
+        public void OneSidedMixedKindsUseIndependentCoveragePerKind()
+        {
+            var table = Identity("account", 1, kind: ComponentSemanticKinds.Table);
+            var column = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var workflow = Identity(null, 29, IdentityResolutionStatus.Unresolved,
+                ComponentSemanticKinds.Process);
+            var webResource = Identity("new_/target.js", 61, kind: ComponentSemanticKinds.WebResource);
+
+            var results = new SolutionMembershipComparer().Compare(Snapshot(table, column),
+                Snapshot(workflow, webResource));
+
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                results.Single(result => result.Source == table).Presence);
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                results.Single(result => result.Source == column).Presence);
+            Assert.AreEqual(MembershipPresence.OnlyInTarget,
+                results.Single(result => result.Target == webResource).Presence);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                results.Single(result => result.Target == workflow).Presence);
+        }
+
+        [TestMethod]
         public void UnsupportedIdentityAgainstAbsentSolutionIsStillIndeterminate()
         {
             var source = Snapshot(Identity(null, 98765, IdentityResolutionStatus.Unsupported));

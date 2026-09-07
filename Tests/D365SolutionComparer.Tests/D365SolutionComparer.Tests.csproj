@@ -51,6 +51,8 @@
     <Compile Include="ComponentIdentityResolverTests.cs" />
     <Compile Include="MembershipComparisonTests.cs" />
     <Compile Include="MembershipPerformanceTests.cs" />
+    <Compile Include="MembershipPresentationTests.cs" />
+    <Compile Include="MembershipCoverageDiagnosticsTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

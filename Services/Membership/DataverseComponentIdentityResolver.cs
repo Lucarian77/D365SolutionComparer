@@ -20,17 +20,6 @@ namespace D365SolutionComparer.Services.Membership
     {
         private const int BatchSize = 200;
 
-        // Published componenttype choices already assigned to non-Connection-Reference kinds.
-        private static readonly HashSet<int> KnownNonConnectionReferenceTypes = new HashSet<int>
-        {
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18,
-            20, 21, 22, 23, 24, 25, 26, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39,
-            44, 45, 46, 47, 48, 49, 50, 52, 53, 55, 59, 60, 61, 62, 63, 64, 65, 66, 68,
-            70, 71, 90, 91, 92, 93, 95, 150, 151, 152, 153, 154, 155, 161, 162, 165, 166,
-            201, 202, 203, 204, 205, 206, 207, 208, 210, 300, 371, 372, 380, 381,
-            400, 401, 402, 430, 431, 432
-        };
-
         public ComponentIdentity Resolve(IOrganizationService service, EnvironmentIdentity environment,
             SolutionComponentRecord component, CancellationToken cancellationToken)
         {
@@ -75,6 +64,8 @@ namespace D365SolutionComparer.Services.Membership
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
+            private readonly Dictionary<int, DefinitionMapping> definitionMappings =
+                new Dictionary<int, DefinitionMapping>();
             private bool connectionMappingLoaded;
             private int? connectionTypeCode;
             private string connectionMappingDiagnostic;
@@ -85,6 +76,7 @@ namespace D365SolutionComparer.Services.Membership
             public ComponentIdentity Resolve(SolutionComponentRecord record, CancellationToken cancellationToken)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                PrepareClassifications(new[] { record }, cancellationToken);
                 string kind;
                 var immediate = Classify(record, cancellationToken, out kind);
                 if (immediate != null) return immediate;
@@ -101,6 +93,7 @@ namespace D365SolutionComparer.Services.Membership
             public IReadOnlyList<ComponentIdentity> ResolveAll(IReadOnlyList<ComponentIdentity> components,
                 CancellationToken cancellationToken)
             {
+                PrepareClassifications(components.Select(item => item.Record), cancellationToken);
                 var results = new ComponentIdentity[components.Count];
                 var pending = new List<PendingRecord>();
                 var unique = new HashSet<LookupKey>();
@@ -156,18 +149,29 @@ namespace D365SolutionComparer.Services.Membership
                         return Unknown(record, IdentityResolutionStatus.Unsupported,
                             "This relationship component type is not supported in Phase 2A.");
                     default:
-                        if (KnownNonConnectionReferenceTypes.Contains(record.ComponentType))
+                        if (ComponentSemanticKinds.IsKnownBuiltInType(record.ComponentType))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
                                 "No identity resolver supports this known component type.");
-                        LoadConnectionMapping();
                         cancellationToken.ThrowIfCancellationRequested();
-                        if (connectionMappingDiagnostic != null)
-                            return Unknown(record, connectionMappingStatus, connectionMappingDiagnostic);
-                        if (!connectionTypeCode.HasValue || connectionTypeCode.Value != record.ComponentType)
+                        if (connectionMappingDiagnostic == null && connectionTypeCode.HasValue &&
+                            connectionTypeCode.Value == record.ComponentType)
+                        {
+                            kind = "connectionreference";
+                            break;
+                        }
+                        DefinitionMapping mapping;
+                        if (!definitionMappings.TryGetValue(record.ComponentType, out mapping))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
                                 "No identity resolver supports this component type.");
-                        kind = "connectionreference";
-                        break;
+                        if (mapping.Definition != null)
+                            return new ComponentIdentity(record, IdentityResolutionStatus.Unsupported,
+                                diagnostic: "No portable identity resolver supports registered solution-component family '" +
+                                    mapping.Definition.Name + "'.",
+                                semanticKind: mapping.Definition.SemanticKind,
+                                registeredDefinition: mapping.Definition);
+                        if (connectionMappingDiagnostic != null)
+                            return Unknown(record, connectionMappingStatus, connectionMappingDiagnostic);
+                        return Unknown(record, mapping.Status, mapping.Diagnostic);
                 }
                 if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
                     return Unknown(record, IdentityResolutionStatus.Unresolved,
@@ -254,10 +258,11 @@ namespace D365SolutionComparer.Services.Membership
                         var query = new EntityQueryExpression
                         {
                             Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
-                            Criteria = new MetadataFilterExpression(LogicalOperator.And)
+                            Criteria = new MetadataFilterExpression(LogicalOperator.Or)
                         };
-                        query.Criteria.Conditions.Add(new MetadataConditionExpression("MetadataId",
-                            MetadataConditionOperator.In, batch.Select(item => item.ObjectId).Cast<object>().ToArray()));
+                        foreach (var key in batch)
+                            query.Criteria.Conditions.Add(new MetadataConditionExpression("MetadataId",
+                                MetadataConditionOperator.Equals, key.ObjectId));
                         var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
                             as RetrieveMetadataChangesResponse;
                         var metadata = response?.EntityMetadata ?? new EntityMetadataCollection();
@@ -371,6 +376,110 @@ namespace D365SolutionComparer.Services.Membership
                     yield return items.Skip(offset).Take(Math.Min(BatchSize, items.Count - offset)).ToList();
             }
 
+            private void PrepareClassifications(IEnumerable<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                var broadTypes = records.Select(item => item.ComponentType)
+                    .Where(type => !ComponentSemanticKinds.IsKnownBuiltInType(type))
+                    .Distinct().OrderBy(type => type).ToList();
+                if (broadTypes.Count == 0) return;
+                LoadConnectionMapping();
+                cancellationToken.ThrowIfCancellationRequested();
+                var definitionTypes = broadTypes.Where(type => !connectionTypeCode.HasValue ||
+                    connectionTypeCode.Value != type).ToList();
+                LoadDefinitionMappings(definitionTypes, cancellationToken);
+            }
+
+            private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
+                CancellationToken cancellationToken)
+            {
+                var missing = componentTypes.Where(type => !definitionMappings.ContainsKey(type)).ToList();
+                if (missing.Count == 0) return;
+                foreach (var type in missing)
+                    definitionMappings[type] = DefinitionMapping.Unsupported(
+                        "No registered solution-component definition was found for this component type.");
+                try
+                {
+                    var query = new QueryExpression("solutioncomponentdefinition")
+                    {
+                        ColumnSet = new ColumnSet("objecttypecode", "name", "primaryentityname")
+                    };
+                    query.Criteria.AddCondition(new ConditionExpression("objecttypecode", ConditionOperator.In,
+                        missing.Select(type => (object)type).ToArray()));
+                    var rows = context.Query(query);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (rows.MoreRecords)
+                    {
+                        SetDefinitionMappings(missing, DefinitionMapping.Ambiguous(
+                            "Registered solution-component definition discovery returned an incomplete result set."));
+                        return;
+                    }
+
+                    var returned = new List<KeyValuePair<int, Entity>>();
+                    foreach (var row in rows.Entities)
+                    {
+                        var type = ReadObjectTypeCode(row);
+                        if (!type.HasValue || !missing.Contains(type.Value))
+                        {
+                            SetDefinitionMappings(missing, DefinitionMapping.Ambiguous(
+                                "Registered solution-component definition discovery returned conflicting or incomplete data."));
+                            return;
+                        }
+                        returned.Add(new KeyValuePair<int, Entity>(type.Value, row));
+                    }
+
+                    foreach (var type in missing)
+                    {
+                        var matches = returned.Where(item => item.Key == type).Select(item => item.Value).ToList();
+                        if (matches.Count > 1)
+                        {
+                            definitionMappings[type] = DefinitionMapping.Ambiguous(
+                                "Multiple registered solution-component definitions use this component type.");
+                            continue;
+                        }
+                        if (matches.Count == 0) continue;
+                        var name = matches[0].GetAttributeValue<string>("name");
+                        var primaryEntityName = matches[0].GetAttributeValue<string>("primaryentityname");
+                        if (string.IsNullOrWhiteSpace(name))
+                        {
+                            definitionMappings[type] = DefinitionMapping.Unresolved(
+                                "The registered solution-component definition has no stable name.");
+                            continue;
+                        }
+                        if (string.Equals(primaryEntityName, "connectionreference",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            definitionMappings[type] = DefinitionMapping.Ambiguous(
+                                "A registered definition conflicts with Connection Reference type discovery.");
+                            continue;
+                        }
+                        definitionMappings[type] = DefinitionMapping.Registered(
+                            new SolutionComponentDefinitionIdentity(type, name, primaryEntityName));
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (FaultException ex)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    SetDefinitionMappings(missing, DefinitionMapping.Unresolved(
+                        "Registered solution-component definition discovery failed: " + ex.Message));
+                }
+            }
+
+            private void SetDefinitionMappings(IEnumerable<int> componentTypes, DefinitionMapping mapping)
+            {
+                foreach (var type in componentTypes) definitionMappings[type] = mapping;
+            }
+
+            private static int? ReadObjectTypeCode(Entity entity)
+            {
+                object value;
+                if (!entity.Attributes.TryGetValue("objecttypecode", out value) || value == null) return null;
+                var option = value as OptionSetValue;
+                if (option != null) return option.Value;
+                return value is int ? (int?)value : null;
+            }
+
             private void LoadConnectionMapping()
             {
                 if (connectionMappingLoaded) return;
@@ -393,7 +502,7 @@ namespace D365SolutionComparer.Services.Membership
                         connectionTypeCode = rows.Entities[0].GetAttributeValue<int?>("objecttypecode");
                         if (!connectionTypeCode.HasValue)
                             connectionMappingDiagnostic = "Connection-reference component type mapping is incomplete.";
-                        else if (KnownNonConnectionReferenceTypes.Contains(connectionTypeCode.Value))
+                        else if (ComponentSemanticKinds.IsKnownBuiltInType(connectionTypeCode.Value))
                         {
                             connectionMappingStatus = IdentityResolutionStatus.Ambiguous;
                             connectionMappingDiagnostic = "Connection-reference component type mapping conflicts with a known non-Connection-Reference component type.";
@@ -410,6 +519,28 @@ namespace D365SolutionComparer.Services.Membership
             private static ComponentIdentity Unknown(SolutionComponentRecord record, IdentityResolutionStatus status,
                 string diagnostic, string kind = null) =>
                 new ComponentIdentity(record, status, diagnostic: diagnostic, componentTypeKey: kind);
+
+            private sealed class DefinitionMapping
+            {
+                private DefinitionMapping(IdentityResolutionStatus status, string diagnostic,
+                    SolutionComponentDefinitionIdentity definition)
+                {
+                    Status = status;
+                    Diagnostic = diagnostic;
+                    Definition = definition;
+                }
+                public IdentityResolutionStatus Status { get; }
+                public string Diagnostic { get; }
+                public SolutionComponentDefinitionIdentity Definition { get; }
+                public static DefinitionMapping Registered(SolutionComponentDefinitionIdentity definition) =>
+                    new DefinitionMapping(IdentityResolutionStatus.Unsupported, null, definition);
+                public static DefinitionMapping Unsupported(string diagnostic) =>
+                    new DefinitionMapping(IdentityResolutionStatus.Unsupported, diagnostic, null);
+                public static DefinitionMapping Unresolved(string diagnostic) =>
+                    new DefinitionMapping(IdentityResolutionStatus.Unresolved, diagnostic, null);
+                public static DefinitionMapping Ambiguous(string diagnostic) =>
+                    new DefinitionMapping(IdentityResolutionStatus.Ambiguous, diagnostic, null);
+            }
 
             private sealed class PendingRecord
             {

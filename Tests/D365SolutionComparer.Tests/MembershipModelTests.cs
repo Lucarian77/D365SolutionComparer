@@ -48,6 +48,46 @@ namespace D365SolutionComparer.Tests
         }
 
         [DataTestMethod]
+        [DataRow(1, ComponentSemanticKinds.Table)]
+        [DataRow(2, ComponentSemanticKinds.Column)]
+        [DataRow(3, ComponentSemanticKinds.Relationship)]
+        [DataRow(8, ComponentSemanticKinds.Relationship)]
+        [DataRow(10, ComponentSemanticKinds.Relationship)]
+        [DataRow(11, ComponentSemanticKinds.Relationship)]
+        [DataRow(12, ComponentSemanticKinds.Relationship)]
+        [DataRow(61, ComponentSemanticKinds.WebResource)]
+        [DataRow(29, ComponentSemanticKinds.Process)]
+        [DataRow(20, ComponentSemanticKinds.SecurityRole)]
+        [DataRow(380, ComponentSemanticKinds.EnvironmentVariableDefinition)]
+        public void RawComponentTypeProvidesSemanticKindWithoutAResolvedPortableIdentity(int componentType,
+            string expectedKind)
+        {
+            var identity = new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), componentType, Guid.NewGuid()),
+                IdentityResolutionStatus.Unresolved);
+
+            Assert.AreEqual(expectedKind, identity.SemanticKind);
+        }
+
+        [TestMethod]
+        public void KnownUnsupportedAndUnknownRawTypesHaveDifferentCoverageScopes()
+        {
+            var knownUnsupported = new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 9, Guid.NewGuid()),
+                IdentityResolutionStatus.Unsupported);
+            var unknown = new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 98765, Guid.NewGuid()),
+                IdentityResolutionStatus.Unsupported);
+            var dynamicConnectionReference = new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 10027, Guid.NewGuid()),
+                IdentityResolutionStatus.Unresolved, componentTypeKey: ComponentSemanticKinds.ConnectionReference);
+
+            Assert.AreEqual("unsupported:componenttype:9", knownUnsupported.SemanticKind);
+            Assert.IsNull(unknown.SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.ConnectionReference, dynamicConnectionReference.SemanticKind);
+        }
+
+        [DataTestMethod]
         [DataRow(IdentityResolutionStatus.Unresolved)]
         [DataRow(IdentityResolutionStatus.Unsupported)]
         [DataRow(IdentityResolutionStatus.Ambiguous)]

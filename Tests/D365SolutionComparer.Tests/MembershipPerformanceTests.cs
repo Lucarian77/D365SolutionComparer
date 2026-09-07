@@ -126,10 +126,14 @@ namespace D365SolutionComparer.Tests
             {
                 if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
                 var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                var condition = metadataRequest.Query.Criteria.Conditions.Single();
-                Assert.AreEqual("MetadataId", condition.PropertyName);
-                Assert.AreEqual(MetadataConditionOperator.In, condition.ConditionOperator);
-                CollectionAssert.AreEquivalent(new object[] { firstId, secondId }, (object[])condition.Value);
+                Assert.AreEqual(LogicalOperator.Or, metadataRequest.Query.Criteria.FilterOperator);
+                Assert.AreEqual(2, metadataRequest.Query.Criteria.Conditions.Count);
+                Assert.IsTrue(metadataRequest.Query.Criteria.Conditions.All(condition =>
+                    condition.PropertyName == "MetadataId" &&
+                    condition.ConditionOperator == MetadataConditionOperator.Equals &&
+                    condition.Value != null && condition.Value.GetType() == typeof(Guid)));
+                CollectionAssert.AreEquivalent(new[] { firstId, secondId }, metadataRequest.Query.Criteria.Conditions
+                    .Select(condition => (Guid)condition.Value).ToArray());
                 var response = new RetrieveMetadataChangesResponse();
                 response.Results["EntityMetadata"] = new EntityMetadataCollection
                 {
@@ -144,6 +148,42 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(2, service.ExecuteCalls);
             CollectionAssert.AreEqual(new[] { "account", "account", "contact" },
                 result.Components.Select(item => item.ComparisonKey).ToArray());
+        }
+
+        [TestMethod]
+        public void GroupedTableMetadataRetainsBatchSizeWithGuidEqualityConditions()
+        {
+            var solution = Solution();
+            var ids = Enumerable.Range(0, 201).Select(index => Guid.NewGuid()).ToArray();
+            var batchSizes = new List<int>();
+            var service = Service(solution);
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                var metadataRequest = (RetrieveMetadataChangesRequest)request;
+                Assert.AreEqual(LogicalOperator.Or, metadataRequest.Query.Criteria.FilterOperator);
+                Assert.IsTrue(metadataRequest.Query.Criteria.Conditions.All(condition =>
+                    condition.PropertyName == "MetadataId" &&
+                    condition.ConditionOperator == MetadataConditionOperator.Equals &&
+                    condition.Value != null && condition.Value.GetType() == typeof(Guid)));
+                var requestedIds = metadataRequest.Query.Criteria.Conditions
+                    .Select(condition => (Guid)condition.Value).ToArray();
+                batchSizes.Add(requestedIds.Length);
+                var response = new RetrieveMetadataChangesResponse();
+                var metadata = new EntityMetadataCollection();
+                metadata.AddRange(requestedIds.Select(id => new EntityMetadata
+                    { MetadataId = id, LogicalName = "table_" + id.ToString("N") }));
+                response.Results["EntityMetadata"] = metadata;
+                return response;
+            };
+            var snapshot = MembershipSnapshot.Complete(solution, ids.Select(id =>
+                new ComponentIdentity(Record(1, id), IdentityResolutionStatus.Unresolved)), DateTimeOffset.UtcNow);
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service, snapshot,
+                CancellationToken.None);
+            CollectionAssert.AreEquivalent(new[] { 200, 1 }, batchSizes);
+            Assert.AreEqual(201, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Resolved));
+            Assert.AreEqual(3, service.ExecuteCalls);
         }
 
         [TestMethod]
@@ -231,10 +271,11 @@ namespace D365SolutionComparer.Tests
             if (request is RetrieveMetadataChangesRequest)
             {
                 var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                var ids = (object[])metadataRequest.Query.Criteria.Conditions.Single().Value;
+                var ids = metadataRequest.Query.Criteria.Conditions.Select(condition =>
+                    (Guid)condition.Value).ToArray();
                 var response = new RetrieveMetadataChangesResponse();
                 var metadata = new EntityMetadataCollection();
-                metadata.AddRange(ids.Cast<Guid>().Select(id => new EntityMetadata
+                metadata.AddRange(ids.Select(id => new EntityMetadata
                 {
                     MetadataId = id,
                     LogicalName = "table_" + id.ToString("N")

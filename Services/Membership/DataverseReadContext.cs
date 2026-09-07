@@ -17,15 +17,32 @@ namespace D365SolutionComparer.Services.Membership
 
         public DataverseReadContext(IOrganizationService service, EnvironmentIdentity environment, CancellationToken cancellationToken,
             DataverseRequestCounter requestCounter = null)
+            : this(service, cancellationToken, requestCounter)
         {
-            this.service = service ?? throw new ArgumentNullException(nameof(service));
             if (environment == null) throw new ArgumentNullException(nameof(environment));
             Environment = environment;
-            this.cancellationToken = cancellationToken;
-            this.requestCounter = requestCounter;
             var response = Execute(new WhoAmIRequest()) as WhoAmIResponse;
             if (response == null || response.OrganizationId != environment.OrganizationId)
                 throw new InvalidOperationException("The service does not identify the captured environment.");
+        }
+
+        /// <summary>Captures the service's real organization identity with the same single verification request.</summary>
+        public DataverseReadContext(IOrganizationService service, string environmentDisplayName,
+            CancellationToken cancellationToken, DataverseRequestCounter requestCounter = null)
+            : this(service, cancellationToken, requestCounter)
+        {
+            var response = Execute(new WhoAmIRequest()) as WhoAmIResponse;
+            if (response == null || response.OrganizationId == Guid.Empty)
+                throw new InvalidOperationException("The service did not return a valid organization identity.");
+            Environment = new EnvironmentIdentity(response.OrganizationId, environmentDisplayName);
+        }
+
+        private DataverseReadContext(IOrganizationService service, CancellationToken cancellationToken,
+            DataverseRequestCounter requestCounter)
+        {
+            this.service = service ?? throw new ArgumentNullException(nameof(service));
+            this.cancellationToken = cancellationToken;
+            this.requestCounter = requestCounter;
         }
 
         public EnvironmentIdentity Environment { get; }

@@ -82,7 +82,10 @@
     <Compile Include="Models\Identity\EnvironmentIdentity.cs" />
     <Compile Include="Models\Identity\SolutionIdentity.cs" />
     <Compile Include="Models\Membership\SolutionComponentRecord.cs" />
+    <Compile Include="Models\Membership\ComponentSemanticKindCatalog.cs" />
+    <Compile Include="Models\Membership\SolutionComponentDefinitionIdentity.cs" />
     <Compile Include="Models\Membership\ComponentIdentity.cs" />
+    <Compile Include="Models\Membership\MembershipCoverageDiagnostics.cs" />
     <Compile Include="Models\Membership\MembershipSnapshot.cs" />
     <Compile Include="Models\Membership\MembershipCompareResult.cs" />
     <Compile Include="Services\Contracts\ISolutionMembershipReader.cs" />
@@ -91,11 +94,22 @@
     <Compile Include="Infrastructure\DataversePagedReader.cs" />
     <Compile Include="Infrastructure\RetrievalProgress.cs" />
     <Compile Include="Infrastructure\DataverseRequestCounter.cs" />
+    <Compile Include="Infrastructure\MembershipOperationProgress.cs" />
     <Compile Include="Services\Membership\DataverseReadContext.cs" />
     <Compile Include="Services\Membership\DataverseSolutionMembershipReader.cs" />
     <Compile Include="Services\Membership\DataverseComponentIdentityResolver.cs" />
     <Compile Include="Services\Membership\SolutionMembershipComparer.cs" />
     <Compile Include="Services\Membership\DataverseSolutionMembershipOperation.cs" />
+    <Compile Include="Services\Membership\MembershipCompareCommandEvaluator.cs" />
+    <Compile Include="Services\Membership\MembershipResultPresenter.cs" />
+    <Compile Include="Services\Membership\MembershipCoverageDiagnosticsBuilder.cs" />
+    <Compile Include="Models\Membership\MembershipPresentation.cs" />
+    <Compile Include="MembershipResultsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="MembershipCoverageDetailsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
   </ItemGroup>
   <ItemGroup>
     <WCFMetadata Include="Connected Services\" />

@@ -17,8 +17,8 @@ namespace D365SolutionComparer.Services.Membership
                 throw new ArgumentException("Membership snapshots must refer to the same solution Unique Name.");
             var sourceItems = MarkDuplicates(source.Components);
             var targetItems = MarkDuplicates(target.Components);
-            bool sourceFullyResolved = sourceItems.All(IsResolved);
-            bool targetFullyResolved = targetItems.All(IsResolved);
+            var sourceCoverage = IdentityCoverage.From(sourceItems);
+            var targetCoverage = IdentityCoverage.From(targetItems);
             var targetLookup = targetItems.Where(IsResolved).ToDictionary(Key, StringComparer.OrdinalIgnoreCase);
             var usedTargets = new HashSet<ComponentIdentity>();
             var results = new List<MembershipCompareResult>();
@@ -30,24 +30,25 @@ namespace D365SolutionComparer.Services.Membership
                     usedTargets.Add(match);
                     results.Add(new MembershipCompareResult(item, match, MembershipPresence.PresentInBoth));
                 }
-                else results.Add(Unmatched(item, true, target.State, targetFullyResolved));
+                else results.Add(Unmatched(item, true, target.State, targetCoverage));
             }
             foreach (var item in targetItems.Where(i => !usedTargets.Contains(i)))
-                results.Add(Unmatched(item, false, source.State, sourceFullyResolved));
+                results.Add(Unmatched(item, false, source.State, sourceCoverage));
             return results.OrderBy(r => (r.Source ?? r.Target).ComponentTypeKey, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => (r.Source ?? r.Target).ComparisonKey, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(r => (r.Source ?? r.Target).Record.SolutionComponentId).ToList().AsReadOnly();
         }
 
         private static MembershipCompareResult Unmatched(ComponentIdentity item, bool source,
-            MembershipSnapshotState oppositeState, bool oppositeFullyResolved)
+            MembershipSnapshotState oppositeState, IdentityCoverage oppositeCoverage)
         {
             var evidence = MembershipAbsenceEvidence.None;
             if (IsResolved(item))
             {
                 if (oppositeState == MembershipSnapshotState.SolutionAbsent)
                     evidence = MembershipAbsenceEvidence.OppositeSolutionAbsent;
-                else if (oppositeState == MembershipSnapshotState.Complete && oppositeFullyResolved)
+                else if (oppositeState == MembershipSnapshotState.Complete &&
+                    oppositeCoverage.IsComplete(item.SemanticKind))
                     evidence = MembershipAbsenceEvidence.CompleteResolvedInventory;
             }
             var presence = evidence == MembershipAbsenceEvidence.None ? MembershipPresence.Indeterminate
@@ -62,7 +63,34 @@ namespace D365SolutionComparer.Services.Membership
             return items.Select(i => IsResolved(i) && duplicates.Contains(Key(i))
                 ? new ComponentIdentity(i.Record, IdentityResolutionStatus.Ambiguous,
                     diagnostic: "Multiple membership records resolve to the same identity key: " + i.ComparisonKey,
-                    componentTypeKey: i.ComponentTypeKey) : i).ToList().AsReadOnly();
+                    componentTypeKey: i.ComponentTypeKey, semanticKind: i.SemanticKind) : i).ToList().AsReadOnly();
+        }
+
+        private sealed class IdentityCoverage
+        {
+            private readonly bool blocksAllKinds;
+            private readonly HashSet<string> incompleteKinds;
+
+            private IdentityCoverage(bool blocksAllKinds, HashSet<string> incompleteKinds)
+            {
+                this.blocksAllKinds = blocksAllKinds;
+                this.incompleteKinds = incompleteKinds;
+            }
+
+            public static IdentityCoverage From(IEnumerable<ComponentIdentity> items)
+            {
+                bool blocksAll = false;
+                var incomplete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var item in items)
+                {
+                    if (string.IsNullOrWhiteSpace(item.SemanticKind)) blocksAll = true;
+                    else if (!IsResolved(item)) incomplete.Add(item.SemanticKind);
+                }
+                return new IdentityCoverage(blocksAll, incomplete);
+            }
+
+            public bool IsComplete(string semanticKind) => !blocksAllKinds &&
+                !string.IsNullOrWhiteSpace(semanticKind) && !incompleteKinds.Contains(semanticKind);
         }
 
         private static bool IsResolved(ComponentIdentity identity) => identity.Status == IdentityResolutionStatus.Resolved;
