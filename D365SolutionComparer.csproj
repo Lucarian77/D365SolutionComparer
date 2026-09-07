@@ -79,6 +79,17 @@
     </Compile>
     <Compile Include="AssemblyInfo.cs" />
     <Compile Include="Settings.cs" />
+    <Compile Include="Models\Identity\EnvironmentIdentity.cs" />
+    <Compile Include="Models\Identity\SolutionIdentity.cs" />
+    <Compile Include="Models\Membership\SolutionComponentRecord.cs" />
+    <Compile Include="Models\Membership\ComponentIdentity.cs" />
+    <Compile Include="Models\Membership\MembershipSnapshot.cs" />
+    <Compile Include="Models\Membership\MembershipCompareResult.cs" />
+    <Compile Include="Services\Contracts\ISolutionMembershipReader.cs" />
+    <Compile Include="Services\Contracts\IComponentIdentityResolver.cs" />
+    <Compile Include="Services\Contracts\ISolutionMembershipComparer.cs" />
+    <Compile Include="Infrastructure\DataversePagedReader.cs" />
+    <Compile Include="Infrastructure\RetrievalProgress.cs" />
   </ItemGroup>
   <ItemGroup>
     <WCFMetadata Include="Connected Services\" />
