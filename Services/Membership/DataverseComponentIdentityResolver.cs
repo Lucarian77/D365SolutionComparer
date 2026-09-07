@@ -66,6 +66,7 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<LookupKey, ResolutionValue>();
             private readonly Dictionary<int, DefinitionMapping> definitionMappings =
                 new Dictionary<int, DefinitionMapping>();
+            private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private bool connectionMappingLoaded;
             private int? connectionTypeCode;
             private string connectionMappingDiagnostic;
@@ -388,6 +389,10 @@ namespace D365SolutionComparer.Services.Membership
                 var definitionTypes = broadTypes.Where(type => !connectionTypeCode.HasValue ||
                     connectionTypeCode.Value != type).ToList();
                 LoadDefinitionMappings(definitionTypes, cancellationToken);
+                LoadEntityMetadataDiagnostics(definitionTypes.Where(type =>
+                    definitionMappings[type].Definition == null &&
+                    definitionMappings[type].Status == IdentityResolutionStatus.Unsupported).ToList(),
+                    cancellationToken);
             }
 
             private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
@@ -466,6 +471,85 @@ namespace D365SolutionComparer.Services.Membership
                 }
             }
 
+            private void LoadEntityMetadataDiagnostics(IReadOnlyList<int> componentTypes,
+                CancellationToken cancellationToken)
+            {
+                var missing = componentTypes.Where(type => !metadataDiagnosticsLoaded.Contains(type))
+                    .Distinct().OrderBy(type => type).ToList();
+                foreach (var type in missing) metadataDiagnosticsLoaded.Add(type);
+                for (int offset = 0; offset < missing.Count; offset += BatchSize)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var batch = missing.Skip(offset).Take(Math.Min(BatchSize, missing.Count - offset)).ToList();
+                    try
+                    {
+                        var query = new EntityQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression(
+                                "ObjectTypeCode", "LogicalName", "SchemaName"),
+                            Criteria = new MetadataFilterExpression(LogicalOperator.Or)
+                        };
+                        foreach (var type in batch)
+                            query.Criteria.Conditions.Add(new MetadataConditionExpression("ObjectTypeCode",
+                                MetadataConditionOperator.Equals, type));
+                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
+                            as RetrieveMetadataChangesResponse;
+                        var metadata = response?.EntityMetadata ?? new EntityMetadataCollection();
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (metadata.Any(item => !item.ObjectTypeCode.HasValue ||
+                            !batch.Contains(item.ObjectTypeCode.Value)))
+                        {
+                            AppendMetadataDiagnostic(batch,
+                                "Entity metadata diagnostic discovery returned conflicting or incomplete ObjectTypeCode data.");
+                            continue;
+                        }
+                        foreach (var type in batch)
+                        {
+                            var matches = metadata.Where(item => item.ObjectTypeCode == type).ToList();
+                            if (matches.Count == 0)
+                                AppendMetadataDiagnostic(type,
+                                    "No entity metadata candidate was found for ObjectTypeCode " +
+                                    type.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".");
+                            else if (matches.Count == 1)
+                                AppendMetadataDiagnostic(type, "Entity metadata candidate: " +
+                                    DescribeMetadata(matches[0]) +
+                                    ". Diagnostic evidence only; no semantic classification was assigned.");
+                            else
+                                AppendMetadataDiagnostic(type,
+                                    "Multiple entity metadata candidates use this ObjectTypeCode: " +
+                                    string.Join(" | ", matches.Select(DescribeMetadata)) + ".");
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        AppendMetadataDiagnostic(batch,
+                            "Entity metadata diagnostic discovery failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private void AppendMetadataDiagnostic(IEnumerable<int> componentTypes, string diagnostic)
+            {
+                foreach (var type in componentTypes) AppendMetadataDiagnostic(type, diagnostic);
+            }
+
+            private void AppendMetadataDiagnostic(int componentType, string diagnostic)
+            {
+                definitionMappings[componentType] = definitionMappings[componentType]
+                    .AppendDiagnostic(diagnostic);
+            }
+
+            private static string DescribeMetadata(EntityMetadata metadata)
+            {
+                return "ObjectTypeCode=" + (metadata.ObjectTypeCode.HasValue
+                        ? metadata.ObjectTypeCode.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        : "(missing)") +
+                    ", LogicalName='" + (metadata.LogicalName ?? "(missing)") +
+                    "', SchemaName='" + (metadata.SchemaName ?? "(missing)") + "'";
+            }
+
             private void SetDefinitionMappings(IEnumerable<int> componentTypes, DefinitionMapping mapping)
             {
                 foreach (var type in componentTypes) definitionMappings[type] = mapping;
@@ -540,6 +624,10 @@ namespace D365SolutionComparer.Services.Membership
                     new DefinitionMapping(IdentityResolutionStatus.Unresolved, diagnostic, null);
                 public static DefinitionMapping Ambiguous(string diagnostic) =>
                     new DefinitionMapping(IdentityResolutionStatus.Ambiguous, diagnostic, null);
+                public DefinitionMapping AppendDiagnostic(string diagnostic) =>
+                    new DefinitionMapping(Status,
+                        string.IsNullOrEmpty(Diagnostic) ? diagnostic : Diagnostic + " " + diagnostic,
+                        Definition);
             }
 
             private sealed class PendingRecord

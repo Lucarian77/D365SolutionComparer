@@ -9,6 +9,8 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Metadata.Query;
+using Microsoft.Xrm.Sdk.Query;
 using static D365SolutionComparer.Tests.MembershipTestData;
 
 namespace D365SolutionComparer.Tests
@@ -173,6 +175,8 @@ namespace D365SolutionComparer.Tests
                 }
                 return Rows();
             });
+            service.ExecuteRequest = request => request is WhoAmIRequest
+                ? (OrganizationResponse)WhoAmI(solution.Environment.OrganizationId) : MetadataRows();
             var input = MembershipSnapshot.Complete(solution, new[] { new ComponentIdentity(first, IdentityResolutionStatus.Unresolved),
                 new ComponentIdentity(second, IdentityResolutionStatus.Unresolved) }, DateTimeOffset.UtcNow);
             var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service, input, CancellationToken.None);
@@ -313,6 +317,126 @@ namespace D365SolutionComparer.Tests
                 Assert.ThrowsException<OperationCanceledException>(() =>
                     new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                         Identity(null, type, IdentityResolutionStatus.Unresolved).Record, cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void BroadTypesCollectGroupedEntityMetadataDiagnosticsWithoutChangingClassification()
+        {
+            var solution = Solution();
+            var records = new[]
+            {
+                Identity(null, 80, IdentityResolutionStatus.Unresolved),
+                Identity(null, 80, IdentityResolutionStatus.Unresolved),
+                Identity(null, 511, IdentityResolutionStatus.Unresolved)
+            };
+            int metadataQueries = 0;
+            var service = Service(solution, query => Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                metadataQueries++;
+                var metadataRequest = (RetrieveMetadataChangesRequest)request;
+                CollectionAssert.AreEquivalent(new[] { "ObjectTypeCode", "LogicalName", "SchemaName" },
+                    metadataRequest.Query.Properties.PropertyNames.ToArray());
+                Assert.AreEqual(LogicalOperator.Or, metadataRequest.Query.Criteria.FilterOperator);
+                Assert.AreEqual(2, metadataRequest.Query.Criteria.Conditions.Count);
+                Assert.IsTrue(metadataRequest.Query.Criteria.Conditions.All(condition =>
+                    condition.PropertyName == "ObjectTypeCode" &&
+                    condition.ConditionOperator == MetadataConditionOperator.Equals &&
+                    condition.Value != null && condition.Value.GetType() == typeof(int)));
+                CollectionAssert.AreEquivalent(new[] { 80, 511 }, metadataRequest.Query.Criteria.Conditions
+                    .Select(condition => (int)condition.Value).ToArray());
+                return MetadataRows(EntityMetadata(80, "sample_type_80", "SampleType80"),
+                    EntityMetadata(511, "sample_type_511", "SampleType511"));
+            };
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            Assert.AreEqual(1, metadataQueries);
+            Assert.AreEqual(3, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported));
+            Assert.IsTrue(result.Components.All(item => item.SemanticKind == null));
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.Where(item => item.Record.ComponentType == 80).All(item =>
+                item.Diagnostic.Contains("sample_type_80") && item.Diagnostic.Contains("SampleType80")));
+            StringAssert.Contains(result.Components.Single(item => item.Record.ComponentType == 511).Diagnostic,
+                "sample_type_511");
+
+            var sourceColumn = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+            var comparison = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(Solution(), new[] { sourceColumn }, DateTimeOffset.UtcNow), result);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                comparison.Single(item => item.Source == sourceColumn).Presence);
+        }
+
+        [TestMethod]
+        public void MissingEntityMetadataCandidateIsReportedAndRemainsBroad()
+        {
+            var solution = Solution(); var service = Service(solution, query => Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                return MetadataRows();
+            };
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                Identity(null, 80, IdentityResolutionStatus.Unresolved).Record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            StringAssert.Contains(result.Diagnostic, "No entity metadata candidate");
+            StringAssert.Contains(result.Diagnostic, "ObjectTypeCode 80");
+        }
+
+        [TestMethod]
+        public void MultipleEntityMetadataCandidatesAreReportedWithoutClassification()
+        {
+            var solution = Solution(); var service = Service(solution, query => Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                return MetadataRows(EntityMetadata(511, "first", "First"),
+                    EntityMetadata(511, "second", "Second"));
+            };
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                Identity(null, 511, IdentityResolutionStatus.Unresolved).Record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            StringAssert.Contains(result.Diagnostic, "Multiple entity metadata candidates");
+            StringAssert.Contains(result.Diagnostic, "first");
+            StringAssert.Contains(result.Diagnostic, "second");
+        }
+
+        [TestMethod]
+        public void EntityMetadataDiagnosticFaultAndCancellationRemainConservative()
+        {
+            var solution = Solution();
+            var faulted = Service(solution, query => Rows());
+            faulted.ExecuteRequest = request => request is WhoAmIRequest
+                ? WhoAmI(solution.Environment.OrganizationId) : throw new FaultException("Metadata denied");
+            var faultedResult = new DataverseComponentIdentityResolver().Resolve(faulted,
+                solution.Environment, Identity(null, 80, IdentityResolutionStatus.Unresolved).Record,
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faultedResult.Status);
+            Assert.IsNull(faultedResult.SemanticKind);
+            StringAssert.Contains(faultedResult.Diagnostic, "Metadata denied");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var cancelled = Service(solution, query => Rows());
+                cancelled.ExecuteRequest = request =>
+                {
+                    if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                    cancellation.Cancel();
+                    return MetadataRows();
+                };
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(cancelled, solution.Environment,
+                        Identity(null, 511, IdentityResolutionStatus.Unresolved).Record, cancellation.Token));
             }
         }
 
@@ -483,6 +607,23 @@ namespace D365SolutionComparer.Tests
                 ["name"] = name,
                 ["primaryentityname"] = primaryEntityName
             };
+        }
+
+        private static EntityMetadata EntityMetadata(int objectTypeCode, string logicalName,
+            string schemaName)
+        {
+            var metadata = new EntityMetadata { LogicalName = logicalName, SchemaName = schemaName };
+            typeof(EntityMetadata).GetProperty("ObjectTypeCode").SetValue(metadata, (int?)objectTypeCode);
+            return metadata;
+        }
+
+        private static RetrieveMetadataChangesResponse MetadataRows(params EntityMetadata[] items)
+        {
+            var response = new RetrieveMetadataChangesResponse();
+            var metadata = new EntityMetadataCollection();
+            metadata.AddRange(items);
+            response.Results["EntityMetadata"] = metadata;
+            return response;
         }
     }
 }
