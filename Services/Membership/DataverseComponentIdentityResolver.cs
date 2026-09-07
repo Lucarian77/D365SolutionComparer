@@ -64,6 +64,8 @@ namespace D365SolutionComparer.Services.Membership
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
+            private readonly Dictionary<Guid, ResolutionValue> parentWorkflowCache =
+                new Dictionary<Guid, ResolutionValue>();
             private readonly Dictionary<int, DefinitionMapping> definitionMappings =
                 new Dictionary<int, DefinitionMapping>();
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
@@ -86,7 +88,7 @@ namespace D365SolutionComparer.Services.Membership
                 if (!identityCache.TryGetValue(cacheKey, out value))
                 {
                     value = ResolveOne(cacheKey, cancellationToken);
-                    identityCache.Add(cacheKey, value);
+                    identityCache[cacheKey] = value;
                 }
                 return value.ToIdentity(record);
             }
@@ -118,7 +120,8 @@ namespace D365SolutionComparer.Services.Membership
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var keys = group.ToList();
-                    if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
+                    if (group.Key == "process") ResolveProcessBatches(keys, cancellationToken);
+                    else if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
                     else if (group.Key == "table") ResolveTableBatches(keys, cancellationToken);
                     else foreach (var key in keys) identityCache[key] = ResolveOne(key, cancellationToken);
                 }
@@ -182,6 +185,11 @@ namespace D365SolutionComparer.Services.Membership
 
             private ResolutionValue ResolveOne(LookupKey key, CancellationToken cancellationToken)
             {
+                if (key.Kind == "process")
+                {
+                    ResolveProcessBatches(new[] { key }, cancellationToken);
+                    return identityCache[key];
+                }
                 try
                 {
                     string value;
@@ -344,6 +352,159 @@ namespace D365SolutionComparer.Services.Membership
                 return results;
             }
 
+            private void ResolveProcessBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                var activations = new List<PendingWorkflowActivation>();
+                foreach (var batch in Batch(keys))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("workflow")
+                        {
+                            ColumnSet = new ColumnSet("workflowid", "uniquename", "type", "parentworkflowid")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("workflowid", ConditionOperator.In,
+                            batch.Select(item => (object)item.ObjectId).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var grouped = GroupWorkflowRows(rows, batch.Select(item => item.ObjectId),
+                            "A grouped workflow lookup returned an unrequested object.");
+                        foreach (var key in batch)
+                        {
+                            List<Entity> matches;
+                            if (!grouped.TryGetValue(key.ObjectId, out matches))
+                            {
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "Raw workflow row was not found.");
+                                continue;
+                            }
+                            if (matches.Count != 1)
+                            {
+                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
+                                    "A raw workflow lookup returned multiple records.");
+                                continue;
+                            }
+                            var row = matches[0];
+                            var uniqueName = row.GetAttributeValue<string>("uniquename");
+                            if (!string.IsNullOrWhiteSpace(uniqueName))
+                            {
+                                identityCache[key] = ResolutionValue.FromKey(key.Kind, uniqueName);
+                                continue;
+                            }
+                            var workflowType = ReadOptionValue(row, "type");
+                            if (workflowType == 1)
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "Workflow definition has a blank uniquename.");
+                            else if (workflowType == 2)
+                            {
+                                var parent = row.GetAttributeValue<EntityReference>("parentworkflowid");
+                                if (parent == null || parent.Id == Guid.Empty)
+                                    identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                        "Workflow activation has no parent workflow definition.");
+                                else activations.Add(new PendingWorkflowActivation(key, parent.Id));
+                            }
+                            else
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "Unsupported workflow record type " +
+                                    (workflowType.HasValue
+                                        ? workflowType.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                        : "(missing)") +
+                                    "; parent identity inheritance is limited to documented activation records (type 2).");
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        foreach (var key in batch)
+                            identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                "Workflow identity read failed: " + ex.Message);
+                    }
+                }
+
+                ResolveParentWorkflowDefinitions(activations.Select(item => item.ParentWorkflowId)
+                    .Distinct().ToList(), cancellationToken);
+                foreach (var activation in activations)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    identityCache[activation.Key] = parentWorkflowCache[activation.ParentWorkflowId];
+                }
+            }
+
+            private void ResolveParentWorkflowDefinitions(IReadOnlyList<Guid> parentIds,
+                CancellationToken cancellationToken)
+            {
+                var missing = parentIds.Where(id => !parentWorkflowCache.ContainsKey(id)).ToList();
+                foreach (var batch in Batch(missing))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("workflow")
+                        {
+                            ColumnSet = new ColumnSet("workflowid", "uniquename", "type")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("workflowid", ConditionOperator.In,
+                            batch.Select(id => (object)id).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var grouped = GroupWorkflowRows(rows, batch,
+                            "A grouped parent workflow lookup returned an unrequested object.");
+                        foreach (var parentId in batch)
+                        {
+                            List<Entity> matches;
+                            if (!grouped.TryGetValue(parentId, out matches))
+                                parentWorkflowCache[parentId] = ResolutionValue.Unresolved("process",
+                                    "Parent workflow definition was not found.");
+                            else if (matches.Count != 1)
+                                parentWorkflowCache[parentId] = ResolutionValue.Ambiguous("process",
+                                    "Parent workflow definition lookup returned multiple records.");
+                            else if (ReadOptionValue(matches[0], "type") != 1)
+                                parentWorkflowCache[parentId] = ResolutionValue.Unresolved("process",
+                                    "Parent workflow record is not a confirmed definition (type 1).");
+                            else
+                            {
+                                var uniqueName = matches[0].GetAttributeValue<string>("uniquename");
+                                parentWorkflowCache[parentId] = string.IsNullOrWhiteSpace(uniqueName)
+                                    ? ResolutionValue.Unresolved("process",
+                                        "Parent workflow definition has a blank uniquename.")
+                                    : ResolutionValue.FromKey("process", uniqueName,
+                                        "Portable identity inherited from the parent workflow definition's uniquename.");
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        foreach (var parentId in batch)
+                            parentWorkflowCache[parentId] = ResolutionValue.Unresolved("process",
+                                "Parent workflow identity read failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private static IDictionary<Guid, List<Entity>> GroupWorkflowRows(EntityCollection rows,
+                IEnumerable<Guid> requestedIds, string unexpectedDiagnostic)
+            {
+                if (rows.MoreRecords)
+                    throw new InvalidOperationException("A bounded workflow identity query unexpectedly returned more records.");
+                var requested = new HashSet<Guid>(requestedIds);
+                var grouped = rows.Entities.GroupBy(item => item.Id)
+                    .ToDictionary(item => item.Key, item => item.ToList());
+                if (grouped.Keys.Any(id => id == Guid.Empty || !requested.Contains(id)))
+                    throw new InvalidOperationException(unexpectedDiagnostic);
+                return grouped;
+            }
+
+            private static int? ReadOptionValue(Entity row, string attributeName)
+            {
+                var option = row.GetAttributeValue<OptionSetValue>(attributeName);
+                return option == null ? (int?)null : option.Value;
+            }
+
             private static string ReadEntityIdentity(Entity entity, string kind, string identityAttribute)
             {
                 if (kind == "securityrole")
@@ -371,7 +532,7 @@ namespace D365SolutionComparer.Services.Membership
             private static bool IsEntityBacked(string kind) => kind == "webresource" || kind == "process" ||
                 kind == "securityrole" || kind == "environmentvariabledefinition" || kind == "connectionreference";
 
-            private static IEnumerable<IReadOnlyList<LookupKey>> Batch(IReadOnlyList<LookupKey> items)
+            private static IEnumerable<IReadOnlyList<T>> Batch<T>(IReadOnlyList<T> items)
             {
                 for (int offset = 0; offset < items.Count; offset += BatchSize)
                     yield return items.Skip(offset).Take(Math.Min(BatchSize, items.Count - offset)).ToList();
@@ -658,13 +819,25 @@ namespace D365SolutionComparer.Services.Membership
                 public string Diagnostic { get; }
                 public ComponentIdentity ToIdentity(SolutionComponentRecord record) =>
                     new ComponentIdentity(record, Status, Key, Diagnostic, Kind);
-                public static ResolutionValue FromKey(string kind, string key) => string.IsNullOrWhiteSpace(key)
+                public static ResolutionValue FromKey(string kind, string key, string diagnostic = null) =>
+                    string.IsNullOrWhiteSpace(key)
                     ? Unresolved(kind, "No strong portable identity was available; display names and local GUIDs are not used.")
-                    : new ResolutionValue(kind, IdentityResolutionStatus.Resolved, key, null);
+                    : new ResolutionValue(kind, IdentityResolutionStatus.Resolved, key, diagnostic);
                 public static ResolutionValue Unresolved(string kind, string diagnostic) =>
                     new ResolutionValue(kind, IdentityResolutionStatus.Unresolved, null, diagnostic);
                 public static ResolutionValue Ambiguous(string kind, string diagnostic) =>
                     new ResolutionValue(kind, IdentityResolutionStatus.Ambiguous, null, diagnostic);
+            }
+
+            private sealed class PendingWorkflowActivation
+            {
+                public PendingWorkflowActivation(LookupKey key, Guid parentWorkflowId)
+                {
+                    Key = key;
+                    ParentWorkflowId = parentWorkflowId;
+                }
+                public LookupKey Key { get; }
+                public Guid ParentWorkflowId { get; }
             }
 
             private struct LookupKey : IEquatable<LookupKey>

@@ -67,7 +67,6 @@ namespace D365SolutionComparer.Tests
 
         [DataTestMethod]
         [DataRow(61, "webresource", "webresourceid", "name", "new_/script.js")]
-        [DataRow(29, "workflow", "workflowid", "uniquename", "new_Process")]
         [DataRow(380, "environmentvariabledefinition", "environmentvariabledefinitionid", "schemaname", "new_Setting")]
         public void RecordResolversSelectOnlyIdAndPortableName(int type, string table, string primaryId, string attribute, string key)
         {
@@ -116,6 +115,9 @@ namespace D365SolutionComparer.Tests
             var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment, record, CancellationToken.None);
             Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.Diagnostic, recordExists
+                ? "Unsupported workflow record type (missing)"
+                : "Raw workflow row was not found");
         }
 
         [TestMethod]
