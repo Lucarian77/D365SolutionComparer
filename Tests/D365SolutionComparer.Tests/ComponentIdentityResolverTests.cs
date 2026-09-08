@@ -889,6 +889,237 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void Type9OptionSetLookupCapturesCompleteEvidenceWithoutChangingIdentity()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
+            var service = OptionSetService(solution, request =>
+            {
+                Assert.AreEqual(false, request.RetrieveAsIfPublished);
+                return AllOptionSetsResponse(OptionSet(objectId, "new_Priority", true,
+                    OptionSetType.Picklist, true, false));
+            });
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                new SolutionComponentRecord(componentId, 9, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            var evidence = result.DiagnosticEvidence.First();
+            StringAssert.Contains(evidence, "matched uniquely");
+            StringAssert.Contains(evidence, "MetadataId=" + objectId.ToString("D"));
+            StringAssert.Contains(evidence, "Name='new_Priority'");
+            StringAssert.Contains(evidence, "IsGlobal=True");
+            StringAssert.Contains(evidence, "OptionSetType=0 ('Picklist')");
+            StringAssert.Contains(evidence, "IsManaged=True");
+            StringAssert.Contains(evidence, "IsCustomOptionSet=False");
+            var summary = result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType9MembershipCount=1");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=1");
+            StringAssert.Contains(summary, "ReturnedOptionSetCount=1");
+            StringAssert.Contains(summary, "CorrelatedMetadataIdCount=1");
+            StringAssert.Contains(summary, "MissingRequestedMetadataIdCount=0");
+            StringAssert.Contains(summary, "BlankNameCount=0");
+            StringAssert.Contains(summary, "IsGlobalNotTrueCount=0");
+            StringAssert.Contains(summary, "DistinctCandidateNames=['new_Priority']");
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow));
+            var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                "unsupported:componenttype:9");
+            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(result.Diagnostic, bucket.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(componentId, bucket.AuditEvidence.Single().SolutionComponentId);
+            Assert.AreEqual(objectId, bucket.AuditEvidence.Single().ObjectId);
+            CollectionAssert.AreEqual(result.DiagnosticEvidence.ToArray(),
+                bucket.AuditEvidence.Single().DiagnosticEvidence.ToArray());
+        }
+
+        [TestMethod]
+        public void Type9DistinctAndRepeatedIdsUseOneCatalogRequestAndIgnoreUnrelatedMetadata()
+        {
+            var solution = Solution();
+            var firstId = Guid.NewGuid(); var secondId = Guid.NewGuid(); var unrelatedId = Guid.NewGuid();
+            int lookupCount = 0;
+            var service = OptionSetService(solution, request =>
+            {
+                lookupCount++;
+                Assert.AreEqual(false, request.RetrieveAsIfPublished);
+                return AllOptionSetsResponse(
+                    OptionSet(firstId, "new_First", true, OptionSetType.Picklist, false, true),
+                    OptionSet(secondId, "new_Second", true, OptionSetType.Picklist, false, true),
+                    OptionSet(unrelatedId, "new_Unrelated", true, OptionSetType.Picklist, false, true));
+            });
+            var records = new[] { firstId, firstId, secondId }.Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            Assert.AreEqual(1, lookupCount);
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveAllOptionSets"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveOptionSet"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(2, counter.TotalRequests);
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported &&
+                item.SemanticKind == "unsupported:componenttype:9" && item.ComparisonKey == null));
+            Assert.AreEqual(result.Components[0].DiagnosticEvidence.First(),
+                result.Components[1].DiagnosticEvidence.First());
+            Assert.AreNotEqual(result.Components[0].DiagnosticEvidence.First(),
+                result.Components[2].DiagnosticEvidence.First());
+            Assert.IsFalse(result.Components.SelectMany(item => item.DiagnosticEvidence)
+                .Any(item => item.Contains("new_Unrelated") && !item.StartsWith(
+                    "OptionSet metadata diagnostic summary:", StringComparison.Ordinal)));
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType9MembershipCount=3");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=2");
+            StringAssert.Contains(summary, "ReturnedOptionSetCount=3");
+            StringAssert.Contains(summary, "CorrelatedMetadataIdCount=2");
+            StringAssert.Contains(summary, "DistinctCandidateNames=['new_First', 'new_Second']");
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                "unsupported:componenttype:9");
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(3, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(3, bucket.AuditEvidence.Count);
+            Assert.AreEqual(2, bucket.AuditEvidence.Select(item => item.ObjectId).Distinct().Count());
+            Assert.AreEqual(3, bucket.AuditEvidence.SelectMany(item => item.DiagnosticEvidence).Distinct().Count());
+        }
+
+        [TestMethod]
+        public void Type9EduScaleUsesOneCatalogRequestForThirtyEightDistinctIds()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(0, 38).Select(index => Guid.NewGuid()).ToList();
+            var records = objectIds.Concat(new[] { objectIds[0], objectIds[1] }).Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+            var service = OptionSetService(solution, request => AllOptionSetsResponse(objectIds.Select(
+                (objectId, index) => OptionSet(objectId, "new_Choice" + index, true,
+                    OptionSetType.Picklist, false, true)).ToArray()));
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveAllOptionSets"));
+            Assert.AreEqual(2, counter.TotalRequests);
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType9MembershipCount=40");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=38");
+            StringAssert.Contains(summary, "ReturnedOptionSetCount=38");
+            StringAssert.Contains(summary, "CorrelatedMetadataIdCount=38");
+            StringAssert.Contains(summary, "MissingRequestedMetadataIdCount=0");
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+        }
+
+        [TestMethod]
+        public void Type9MissingAndQuestionableMetadataRemainExplicitDiagnosticEvidence()
+        {
+            var solution = Solution(); var missingId = Guid.NewGuid(); var blankId = Guid.NewGuid();
+            var nonGlobalId = Guid.NewGuid(); var conflictingId = Guid.NewGuid(); var unrelatedId = Guid.NewGuid();
+            var service = OptionSetService(solution, request =>
+            {
+                return AllOptionSetsResponse(
+                    OptionSet(blankId, " ", true, OptionSetType.Picklist, false, true),
+                    OptionSet(nonGlobalId, "new_Local", false, OptionSetType.Picklist, false, true),
+                    OptionSet(conflictingId, "new_ConflictA", true, OptionSetType.Picklist, false, true),
+                    OptionSet(conflictingId, "new_ConflictB", true, OptionSetType.Picklist, false, true),
+                    OptionSet(unrelatedId, "new_Unrelated", true, OptionSetType.Picklist, false, true));
+            });
+            var records = new[] { missingId, blankId, nonGlobalId, conflictingId }.Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            StringAssert.Contains(result.Components[0].DiagnosticEvidence.First(), "No option-set metadata");
+            StringAssert.Contains(result.Components[1].DiagnosticEvidence.First(), "Name is blank");
+            StringAssert.Contains(result.Components[2].DiagnosticEvidence.First(), "IsGlobal is not true");
+            StringAssert.Contains(result.Components[3].DiagnosticEvidence.First(),
+                "Multiple option-set metadata definitions");
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "ReturnedOptionSetCount=5");
+            StringAssert.Contains(summary, "CorrelatedMetadataIdCount=2");
+            StringAssert.Contains(summary, "MissingRequestedMetadataIdCount=1");
+            StringAssert.Contains(summary, "BlankNameCount=1");
+            StringAssert.Contains(summary, "IsGlobalNotTrueCount=1");
+            StringAssert.Contains(summary, "NonUniqueMetadataIdCount=1");
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+        }
+
+        [TestMethod]
+        public void Type9FaultRemainsDiagnosticOnlyAndCancellationPropagates()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var faulted = new DataverseComponentIdentityResolver().Resolve(
+                OptionSetService(solution, request => throw new FaultException("OptionSet metadata denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual("unsupported:componenttype:9", faulted.SemanticKind);
+            Assert.IsNull(faulted.ComparisonKey);
+            StringAssert.Contains(faulted.DiagnosticEvidence.First(), "OptionSet metadata denied");
+            StringAssert.Contains(faulted.DiagnosticEvidence.Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal)),
+                "ReturnedOptionSetCount=(unavailable)");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = OptionSetService(solution, request =>
+                {
+                    cancellation.Cancel();
+                    return AllOptionSetsResponse(OptionSet(objectId, "new_Priority", true,
+                        OptionSetType.Picklist, false, true));
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 9, objectId), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void Type9MissingObjectIdStillUsesOneCatalogRequestAndComparisonRemainsIndeterminate()
+        {
+            var solution = Solution(); int optionSetQueries = 0;
+            var service = OptionSetService(solution, request =>
+            {
+                optionSetQueries++;
+                return AllOptionSetsResponse();
+            });
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, null), CancellationToken.None);
+
+            Assert.AreEqual(1, optionSetQueries);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
+            var summary = result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType9MembershipCount=1");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=0");
+            StringAssert.Contains(summary, "MissingObjectIdRecordCount=1");
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(solution, new ComponentIdentity[0], DateTimeOffset.UtcNow));
+            Assert.AreEqual(MembershipPresence.Indeterminate, compared.Single().Presence);
+        }
+
+        [TestMethod]
         public void Type511SingleCompleteTeamTemplateIsClassifiedWithoutPortableIdentity()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
@@ -1191,7 +1422,6 @@ namespace D365SolutionComparer.Tests
         [DataRow(3)]
         [DataRow(11)]
         [DataRow(12)]
-        [DataRow(9)]
         [DataRow(91)]
         [DataRow(381)]
         public void KnownUnsupportedTypesNeverDiscoverOrLookupConnectionReferences(int type)
@@ -1380,6 +1610,47 @@ namespace D365SolutionComparer.Tests
             var response = new RetrieveAttributeResponse();
             response.Results["AttributeMetadata"] = new PicklistAttributeMetadata { OptionSet = optionSet };
             return response;
+        }
+
+        private static FakeOrganizationService OptionSetService(SolutionIdentity solution,
+            Func<RetrieveAllOptionSetsRequest, RetrieveAllOptionSetsResponse> optionSetLookup)
+        {
+            var service = Service(solution, query =>
+            {
+                Assert.Fail("Type 9 diagnostics must not query table " + query.EntityName);
+                return Rows();
+            });
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                var optionSetRequest = request as RetrieveAllOptionSetsRequest;
+                if (optionSetRequest != null) return optionSetLookup(optionSetRequest);
+                throw new NotSupportedException(request.RequestName);
+            };
+            return service;
+        }
+
+        private static RetrieveAllOptionSetsResponse AllOptionSetsResponse(
+            params OptionSetMetadataBase[] metadata)
+        {
+            var response = new RetrieveAllOptionSetsResponse();
+            response.Results["OptionSetMetadata"] = metadata;
+            return response;
+        }
+
+        private static OptionSetMetadata OptionSet(Guid metadataId, string name, bool? isGlobal,
+            OptionSetType? optionSetType, bool? isManaged, bool? isCustomOptionSet)
+        {
+            var metadata = new OptionSetMetadata
+            {
+                MetadataId = metadataId,
+                Name = name,
+                IsGlobal = isGlobal,
+                OptionSetType = optionSetType,
+                IsCustomOptionSet = isCustomOptionSet
+            };
+            typeof(OptionSetMetadataBase).GetProperty("IsManaged").SetValue(metadata, isManaged);
+            return metadata;
         }
 
         private static FakeOrganizationService TeamTemplateService(SolutionIdentity solution,

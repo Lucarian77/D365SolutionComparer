@@ -61,6 +61,7 @@ namespace D365SolutionComparer.Services.Membership
 
         private sealed class ResolutionContext
         {
+            private const int OptionSetComponentType = 9;
             private const int AppModuleComponentType = 80;
             private const int TeamTemplateComponentType = 511;
             private readonly DataverseReadContext context;
@@ -71,11 +72,16 @@ namespace D365SolutionComparer.Services.Membership
             private readonly Dictionary<int, DefinitionMapping> definitionMappings =
                 new Dictionary<int, DefinitionMapping>();
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
+            private readonly Dictionary<Guid, IReadOnlyList<string>> optionSetDiagnostics =
+                new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly HashSet<Guid> verifiedTeamTemplates = new HashSet<Guid>();
             private bool connectionMappingLoaded;
+            private bool optionSetDiagnosticsLoaded;
             private bool teamTemplateDiagnosticsLoaded;
+            private Guid? optionSetSummaryComponentId;
+            private string optionSetSummaryEvidence;
             private int? connectionTypeCode;
             private string connectionMappingDiagnostic;
             private IdentityResolutionStatus connectionMappingStatus = IdentityResolutionStatus.Unresolved;
@@ -164,7 +170,8 @@ namespace D365SolutionComparer.Services.Membership
                     default:
                         if (ComponentSemanticKinds.IsKnownBuiltInType(record.ComponentType))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
-                                "No identity resolver supports this known component type.");
+                                "No identity resolver supports this known component type.",
+                                diagnosticEvidence: GetOptionSetDiagnosticEvidence(record));
                         cancellationToken.ThrowIfCancellationRequested();
                         if (connectionMappingDiagnostic == null && connectionTypeCode.HasValue &&
                             connectionTypeCode.Value == record.ComponentType)
@@ -628,6 +635,8 @@ namespace D365SolutionComparer.Services.Membership
                 CancellationToken cancellationToken)
             {
                 var recordList = records.ToList();
+                LoadOptionSetDiagnostics(recordList.Where(item =>
+                    item.ComponentType == OptionSetComponentType).ToList(), cancellationToken);
                 var broadTypes = recordList.Select(item => item.ComponentType)
                     .Where(type => !ComponentSemanticKinds.IsKnownBuiltInType(type))
                     .Distinct().OrderBy(type => type).ToList();
@@ -648,6 +657,186 @@ namespace D365SolutionComparer.Services.Membership
                     LoadTeamTemplateDiagnostics(recordList.Where(item =>
                         item.ComponentType == TeamTemplateComponentType).ToList(), cancellationToken);
             }
+
+            private void LoadOptionSetDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                if (records.Count == 0 || optionSetDiagnosticsLoaded) return;
+                optionSetDiagnosticsLoaded = true;
+                optionSetSummaryComponentId = records[0].SolutionComponentId;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var response = context.Execute(new RetrieveAllOptionSetsRequest
+                    {
+                        RetrieveAsIfPublished = false
+                    }) as RetrieveAllOptionSetsResponse;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var returned = response != null && response.Results.Contains("OptionSetMetadata")
+                        ? response.Results["OptionSetMetadata"] as OptionSetMetadataBase[] : null;
+                    if (returned == null)
+                    {
+                        SetOptionSetDiagnosticFailures(objectIds,
+                            "RetrieveAllOptionSets diagnostic lookup returned no option-set catalog.");
+                        optionSetSummaryEvidence = DescribeOptionSetSummary(records.Count, objectIds.Count,
+                            null, null, null, records.Count(item => !item.ObjectId.HasValue ||
+                                item.ObjectId.Value == Guid.Empty), null, null, null, null);
+                        return;
+                    }
+
+                    var indexed = returned.Where(item => item != null && item.MetadataId.HasValue)
+                        .GroupBy(item => item.MetadataId.Value)
+                        .ToDictionary(group => group.Key, group => group.ToList());
+                    int correlated = 0;
+                    int missing = 0;
+                    int nonUnique = 0;
+                    int blankName = 0;
+                    int nonGlobal = 0;
+                    var candidateNames = new List<string>();
+                    foreach (var objectId in objectIds)
+                    {
+                        List<OptionSetMetadataBase> matches;
+                        if (!indexed.TryGetValue(objectId, out matches))
+                        {
+                            missing++;
+                            optionSetDiagnostics[objectId] = new[]
+                            {
+                                "No option-set metadata in the retrieved catalog matched this solutioncomponent objectid."
+                            };
+                            continue;
+                        }
+                        if (matches.Count != 1)
+                        {
+                            nonUnique++;
+                            var evidence = new List<string>
+                            {
+                                "Multiple option-set metadata definitions in the retrieved catalog matched this solutioncomponent objectid."
+                            };
+                            evidence.AddRange(matches.Select(item => DescribeOptionSet(item, objectId, false)));
+                            optionSetDiagnostics[objectId] = evidence.AsReadOnly();
+                            continue;
+                        }
+
+                        var metadata = matches[0];
+                        correlated++;
+                        if (string.IsNullOrWhiteSpace(metadata.Name)) blankName++;
+                        else candidateNames.Add(metadata.Name);
+                        if (metadata.IsGlobal != true) nonGlobal++;
+                        optionSetDiagnostics[objectId] = new[] { DescribeOptionSet(metadata, objectId, true) };
+                    }
+                    int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
+                        item.ObjectId.Value == Guid.Empty);
+                    var distinctNames = candidateNames.GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                        .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    optionSetSummaryEvidence = DescribeOptionSetSummary(records.Count, objectIds.Count,
+                        returned.Length, correlated, missing, missingObjectIds, blankName, nonGlobal,
+                        nonUnique, distinctNames);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (FaultException ex)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    SetOptionSetDiagnosticFailures(objectIds,
+                        "RetrieveAllOptionSets diagnostic lookup failed: " + ex.Message);
+                    optionSetSummaryEvidence = DescribeOptionSetSummary(records.Count, objectIds.Count,
+                        null, null, null, records.Count(item => !item.ObjectId.HasValue ||
+                            item.ObjectId.Value == Guid.Empty), null, null, null, null);
+                }
+            }
+
+            private IEnumerable<string> GetOptionSetDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType != OptionSetComponentType || !optionSetDiagnosticsLoaded)
+                    return new string[0];
+                var result = new List<string>();
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    result.Add("OptionSet metadata diagnostic correlation was not attempted because objectid is unavailable.");
+                else
+                {
+                    IReadOnlyList<string> evidence;
+                    result.AddRange(optionSetDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                        ? evidence : new[] { "OptionSet metadata diagnostic lookup produced no auditable result." });
+                }
+                if (record.SolutionComponentId == optionSetSummaryComponentId &&
+                    !string.IsNullOrWhiteSpace(optionSetSummaryEvidence))
+                    result.Add(optionSetSummaryEvidence);
+                return result;
+            }
+
+            private void SetOptionSetDiagnosticFailures(IEnumerable<Guid> objectIds, string diagnostic)
+            {
+                foreach (var objectId in objectIds)
+                    optionSetDiagnostics[objectId] = new[] { diagnostic };
+            }
+
+            private static string DescribeOptionSet(OptionSetMetadataBase metadata, Guid requestedMetadataId,
+                bool uniqueMatch)
+            {
+                var concerns = new List<string>();
+                if (!metadata.MetadataId.HasValue)
+                    concerns.Add("returned MetadataId is unavailable");
+                else if (metadata.MetadataId.Value != requestedMetadataId)
+                    concerns.Add("returned MetadataId does not match solutioncomponent.objectid");
+                if (string.IsNullOrWhiteSpace(metadata.Name)) concerns.Add("Name is blank");
+                if (metadata.IsGlobal != true) concerns.Add("IsGlobal is not true");
+
+                var prefix = uniqueMatch
+                    ? concerns.Count == 0
+                        ? "OptionSet metadata diagnostic lookup matched uniquely. "
+                        : "OptionSet metadata diagnostic lookup returned concerns: " +
+                            string.Join("; ", concerns) + ". "
+                    : "Duplicate OptionSet metadata candidate" + (concerns.Count == 0 ? ". " :
+                        " with concerns: " + string.Join("; ", concerns) + ". ");
+                return prefix +
+                    "MetadataId=" + FormatOptionSetGuid(metadata.MetadataId) +
+                    "; Name=" + FormatOptionSetText(metadata.Name) +
+                    "; IsGlobal=" + FormatOptionSetBoolean(metadata.IsGlobal) +
+                    "; OptionSetType=" + FormatOptionSetType(metadata.OptionSetType) +
+                    "; IsManaged=" + FormatOptionSetBoolean(metadata.IsManaged) +
+                    "; IsCustomOptionSet=" + FormatOptionSetBoolean(metadata.IsCustomOptionSet) +
+                    ". Diagnostic evidence only; none of these values is used as a portable comparison identity.";
+            }
+
+            private static string DescribeOptionSetSummary(int rawCount, int distinctObjectIdCount,
+                int? returnedCount, int? correlatedCount, int? missingCount, int? missingObjectIdCount,
+                int? blankNameCount, int? nonGlobalCount, int? nonUniqueCount,
+                IReadOnlyList<string> distinctNames)
+            {
+                return "OptionSet metadata diagnostic summary: RawType9MembershipCount=" + rawCount +
+                    "; DistinctNonemptyObjectIdCount=" + distinctObjectIdCount +
+                    "; ReturnedOptionSetCount=" + FormatOptionSetCount(returnedCount) +
+                    "; CorrelatedMetadataIdCount=" + FormatOptionSetCount(correlatedCount) +
+                    "; MissingRequestedMetadataIdCount=" + FormatOptionSetCount(missingCount) +
+                    "; MissingObjectIdRecordCount=" + FormatOptionSetCount(missingObjectIdCount) +
+                    "; BlankNameCount=" + FormatOptionSetCount(blankNameCount) +
+                    "; IsGlobalNotTrueCount=" + FormatOptionSetCount(nonGlobalCount) +
+                    "; NonUniqueMetadataIdCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; DistinctCandidateNames=" + (distinctNames == null ? "(unavailable)" :
+                        "[" + string.Join(", ", distinctNames.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") + ".";
+            }
+
+            private static string FormatOptionSetCount(int? value) => value.HasValue
+                ? value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "(unavailable)";
+
+            private static string FormatOptionSetGuid(Guid? value) =>
+                value.HasValue ? value.Value.ToString("D") : "(null)";
+
+            private static string FormatOptionSetText(string value) =>
+                value == null ? "(null)" : "'" + EscapeDiagnosticText(value) + "'";
+
+            private static string FormatOptionSetBoolean(bool? value) =>
+                value.HasValue ? value.Value.ToString() : "(null)";
+
+            private static string FormatOptionSetType(OptionSetType? value) =>
+                value.HasValue
+                    ? ((int)value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                        " ('" + value.Value + "')"
+                    : "(null)";
 
             private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
                 CancellationToken cancellationToken)
