@@ -62,6 +62,7 @@ namespace D365SolutionComparer.Services.Membership
         private sealed class ResolutionContext
         {
             private const int OptionSetComponentType = 9;
+            private const int ReportComponentType = 31;
             private const int SystemFormComponentType = 60;
             private const int SiteMapComponentType = 62;
             private const int AppModuleComponentType = 80;
@@ -77,6 +78,8 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> optionSetDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, IReadOnlyList<string>> reportDiagnostics =
+                new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> systemFormDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> siteMapDiagnostics =
@@ -88,12 +91,15 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<Guid> verifiedTeamTemplates = new HashSet<Guid>();
             private bool connectionMappingLoaded;
             private bool optionSetDiagnosticsLoaded;
+            private bool reportDiagnosticsLoaded;
             private bool systemFormDiagnosticsLoaded;
             private bool siteMapDiagnosticsLoaded;
             private bool canvasAppDiagnosticsLoaded;
             private bool teamTemplateDiagnosticsLoaded;
             private Guid? optionSetSummaryComponentId;
             private string optionSetSummaryEvidence;
+            private Guid? reportSummaryComponentId;
+            private string reportSummaryEvidence;
             private Guid? systemFormSummaryComponentId;
             private string systemFormSummaryEvidence;
             private Guid? siteMapSummaryComponentId;
@@ -655,6 +661,8 @@ namespace D365SolutionComparer.Services.Membership
                 var recordList = records.ToList();
                 LoadOptionSetDiagnostics(recordList.Where(item =>
                     item.ComponentType == OptionSetComponentType).ToList(), cancellationToken);
+                LoadReportDiagnostics(recordList.Where(item =>
+                    item.ComponentType == ReportComponentType).ToList(), cancellationToken);
                 LoadSystemFormDiagnostics(recordList.Where(item =>
                     item.ComponentType == SystemFormComponentType).ToList(), cancellationToken);
                 LoadSiteMapDiagnostics(recordList.Where(item =>
@@ -795,6 +803,8 @@ namespace D365SolutionComparer.Services.Membership
             {
                 if (record.ComponentType == OptionSetComponentType)
                     return GetOptionSetDiagnosticEvidence(record);
+                if (record.ComponentType == ReportComponentType)
+                    return GetReportDiagnosticEvidence(record);
                 if (record.ComponentType == SystemFormComponentType)
                     return GetSystemFormDiagnosticEvidence(record);
                 if (record.ComponentType == SiteMapComponentType)
@@ -874,6 +884,254 @@ namespace D365SolutionComparer.Services.Membership
                     ? ((int)value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                         " ('" + value.Value + "')"
                     : "(null)";
+
+            private void LoadReportDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                if (records.Count == 0 || reportDiagnosticsLoaded) return;
+                reportDiagnosticsLoaded = true;
+                reportSummaryComponentId = records[0].SolutionComponentId;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
+                var failures = new Dictionary<Guid, string>();
+                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
+                int returnedCount = 0;
+                bool countUnavailable = false;
+
+                foreach (var batch in Batch(objectIds))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("report")
+                        {
+                            ColumnSet = new ColumnSet("reportid", "name", "filename", "reporttypecode",
+                                "signatureid", "signaturelcid", "reportidunique", "componentstate", "ismanaged")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("reportid", ConditionOperator.In,
+                            batch.Select(item => (object)item).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        returnedCount += rows.Entities.Count;
+
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid reportId;
+                            if (string.Equals(row.LogicalName, "report", StringComparison.OrdinalIgnoreCase) &&
+                                TryReadGuid(row, "reportid", out reportId) && batch.Contains(reportId) &&
+                                (row.Id == Guid.Empty || row.Id == reportId))
+                            {
+                                returnedById[reportId].Add(row);
+                                continue;
+                            }
+
+                            invalidResponse = true;
+                            var detail = "Unassociated or conflicting returned report row: " +
+                                DescribeReport(row);
+                            Guid conflictingId;
+                            var affectedIds = TryReadGuid(row, "reportid", out conflictingId) &&
+                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
+                            foreach (var objectId in affectedIds)
+                            {
+                                List<string> evidence;
+                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
+                                    unassociatedEvidence[objectId] = evidence = new List<string>();
+                                evidence.Add(detail);
+                            }
+                        }
+
+                        if (rows.MoreRecords)
+                        {
+                            countUnavailable = true;
+                            SetReportFailures(batch,
+                                "Signed Report diagnostic lookup returned an incomplete result set.", failures);
+                        }
+                        else if (invalidResponse)
+                        {
+                            countUnavailable = true;
+                            SetReportFailures(batch,
+                                "Signed Report diagnostic lookup returned conflicting or incomplete primary-key data.",
+                                failures);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        countUnavailable = true;
+                        SetReportFailures(batch, "Signed Report diagnostic lookup failed: " + ex.Message,
+                            failures);
+                    }
+                }
+
+                var uniquelyCorrelated = objectIds.Where(objectId => !failures.ContainsKey(objectId) &&
+                        returnedById[objectId].Count == 1)
+                    .ToDictionary(objectId => objectId, objectId => returnedById[objectId][0]);
+                var signatureGroups = uniquelyCorrelated.Values.Select(row =>
+                    {
+                        Guid signatureId;
+                        return TryReadGuid(row, "signatureid", out signatureId) ? (Guid?)signatureId : null;
+                    })
+                    .Where(signatureId => signatureId.HasValue)
+                    .GroupBy(signatureId => signatureId.Value)
+                    .ToDictionary(group => group.Key, group => group.Count());
+                int correlated = 0;
+                int missing = 0;
+                int nonUnique = 0;
+                int blankSignature = 0;
+                foreach (var objectId in objectIds)
+                {
+                    var evidence = new List<string>();
+                    string failure;
+                    var matches = returnedById[objectId];
+                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
+                    else if (matches.Count == 0)
+                    {
+                        missing++;
+                        evidence.Add("No report row matched this solutioncomponent objectid.");
+                    }
+                    else if (matches.Count > 1)
+                    {
+                        nonUnique++;
+                        evidence.Add("Multiple report rows matched this solutioncomponent objectid.");
+                    }
+
+                    foreach (var row in matches) evidence.Add(DescribeReport(row));
+                    if (uniquelyCorrelated.ContainsKey(objectId))
+                    {
+                        correlated++;
+                        var row = uniquelyCorrelated[objectId];
+                        Guid signatureId;
+                        if (!TryReadGuid(row, "signatureid", out signatureId)) blankSignature++;
+                        else
+                        {
+                            int duplicateCount;
+                            if (signatureGroups.TryGetValue(signatureId, out duplicateCount) && duplicateCount > 1)
+                                evidence.Add("The report signatureid " + signatureId.ToString("D") +
+                                    " occurs on " + duplicateCount + " uniquely correlated Type-31 reports.");
+                        }
+                    }
+                    List<string> unassociated;
+                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    reportDiagnostics[objectId] = evidence.AsReadOnly();
+                }
+
+                int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
+                    item.ObjectId.Value == Guid.Empty);
+                var distinctSignatureIds = signatureGroups.Keys.OrderBy(item => item).ToList();
+                reportSummaryEvidence = DescribeReportSummary(records.Count, objectIds.Count,
+                    countUnavailable ? (int?)null : returnedCount,
+                    countUnavailable ? (int?)null : correlated,
+                    countUnavailable ? (int?)null : missing, missingObjectIds,
+                    countUnavailable ? (int?)null : blankSignature,
+                    countUnavailable ? (int?)null : signatureGroups.Values.Sum(),
+                    countUnavailable ? (int?)null : distinctSignatureIds.Count,
+                    countUnavailable ? (int?)null : signatureGroups.Count(group => group.Value > 1),
+                    countUnavailable ? (int?)null : nonUnique,
+                    countUnavailable ? null : distinctSignatureIds);
+            }
+
+            private IEnumerable<string> GetReportDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType != ReportComponentType || !reportDiagnosticsLoaded)
+                    return new string[0];
+                var result = new List<string>();
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    result.Add("Signed Report diagnostic lookup was not attempted because objectid is unavailable.");
+                else
+                {
+                    IReadOnlyList<string> evidence;
+                    result.AddRange(reportDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                        ? evidence : new[] { "Signed Report diagnostic lookup produced no auditable result." });
+                }
+                if (record.SolutionComponentId == reportSummaryComponentId &&
+                    !string.IsNullOrWhiteSpace(reportSummaryEvidence))
+                    result.Add(reportSummaryEvidence);
+                return result;
+            }
+
+            private static void SetReportFailures(IEnumerable<Guid> objectIds, string diagnostic,
+                IDictionary<Guid, string> failures)
+            {
+                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
+            }
+
+            private static string DescribeReport(Entity row)
+            {
+                Guid signatureId;
+                bool signed = TryReadGuid(row, "signatureid", out signatureId);
+                bool complete = HasGuid(row, "reportid") && HasText(row, "name") &&
+                    HasText(row, "filename") && HasOption(row, "reporttypecode") &&
+                    HasOptionalGuid(row, "signatureid") && (!signed || HasInteger(row, "signaturelcid")) &&
+                    HasGuid(row, "reportidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+                return (complete ? "Signed Report diagnostic lookup matched. " :
+                    "Signed Report diagnostic lookup matched but returned incomplete data. ") +
+                    "reportid=" + FormatReportValue(row, "reportid") +
+                    "; name=" + FormatReportValue(row, "name") +
+                    "; filename=" + FormatReportValue(row, "filename") +
+                    "; reporttypecode=" + FormatReportValue(row, "reporttypecode") +
+                    "; signatureid=" + FormatReportValue(row, "signatureid") +
+                    "; signaturelcid=" + FormatReportValue(row, "signaturelcid") +
+                    "; reportidunique=" + FormatReportValue(row, "reportidunique") +
+                    "; componentstate=" + FormatReportValue(row, "componentstate") +
+                    "; ismanaged=" + FormatReportValue(row, "ismanaged") +
+                    "; candidateSignatureId=" + (signed ? "'" + signatureId.ToString("D") + "'" :
+                        "(unavailable)") +
+                    "; signatureLcid=" + FormatReportValue(row, "signaturelcid") +
+                    ". Diagnostic evidence only; no report value is used for membership comparison.";
+            }
+
+            private static string DescribeReportSummary(int rawCount, int distinctObjectIdCount,
+                int? returnedCount, int? correlatedCount, int? missingCount, int missingObjectIdCount,
+                int? blankSignatureCount, int? nonblankSignatureCount, int? distinctSignatureCount,
+                int? duplicateSignatureCount, int? nonUniqueObjectIdCount, IReadOnlyList<Guid> signatureIds)
+            {
+                return "Signed Report diagnostic summary: RawType31Count=" + rawCount +
+                    "; DistinctObjectIdCount=" + distinctObjectIdCount +
+                    "; ReturnedRowCount=" + FormatOptionSetCount(returnedCount) +
+                    "; CorrelatedCount=" + FormatOptionSetCount(correlatedCount) +
+                    "; MissingCount=" + FormatOptionSetCount(missingCount) +
+                    "; MissingObjectIdRecordCount=" + missingObjectIdCount +
+                    "; BlankSignatureIdCount=" + FormatOptionSetCount(blankSignatureCount) +
+                    "; NonblankSignatureIdCount=" + FormatOptionSetCount(nonblankSignatureCount) +
+                    "; DistinctSignatureIdCount=" + FormatOptionSetCount(distinctSignatureCount) +
+                    "; DuplicateSignatureIdCount=" + FormatOptionSetCount(duplicateSignatureCount) +
+                    "; NonUniqueObjectIdCount=" + FormatOptionSetCount(nonUniqueObjectIdCount) +
+                    "; DistinctSignatureIds=" + (signatureIds == null ? "(unavailable)" :
+                        "[" + string.Join(", ", signatureIds.Select(item => "'" + item.ToString("D") + "'")) +
+                        "]") +
+                    "; DistinctCandidateSignatureIds=" + (signatureIds == null ? "(unavailable)" :
+                        "[" + string.Join(", ", signatureIds.Select(item => "'" + item.ToString("D") + "'")) +
+                        "]") +
+                    ".";
+            }
+
+            private static bool HasOptionalGuid(Entity row, string attributeName)
+            {
+                object value;
+                return !row.Attributes.TryGetValue(attributeName, out value) || value == null || value is Guid;
+            }
+
+            private static string FormatReportValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                if (value is int) return ((int)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
 
             private void LoadSystemFormDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
                 CancellationToken cancellationToken)
