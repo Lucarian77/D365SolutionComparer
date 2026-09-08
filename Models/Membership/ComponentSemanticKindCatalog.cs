@@ -15,6 +15,7 @@ namespace D365SolutionComparer.Models.Membership
         public const string EnvironmentVariableDefinition = "environmentvariabledefinition";
         public const string ConnectionReference = "connectionreference";
         public const string AppModule = "appmodule";
+        public const string TeamTemplate = "teamtemplate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
 
         // Published componenttype choices assigned to built-in kinds other than Connection Reference.

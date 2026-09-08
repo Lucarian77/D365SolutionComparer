@@ -18,7 +18,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.SecurityRole,
             ComponentSemanticKinds.EnvironmentVariableDefinition,
             ComponentSemanticKinds.ConnectionReference,
-            ComponentSemanticKinds.AppModule
+            ComponentSemanticKinds.AppModule,
+            ComponentSemanticKinds.TeamTemplate
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -144,6 +145,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
+                case ComponentSemanticKinds.TeamTemplate: return "Team Template";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

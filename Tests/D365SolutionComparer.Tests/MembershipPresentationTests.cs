@@ -62,6 +62,20 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void UnsupportedTeamTemplateUsesTeamTemplatePresentationLabel()
+        {
+            var teamTemplate = Identity(null, 511, IdentityResolutionStatus.Unsupported,
+                ComponentSemanticKinds.TeamTemplate);
+
+            var row = Present(Snapshot(teamTemplate), Snapshot()).Rows.Single();
+
+            Assert.AreEqual("Team Template", row.ComponentKind);
+            Assert.AreEqual("Indeterminate - Unsupported", row.MembershipStatus);
+            Assert.AreEqual("Unsupported", row.SourceResolutionStatus);
+            Assert.AreEqual("Indeterminate", row.TargetPresence);
+        }
+
+        [TestMethod]
         public void CompleteResolvedOppositeInventoryPresentsGenuineMissing()
         {
             var presentation = Present(Snapshot(Identity("new_/script.js")), Snapshot());

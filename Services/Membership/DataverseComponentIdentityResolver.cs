@@ -73,6 +73,7 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly HashSet<Guid> verifiedTeamTemplates = new HashSet<Guid>();
             private bool connectionMappingLoaded;
             private bool teamTemplateDiagnosticsLoaded;
             private int? connectionTypeCode;
@@ -171,6 +172,13 @@ namespace D365SolutionComparer.Services.Membership
                             kind = "connectionreference";
                             break;
                         }
+                        if (record.ComponentType == TeamTemplateComponentType && record.ObjectId.HasValue &&
+                            verifiedTeamTemplates.Contains(record.ObjectId.Value))
+                            return new ComponentIdentity(record, IdentityResolutionStatus.Unsupported,
+                                diagnostic: "The component is a verified TeamTemplate, but no portable identity resolver is approved.",
+                                componentTypeKey: ComponentSemanticKinds.TeamTemplate,
+                                semanticKind: ComponentSemanticKinds.TeamTemplate,
+                                diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
                         DefinitionMapping mapping;
                         if (!definitionMappings.TryGetValue(record.ComponentType, out mapping))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
@@ -926,10 +934,15 @@ namespace D365SolutionComparer.Services.Membership
                     foreach (var row in matches)
                     {
                         var objectTypeCode = ReadObjectTypeCode(row);
-                        string entityLogicalName;
-                        evidence.Add(DescribeTeamTemplate(row, objectTypeCode.HasValue &&
-                            entityLogicalNames.TryGetValue(objectTypeCode.Value, out entityLogicalName)
-                            ? entityLogicalName : "(objecttypecode unavailable)"));
+                        EntityLogicalNameDiagnostic entityLogicalName;
+                        if (!objectTypeCode.HasValue ||
+                            !entityLogicalNames.TryGetValue(objectTypeCode.Value, out entityLogicalName))
+                            entityLogicalName = EntityLogicalNameDiagnostic.Unverified(
+                                "(objecttypecode unavailable)");
+                        evidence.Add(DescribeTeamTemplate(row, entityLogicalName.DisplayValue));
+                        if (!failures.ContainsKey(objectId) && matches.Count == 1 &&
+                            IsCompleteTeamTemplate(row) && entityLogicalName.IsVerified)
+                            verifiedTeamTemplates.Add(objectId);
                     }
                     List<string> unassociated;
                     if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
@@ -937,10 +950,10 @@ namespace D365SolutionComparer.Services.Membership
                 }
             }
 
-            private IDictionary<int, string> ResolveEntityLogicalNameDiagnostics(IReadOnlyList<int> objectTypeCodes,
-                CancellationToken cancellationToken)
+            private IDictionary<int, EntityLogicalNameDiagnostic> ResolveEntityLogicalNameDiagnostics(
+                IReadOnlyList<int> objectTypeCodes, CancellationToken cancellationToken)
             {
-                var results = new Dictionary<int, string>();
+                var results = new Dictionary<int, EntityLogicalNameDiagnostic>();
                 foreach (var batch in Batch(objectTypeCodes))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -970,13 +983,17 @@ namespace D365SolutionComparer.Services.Membership
                         {
                             var matches = metadata.Where(item => item.ObjectTypeCode == objectTypeCode).ToList();
                             if (matches.Count == 0)
-                                results[objectTypeCode] = "(no entity metadata match)";
+                                results[objectTypeCode] = EntityLogicalNameDiagnostic.Unverified(
+                                    "(no entity metadata match)");
                             else if (matches.Count > 1)
-                                results[objectTypeCode] = "(multiple entity metadata matches: " +
-                                    string.Join(", ", matches.Select(item => item.LogicalName ?? "(blank)")) + ")";
+                                results[objectTypeCode] = EntityLogicalNameDiagnostic.Unverified(
+                                    "(multiple entity metadata matches: " +
+                                    string.Join(", ", matches.Select(item => item.LogicalName ?? "(blank)")) + ")");
                             else
                                 results[objectTypeCode] = string.IsNullOrWhiteSpace(matches[0].LogicalName)
-                                    ? "(entity metadata LogicalName is blank)" : matches[0].LogicalName;
+                                    ? EntityLogicalNameDiagnostic.Unverified(
+                                        "(entity metadata LogicalName is blank)")
+                                    : EntityLogicalNameDiagnostic.Verified(matches[0].LogicalName);
                         }
                     }
                     catch (OperationCanceledException) { throw; }
@@ -1008,18 +1025,15 @@ namespace D365SolutionComparer.Services.Membership
             }
 
             private static void SetEntityLogicalNameDiagnostics(IEnumerable<int> objectTypeCodes, string diagnostic,
-                IDictionary<int, string> results)
+                IDictionary<int, EntityLogicalNameDiagnostic> results)
             {
-                foreach (var objectTypeCode in objectTypeCodes) results[objectTypeCode] = diagnostic;
+                foreach (var objectTypeCode in objectTypeCodes)
+                    results[objectTypeCode] = EntityLogicalNameDiagnostic.Unverified(diagnostic);
             }
 
             private static string DescribeTeamTemplate(Entity row, string entityLogicalName)
             {
-                bool complete = HasGuid(row, "teamtemplateid") && HasText(row, "teamtemplatename") &&
-                    ReadObjectTypeCode(row).HasValue && HasInteger(row, "defaultaccessrightsmask") &&
-                    HasGuid(row, "componentidunique") && HasOption(row, "componentstate") &&
-                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
-                return (complete ? "TeamTemplate diagnostic lookup matched. " :
+                return (IsCompleteTeamTemplate(row) ? "TeamTemplate diagnostic lookup matched. " :
                     "TeamTemplate diagnostic lookup matched but returned incomplete data. ") +
                     "teamtemplateid=" + FormatTeamTemplateValue(row, "teamtemplateid") +
                     "; teamtemplatename=" + FormatTeamTemplateValue(row, "teamtemplatename") +
@@ -1029,7 +1043,15 @@ namespace D365SolutionComparer.Services.Membership
                     "; componentidunique=" + FormatTeamTemplateValue(row, "componentidunique") +
                     "; componentstate=" + FormatTeamTemplateValue(row, "componentstate") +
                     "; ismanaged=" + FormatTeamTemplateValue(row, "ismanaged") +
-                    ". Diagnostic evidence only; no semantic classification or comparison identity was assigned.";
+                    ". Diagnostic evidence only; none of these values is used as a portable comparison identity.";
+            }
+
+            private static bool IsCompleteTeamTemplate(Entity row)
+            {
+                return HasGuid(row, "teamtemplateid") && HasText(row, "teamtemplatename") &&
+                    ReadObjectTypeCode(row).HasValue && HasInteger(row, "defaultaccessrightsmask") &&
+                    HasGuid(row, "componentidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
             }
 
             private static string FormatTeamTemplateValue(Entity row, string attributeName)
@@ -1310,6 +1332,22 @@ namespace D365SolutionComparer.Services.Membership
                     new DefinitionMapping(Status,
                         string.IsNullOrEmpty(Diagnostic) ? diagnostic : Diagnostic + " " + diagnostic,
                         Definition);
+            }
+
+            private sealed class EntityLogicalNameDiagnostic
+            {
+                private EntityLogicalNameDiagnostic(bool isVerified, string displayValue)
+                {
+                    IsVerified = isVerified;
+                    DisplayValue = displayValue;
+                }
+
+                public bool IsVerified { get; }
+                public string DisplayValue { get; }
+                public static EntityLogicalNameDiagnostic Verified(string logicalName) =>
+                    new EntityLogicalNameDiagnostic(true, logicalName);
+                public static EntityLogicalNameDiagnostic Unverified(string diagnostic) =>
+                    new EntityLogicalNameDiagnostic(false, diagnostic);
             }
 
             private sealed class PendingRecord

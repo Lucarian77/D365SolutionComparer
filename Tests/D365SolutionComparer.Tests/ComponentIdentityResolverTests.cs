@@ -889,7 +889,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type511TeamTemplateLookupAddsCompleteDiagnosticEvidenceWithoutClassification()
+        public void Type511SingleCompleteTeamTemplateIsClassifiedWithoutPortableIdentity()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
             int teamTemplateQueries = 0; int entityNameMetadataQueries = 0;
@@ -912,7 +912,8 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, teamTemplateQueries);
             Assert.AreEqual(1, entityNameMetadataQueries);
             Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.IsNull(result.SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.TeamTemplate, result.SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.TeamTemplate, result.ComponentTypeKey);
             Assert.IsNull(result.ComparisonKey);
             var evidence = result.DiagnosticEvidence.Single();
             StringAssert.Contains(evidence, "teamtemplateid=" + objectId.ToString("D"));
@@ -924,9 +925,16 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(evidence, "componentstate=0 ('Published')");
             StringAssert.Contains(evidence, "ismanaged=False");
 
-            var audit = new MembershipCoverageDiagnosticsBuilder().Build(
-                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow))
-                .BroadRawComponentTypes.Single(item => item.ComponentType == 511).Evidence.Single();
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(0, coverage.BroadUnclassifiable.TotalCandidates);
+            Assert.IsFalse(coverage.BroadRawComponentTypes.Any(item => item.ComponentType == 511));
+            var bucket = coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.TeamTemplate);
+            Assert.AreEqual("Team Template", bucket.DisplayName);
+            Assert.AreEqual(1, bucket.Unsupported);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, bucket.CoverageStatus);
+            var audit = bucket.AuditEvidence.Single();
             Assert.AreEqual(componentId, audit.SolutionComponentId);
             Assert.AreEqual(objectId, audit.ObjectId);
             Assert.AreEqual(evidence, audit.DiagnosticEvidence.Single());
@@ -987,6 +995,63 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void Type511IncompleteTeamTemplateRowRemainsBroad()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var incomplete = TeamTemplate(objectId, "Incomplete template", 1, 1, false);
+            incomplete.Attributes.Remove("componentidunique");
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows(incomplete),
+                    request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.Single(), "returned incomplete data");
+            StringAssert.Contains(result.DiagnosticEvidence.Single(), "componentidunique=(not supplied)");
+        }
+
+        [TestMethod]
+        public void Type511IncompleteTeamTemplateResultSetRemainsBroad()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query =>
+                {
+                    var rows = Rows(TeamTemplate(objectId, "Partial template", 1, 1, false));
+                    rows.MoreRecords = true;
+                    return rows;
+                }, request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("Partial template")));
+        }
+
+        [TestMethod]
+        public void Type511MissingEntityMetadataMatchRemainsBroad()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution,
+                    query => Rows(TeamTemplate(objectId, "Template", 1, 1, false)),
+                    request => MetadataRows()),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.Single(), "no entity metadata match");
+        }
+
+        [TestMethod]
         public void Type511TeamTemplateLookupBatchesDeduplicatesAndCountsRequests()
         {
             var solution = Solution();
@@ -1025,7 +1090,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(8, counter.TotalRequests);
             Assert.AreEqual(202, result.Components.Count);
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
-                item.SemanticKind == null && item.ComparisonKey == null &&
+                item.SemanticKind == ComponentSemanticKinds.TeamTemplate && item.ComparisonKey == null &&
                 item.DiagnosticEvidence.Single().Contains("entitylogicalname=account")));
         }
 
@@ -1091,7 +1156,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type511DiagnosticEvidenceDoesNotChangeBroadAbsenceBlocking()
+        public void VerifiedType511IsolatedCoverageAllowsColumnAbsenceButNeverTeamTemplateAbsence()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
             var type511 = new DataverseComponentIdentityResolver().Resolve(
@@ -1106,12 +1171,20 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(solution, new[] { sourceColumn }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(solution, new[] { type511 }, DateTimeOffset.UtcNow));
 
-            Assert.AreEqual(MembershipPresence.Indeterminate,
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
                 comparison.Single(item => item.Source == sourceColumn).Presence);
             Assert.AreEqual(MembershipPresence.Indeterminate,
                 comparison.Single(item => item.Target != null).Presence);
-            Assert.IsNull(type511.SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.TeamTemplate, type511.SemanticKind);
             Assert.IsNull(type511.ComparisonKey);
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(solution, new[] { type511 }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(0, coverage.BroadUnclassifiable.TotalCandidates);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.TeamTemplate).CoverageStatus);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.Column).CoverageStatus);
         }
 
         [DataTestMethod]
