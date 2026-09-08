@@ -78,21 +78,47 @@ namespace D365SolutionComparer.Models.Membership
     public sealed class MembershipCoverageRawComponentTypeGroup
     {
         public MembershipCoverageRawComponentTypeGroup(int componentType, int count,
-            IEnumerable<MembershipCoverageDiagnosticGroup> diagnosticGroups)
+            IEnumerable<MembershipCoverageDiagnosticGroup> diagnosticGroups,
+            IEnumerable<MembershipCoverageRawComponentEvidence> evidence)
         {
             if (count <= 0) throw new ArgumentOutOfRangeException(nameof(count));
             ComponentType = componentType;
             Count = count;
             DiagnosticGroups = new List<MembershipCoverageDiagnosticGroup>(diagnosticGroups ??
                 throw new ArgumentNullException(nameof(diagnosticGroups))).AsReadOnly();
+            Evidence = new List<MembershipCoverageRawComponentEvidence>(evidence ??
+                throw new ArgumentNullException(nameof(evidence))).AsReadOnly();
             if (DiagnosticGroups.Sum(group => group.Count) > count)
                 throw new ArgumentException("Diagnostic counts cannot exceed the raw component-type count.",
                     nameof(diagnosticGroups));
+            if (Evidence.Count != count)
+                throw new ArgumentException("Every raw component candidate requires audit evidence.",
+                    nameof(evidence));
         }
 
         public int ComponentType { get; }
         public int Count { get; }
         public IReadOnlyList<MembershipCoverageDiagnosticGroup> DiagnosticGroups { get; }
+        public IReadOnlyList<MembershipCoverageRawComponentEvidence> Evidence { get; }
+    }
+
+    public sealed class MembershipCoverageRawComponentEvidence
+    {
+        public MembershipCoverageRawComponentEvidence(Guid solutionComponentId, Guid? objectId,
+            IdentityResolutionStatus resolutionStatus, string diagnostic)
+        {
+            if (solutionComponentId == Guid.Empty)
+                throw new ArgumentException("A solution component ID is required.", nameof(solutionComponentId));
+            SolutionComponentId = solutionComponentId;
+            ObjectId = objectId;
+            ResolutionStatus = resolutionStatus;
+            Diagnostic = diagnostic ?? string.Empty;
+        }
+
+        public Guid SolutionComponentId { get; }
+        public Guid? ObjectId { get; }
+        public IdentityResolutionStatus ResolutionStatus { get; }
+        public string Diagnostic { get; }
     }
 
     public sealed class MembershipCoverageDynamicComponentTypeGroup

@@ -332,11 +332,18 @@ namespace D365SolutionComparer.Tests
                 Identity(null, 80, IdentityResolutionStatus.Unresolved),
                 Identity(null, 511, IdentityResolutionStatus.Unresolved)
             };
-            int metadataQueries = 0;
+            int metadataQueries = 0; int choiceQueries = 0;
             var service = Service(solution, query => Rows());
             service.ExecuteRequest = request =>
             {
                 if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                if (request is RetrieveAttributeRequest)
+                {
+                    choiceQueries++;
+                    return ComponentTypeChoices(
+                        new OptionMetadata(new Label("App Module", 1033), 80),
+                        new OptionMetadata(new Label("Team Template", 1033), 511));
+                }
                 metadataQueries++;
                 var metadataRequest = (RetrieveMetadataChangesRequest)request;
                 CollectionAssert.AreEquivalent(new[] { "ObjectTypeCode", "LogicalName", "SchemaName" },
@@ -357,6 +364,7 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
 
             Assert.AreEqual(1, metadataQueries);
+            Assert.AreEqual(1, choiceQueries);
             Assert.AreEqual(3, result.Components.Count);
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported));
             Assert.IsTrue(result.Components.All(item => item.SemanticKind == null));
@@ -371,6 +379,116 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(Solution(), new[] { sourceColumn }, DateTimeOffset.UtcNow), result);
             Assert.AreEqual(MembershipPresence.Indeterminate,
                 comparison.Single(item => item.Source == sourceColumn).Presence);
+        }
+
+        [TestMethod]
+        public void BroadTypesKeepStableChoiceDiagnosticAndExposeRawIdsAsCoverageEvidence()
+        {
+            var solution = Solution();
+            var objectIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+            var componentIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+            var records = new[]
+            {
+                new ComponentIdentity(new SolutionComponentRecord(componentIds[0], 80, objectIds[0]),
+                    IdentityResolutionStatus.Unresolved),
+                new ComponentIdentity(new SolutionComponentRecord(componentIds[1], 80, objectIds[1]),
+                    IdentityResolutionStatus.Unresolved),
+                new ComponentIdentity(new SolutionComponentRecord(componentIds[2], 511, objectIds[2]),
+                    IdentityResolutionStatus.Unresolved)
+            };
+            int choiceRequests = 0;
+            var service = Service(solution, query => Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                if (request is RetrieveMetadataChangesRequest) return MetadataRows();
+                var attributeRequest = request as RetrieveAttributeRequest;
+                Assert.IsNotNull(attributeRequest);
+                Assert.AreEqual("solutioncomponent", attributeRequest.EntityLogicalName);
+                Assert.AreEqual("componenttype", attributeRequest.LogicalName);
+                Assert.IsFalse(attributeRequest.RetrieveAsIfPublished);
+                choiceRequests++;
+                return ComponentTypeChoices(
+                    new OptionMetadata(new Label("App Module", 1033), 80),
+                    new OptionMetadata(new Label("Team Template", 1033), 511));
+            };
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            Assert.AreEqual(1, choiceRequests);
+            Assert.AreEqual(3, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported));
+            Assert.IsTrue(result.Components.All(item => item.SemanticKind == null));
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.Where(item => item.Record.ComponentType == 80)
+                .All(item => item.Diagnostic.Contains("1033:'App Module'")));
+            StringAssert.Contains(result.Components.Single(item => item.Record.ComponentType == 511).Diagnostic,
+                "1033:'Team Template'");
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            var type80 = coverage.BroadRawComponentTypes.Single(item => item.ComponentType == 80);
+            Assert.AreEqual(2, type80.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(2, type80.Evidence.Count);
+            Assert.AreEqual(1, coverage.BroadRawComponentTypes.Single(item => item.ComponentType == 511)
+                .DiagnosticGroups.Single().Count);
+            CollectionAssert.AreEquivalent(componentIds, coverage.BroadRawComponentTypes
+                .SelectMany(item => item.Evidence).Select(item => item.SolutionComponentId).ToArray());
+            CollectionAssert.AreEquivalent(objectIds, coverage.BroadRawComponentTypes
+                .SelectMany(item => item.Evidence).Select(item => item.ObjectId.Value).ToArray());
+            Assert.IsTrue(result.Components.All(item => !item.Diagnostic.Contains(item.Record.ObjectId.Value
+                .ToString("D")) && !item.Diagnostic.Contains(item.Record.SolutionComponentId.ToString("D"))));
+        }
+
+        [TestMethod]
+        public void ComponentTypeChoiceDiagnosticFaultRemainsBroadWithSeparateRawEvidence()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
+            var record = new SolutionComponentRecord(componentId, 80, objectId);
+            var service = Service(solution, query => Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                if (request is RetrieveMetadataChangesRequest) return MetadataRows();
+                throw new FaultException("Choice metadata denied");
+            };
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                record, CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.Diagnostic, "Choice metadata denied");
+            Assert.IsFalse(result.Diagnostic.Contains(objectId.ToString("D")));
+            Assert.IsFalse(result.Diagnostic.Contains(componentId.ToString("D")));
+            var evidence = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow))
+                .BroadRawComponentTypes.Single().Evidence.Single();
+            Assert.AreEqual(objectId, evidence.ObjectId);
+            Assert.AreEqual(componentId, evidence.SolutionComponentId);
+            Assert.AreEqual(result.Diagnostic, evidence.Diagnostic);
+        }
+
+        [TestMethod]
+        public void CancellationDuringComponentTypeChoiceDiagnosticPropagates()
+        {
+            var solution = Solution();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = Service(solution, query => Rows());
+                service.ExecuteRequest = request =>
+                {
+                    if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                    if (request is RetrieveMetadataChangesRequest) return MetadataRows();
+                    cancellation.Cancel();
+                    return ComponentTypeChoices(new OptionMetadata(new Label("App Module", 1033), 80));
+                };
+
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        Identity(null, 80, IdentityResolutionStatus.Unresolved).Record, cancellation.Token));
+            }
         }
 
         [TestMethod]
@@ -625,6 +743,15 @@ namespace D365SolutionComparer.Tests
             var metadata = new EntityMetadataCollection();
             metadata.AddRange(items);
             response.Results["EntityMetadata"] = metadata;
+            return response;
+        }
+
+        private static RetrieveAttributeResponse ComponentTypeChoices(params OptionMetadata[] options)
+        {
+            var optionSet = new OptionSetMetadata();
+            foreach (var option in options) optionSet.Options.Add(option);
+            var response = new RetrieveAttributeResponse();
+            response.Results["AttributeMetadata"] = new PicklistAttributeMetadata { OptionSet = optionSet };
             return response;
         }
     }

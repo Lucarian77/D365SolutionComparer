@@ -43,7 +43,7 @@ namespace D365SolutionComparer.Services.Membership
                 .GroupBy(item => item.Record.ComponentType)
                 .OrderBy(group => group.Key)
                 .Select(group => new MembershipCoverageRawComponentTypeGroup(group.Key, group.Count(),
-                    CreateDiagnosticGroups(group)))
+                    CreateDiagnosticGroups(group), group.Select(CreateRawEvidence)))
                 .ToList();
             var dynamicComponentTypes = components.Where(item => item.RegisteredDefinition != null)
                 .GroupBy(item => item.Record.ComponentType)
@@ -120,6 +120,12 @@ namespace D365SolutionComparer.Services.Membership
                 .ThenBy(group => group.Key.Diagnostic, StringComparer.Ordinal)
                 .Select(group => new MembershipCoverageDiagnosticGroup(group.Key.Status,
                     group.Key.Diagnostic, group.Count())).ToList();
+        }
+
+        private static MembershipCoverageRawComponentEvidence CreateRawEvidence(ComponentIdentity candidate)
+        {
+            return new MembershipCoverageRawComponentEvidence(candidate.Record.SolutionComponentId,
+                candidate.Record.ObjectId, candidate.Status, candidate.Diagnostic);
         }
 
         private static string DisplayName(string semanticKind, IReadOnlyList<ComponentIdentity> candidates)

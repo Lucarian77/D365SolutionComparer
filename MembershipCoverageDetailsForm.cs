@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using D365SolutionComparer.Models.Membership;
@@ -90,7 +91,13 @@ namespace D365SolutionComparer
                 text.Append("Raw ComponentType ").Append(rawType.ComponentType.ToString(CultureInfo.InvariantCulture))
                     .Append("  Count=").AppendLine(rawType.Count.ToString(CultureInfo.InvariantCulture));
                 foreach (var group in rawType.DiagnosticGroups)
+                {
                     AppendDiagnostic(text, "  ", group);
+                    foreach (var evidence in rawType.Evidence.Where(item =>
+                        item.ResolutionStatus == group.ResolutionStatus &&
+                        string.Equals(item.Diagnostic, group.Diagnostic, StringComparison.Ordinal)))
+                        AppendRawEvidence(text, evidence);
+                }
             }
 
             text.AppendLine();
@@ -130,6 +137,14 @@ namespace D365SolutionComparer
             text.Append(prefix).Append(group.ResolutionStatus).Append(" x")
                 .Append(group.Count.ToString(CultureInfo.InvariantCulture)).Append(": ")
                 .AppendLine(group.Diagnostic.Length == 0 ? "(empty diagnostic)" : group.Diagnostic);
+        }
+
+        private static void AppendRawEvidence(StringBuilder text,
+            MembershipCoverageRawComponentEvidence evidence)
+        {
+            text.Append("    solutioncomponentid=").Append(evidence.SolutionComponentId.ToString("D"))
+                .Append("  objectid=").AppendLine(evidence.ObjectId.HasValue
+                    ? evidence.ObjectId.Value.ToString("D") : "(null)");
         }
 
         private static void AppendBucket(StringBuilder text, MembershipCoverageBucket bucket)

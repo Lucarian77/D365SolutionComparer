@@ -100,23 +100,54 @@ namespace D365SolutionComparer.Tests
         public void BroadBlockersGroupByRawTypeWithoutMergingSharedDiagnosticText()
         {
             const string exact = "Unsupported component type.";
-            var diagnostics = builder.Build(Snapshot(
-                Candidate(IdentityResolutionStatus.Unsupported, 98765, diagnostic: exact),
-                Candidate(IdentityResolutionStatus.Unsupported, 98765, diagnostic: exact),
-                Candidate(IdentityResolutionStatus.Unsupported, 98766, diagnostic: exact)));
+            var candidates = new[]
+            {
+                Candidate(IdentityResolutionStatus.Unsupported, 80, diagnostic: exact),
+                Candidate(IdentityResolutionStatus.Unsupported, 80, diagnostic: exact),
+                Candidate(IdentityResolutionStatus.Unsupported, 511, diagnostic: exact)
+            };
+            var diagnostics = builder.Build(Snapshot(candidates));
 
             Assert.AreEqual(3, diagnostics.BroadUnclassifiable.TotalCandidates);
             Assert.AreEqual(2, diagnostics.BroadRawComponentTypes.Count);
-            var first = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 98765);
-            var second = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 98766);
-            Assert.AreEqual(2, first.Count);
-            Assert.AreEqual(1, second.Count);
-            Assert.AreEqual(2, first.DiagnosticGroups.Single().Count);
-            Assert.AreEqual(1, second.DiagnosticGroups.Single().Count);
-            Assert.AreEqual(exact, first.DiagnosticGroups.Single().Diagnostic);
-            Assert.AreEqual(exact, second.DiagnosticGroups.Single().Diagnostic);
+            var type80 = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 80);
+            var type511 = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 511);
+            Assert.AreEqual(2, type80.Count);
+            Assert.AreEqual(1, type511.Count);
+            Assert.AreEqual(2, type80.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(1, type511.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(exact, type80.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(exact, type511.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(2, type80.Evidence.Count);
+            Assert.AreEqual(1, type511.Evidence.Count);
+            Assert.IsTrue(type80.Evidence.Concat(type511.Evidence).All(item =>
+                item.ResolutionStatus == IdentityResolutionStatus.Unsupported && item.Diagnostic == exact));
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 80)
+                    .Select(item => item.Record.SolutionComponentId).ToArray(),
+                type80.Evidence.Select(item => item.SolutionComponentId).ToArray());
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 80)
+                    .Select(item => item.Record.ObjectId.Value).ToArray(),
+                type80.Evidence.Select(item => item.ObjectId.Value).ToArray());
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 511)
+                    .Select(item => item.Record.SolutionComponentId).ToArray(),
+                type511.Evidence.Select(item => item.SolutionComponentId).ToArray());
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 511)
+                    .Select(item => item.Record.ObjectId.Value).ToArray(),
+                type511.Evidence.Select(item => item.ObjectId.Value).ToArray());
+            Assert.IsFalse(type80.Evidence.Select(item => item.SolutionComponentId)
+                .Intersect(type511.Evidence.Select(item => item.SolutionComponentId)).Any());
+            Assert.IsFalse(type80.Evidence.Select(item => item.ObjectId)
+                .Intersect(type511.Evidence.Select(item => item.ObjectId)).Any());
+            CollectionAssert.AreEquivalent(candidates.Select(item => item.Record.SolutionComponentId).ToArray(),
+                diagnostics.BroadRawComponentTypes.SelectMany(group => group.Evidence)
+                    .Select(item => item.SolutionComponentId).ToArray());
+            CollectionAssert.AreEquivalent(candidates.Select(item => item.Record.ObjectId.Value).ToArray(),
+                diagnostics.BroadRawComponentTypes.SelectMany(group => group.Evidence)
+                    .Select(item => item.ObjectId.Value).ToArray());
             Assert.AreEqual(diagnostics.BroadUnclassifiable.TotalCandidates,
                 diagnostics.BroadRawComponentTypes.Sum(group => group.Count));
+            Assert.AreEqual(diagnostics.BroadUnclassifiable.TotalCandidates,
+                diagnostics.BroadRawComponentTypes.Sum(group => group.Evidence.Count));
 
             Assert.ThrowsException<ArgumentException>(() => new MembershipCoverageDiagnostics(
                 diagnostics.SnapshotState, diagnostics.SemanticKinds, diagnostics.BroadUnclassifiable,

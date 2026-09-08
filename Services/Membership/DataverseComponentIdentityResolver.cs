@@ -612,10 +612,11 @@ namespace D365SolutionComparer.Services.Membership
                 var definitionTypes = broadTypes.Where(type => !connectionTypeCode.HasValue ||
                     connectionTypeCode.Value != type).ToList();
                 LoadDefinitionMappings(definitionTypes, cancellationToken);
-                LoadEntityMetadataDiagnostics(definitionTypes.Where(type =>
+                var unclassifiedTypes = definitionTypes.Where(type =>
                     definitionMappings[type].Definition == null &&
-                    definitionMappings[type].Status == IdentityResolutionStatus.Unsupported).ToList(),
-                    cancellationToken);
+                    definitionMappings[type].Status == IdentityResolutionStatus.Unsupported).ToList();
+                LoadEntityMetadataDiagnostics(unclassifiedTypes, cancellationToken);
+                LoadComponentTypeChoiceDiagnostics(unclassifiedTypes, cancellationToken);
             }
 
             private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
@@ -751,6 +752,68 @@ namespace D365SolutionComparer.Services.Membership
                             "Entity metadata diagnostic discovery failed: " + ex.Message);
                     }
                 }
+            }
+
+            private void LoadComponentTypeChoiceDiagnostics(IReadOnlyList<int> componentTypes,
+                CancellationToken cancellationToken)
+            {
+                if (componentTypes.Count == 0) return;
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var response = context.Execute(new RetrieveAttributeRequest
+                    {
+                        EntityLogicalName = "solutioncomponent",
+                        LogicalName = "componenttype",
+                        RetrieveAsIfPublished = false
+                    }) as RetrieveAttributeResponse;
+                    var metadata = response?.AttributeMetadata as EnumAttributeMetadata;
+                    var options = metadata?.OptionSet?.Options;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (options == null)
+                    {
+                        AppendMetadataDiagnostic(componentTypes,
+                            "Published solutioncomponent.componenttype choice metadata was unavailable.");
+                        return;
+                    }
+
+                    foreach (var type in componentTypes)
+                    {
+                        var matches = options.Where(option => option.Value == type).ToList();
+                        if (matches.Count == 0)
+                            AppendMetadataDiagnostic(type,
+                                "No published solutioncomponent.componenttype choice label was found for value " +
+                                type.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".");
+                        else if (matches.Count == 1)
+                            AppendMetadataDiagnostic(type,
+                                "Published solutioncomponent.componenttype choice evidence: value=" +
+                                type.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                                ", labels=[" + DescribeOptionLabels(matches[0]) +
+                                "]. Diagnostic evidence only; no semantic classification was assigned.");
+                        else
+                            AppendMetadataDiagnostic(type,
+                                "Multiple published solutioncomponent.componenttype choices use value " +
+                                type.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".");
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (FaultException ex)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    AppendMetadataDiagnostic(componentTypes,
+                        "Published solutioncomponent.componenttype choice discovery failed: " + ex.Message);
+                }
+            }
+
+            private static string DescribeOptionLabels(OptionMetadata option)
+            {
+                var labels = option.Label?.LocalizedLabels
+                    .Where(label => label != null && !string.IsNullOrWhiteSpace(label.Label))
+                    .OrderBy(label => label.LanguageCode)
+                    .Select(label => label.LanguageCode.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                        ":'" + label.Label + "'")
+                    .ToList() ?? new List<string>();
+                return labels.Count == 0 ? "(none)" : string.Join(", ", labels);
             }
 
             private void AppendMetadataDiagnostic(IEnumerable<int> componentTypes, string diagnostic)
