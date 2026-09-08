@@ -24,7 +24,7 @@ namespace D365SolutionComparer.Tests
             var service = Service(solution, query =>
             {
                 requests++;
-                AssertWorkflowColumns(query, "workflowid", "uniquename", "type", "parentworkflowid");
+                AssertRawWorkflowColumns(query);
                 return Rows(Workflow(objectId, "new_Direct", 1));
             });
 
@@ -105,6 +105,120 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             StringAssert.Contains(result.Diagnostic, "Workflow definition has a blank uniquename");
             Assert.AreEqual(1, service.Calls);
+        }
+
+        [TestMethod]
+        public void BlankDefinitionDiagnosticExposesDocumentedClassificationEvidenceWithoutCreatingAKey()
+        {
+            var solution = Solution(); var definitionId = Guid.NewGuid();
+            var uniqueRowId = Guid.NewGuid(); var unexpectedParentId = Guid.NewGuid();
+            var row = Workflow(definitionId, null, 1, unexpectedParentId);
+            row["name"] = "Diagnostic display name";
+            row["category"] = new OptionSetValue(5);
+            row.FormattedValues["category"] = "Modern Flow";
+            row["primaryentity"] = "account";
+            row["mode"] = new OptionSetValue(0);
+            row["workflowidunique"] = uniqueRowId;
+            row["statecode"] = new OptionSetValue(0);
+            row["statuscode"] = new OptionSetValue(1);
+            row["componentstate"] = new OptionSetValue(0);
+            row["ismanaged"] = true;
+            row["subprocess"] = false;
+            row["businessprocesstype"] = new OptionSetValue(0);
+            row["modernflowtype"] = new OptionSetValue(2);
+            row["uiflowtype"] = new OptionSetValue(3);
+            var service = WorkflowService(solution, new[] { row }, new Entity[0]);
+
+            var result = Resolve(service, solution, definitionId);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.StartsWith(result.Diagnostic, "Workflow definition has a blank uniquename.");
+            StringAssert.Contains(result.Diagnostic, "workflowid=" + definitionId.ToString("D"));
+            StringAssert.Contains(result.Diagnostic, "name='Diagnostic display name'");
+            StringAssert.Contains(result.Diagnostic, "type=1");
+            StringAssert.Contains(result.Diagnostic, "category=5 ('Modern Flow')");
+            StringAssert.Contains(result.Diagnostic, "primaryentity='account'");
+            StringAssert.Contains(result.Diagnostic, "mode=0");
+            StringAssert.Contains(result.Diagnostic, "parentworkflowid=" + unexpectedParentId.ToString("D"));
+            StringAssert.Contains(result.Diagnostic, "workflowidunique=" + uniqueRowId.ToString("D"));
+            StringAssert.Contains(result.Diagnostic, "statecode=0");
+            StringAssert.Contains(result.Diagnostic, "statuscode=1");
+            StringAssert.Contains(result.Diagnostic, "componentstate=0");
+            StringAssert.Contains(result.Diagnostic, "ismanaged=True");
+            StringAssert.Contains(result.Diagnostic, "subprocess=False");
+            StringAssert.Contains(result.Diagnostic, "businessprocesstype=0");
+            StringAssert.Contains(result.Diagnostic, "modernflowtype=2");
+            StringAssert.Contains(result.Diagnostic, "uiflowtype=3");
+            StringAssert.Contains(result.Diagnostic, "Diagnostic evidence only; no field listed above is used as a comparison identity.");
+            Assert.AreEqual(1, service.Calls);
+        }
+
+        [TestMethod]
+        public void BlankDefinitionDiagnosticMakesMissingOptionalEvidenceExplicit()
+        {
+            var solution = Solution(); var definitionId = Guid.NewGuid();
+            var service = WorkflowService(solution, new[] { Workflow(definitionId, null, 1) }, new Entity[0]);
+
+            var result = Resolve(service, solution, definitionId);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.Diagnostic, "name=(not supplied)");
+            StringAssert.Contains(result.Diagnostic, "parentworkflowid=(not supplied)");
+            StringAssert.Contains(result.Diagnostic, "workflowidunique=(not supplied)");
+            StringAssert.Contains(result.Diagnostic, "modernflowtype=(not supplied)");
+            StringAssert.Contains(result.Diagnostic, "uiflowtype=(not supplied)");
+        }
+
+        [TestMethod]
+        public void MatchingDiagnosticFieldsAcrossEnvironmentsDoNotCreatePortableIdentityOrMatch()
+        {
+            var snapshots = new MembershipSnapshot[2];
+            for (int side = 0; side < snapshots.Length; side++)
+            {
+                var solution = Solution(); var definitionId = Guid.NewGuid();
+                var row = Workflow(definitionId, null, 1);
+                row["name"] = "Same display name";
+                row["category"] = new OptionSetValue(5);
+                row["primaryentity"] = "account";
+                row["mode"] = new OptionSetValue(0);
+                var service = WorkflowService(solution, new[] { row }, new Entity[0]);
+                snapshots[side] = ResolveSnapshot(service, solution, definitionId);
+                Assert.IsNull(snapshots[side].Components.Single().ComparisonKey);
+            }
+
+            var target = MembershipSnapshot.Complete(snapshots[0].Solution,
+                snapshots[1].Components, snapshots[1].CapturedAt);
+            var comparison = new SolutionMembershipComparer().Compare(snapshots[0], target);
+
+            Assert.AreEqual(2, comparison.Count);
+            Assert.IsTrue(comparison.All(item => item.Presence == MembershipPresence.Indeterminate));
+            Assert.IsTrue(comparison.All(item => (item.Source ?? item.Target).Status ==
+                IdentityResolutionStatus.Unresolved));
+        }
+
+        [TestMethod]
+        public void BlankDefinitionEvidenceFlowsUnchangedIntoCoverageDiagnostics()
+        {
+            var solution = Solution(); var definitionId = Guid.NewGuid();
+            var row = Workflow(definitionId, null, 1);
+            row["name"] = "Coverage evidence";
+            row["category"] = new OptionSetValue(3);
+            var service = WorkflowService(solution, new[] { row }, new Entity[0]);
+            var snapshot = ResolveSnapshot(service, solution, definitionId);
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(snapshot);
+            var process = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                ComponentSemanticKinds.Process);
+
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, process.CoverageStatus);
+            Assert.AreEqual(1, process.Unresolved);
+            Assert.AreEqual(1, process.DiagnosticGroups.Count);
+            Assert.AreEqual(snapshot.Components.Single().Diagnostic,
+                process.DiagnosticGroups.Single().Diagnostic);
+            StringAssert.Contains(process.DiagnosticGroups.Single().Diagnostic,
+                "name='Coverage evidence'; uniquename=(not supplied); type=1; category=3");
         }
 
         [DataTestMethod]
@@ -357,9 +471,8 @@ namespace D365SolutionComparer.Tests
             {
                 var ids = QueryIds(query).ToArray();
                 var isRawQuery = ids.All(rawIds.Contains);
-                AssertWorkflowColumns(query, isRawQuery
-                    ? new[] { "workflowid", "uniquename", "type", "parentworkflowid" }
-                    : new[] { "workflowid", "uniquename", "type" });
+                if (isRawQuery) AssertRawWorkflowColumns(query);
+                else AssertWorkflowColumns(query, "workflowid", "uniquename", "type");
                 var source = isRawQuery ? rawRows : parentRows;
                 return Rows(source.Where(item => ids.Contains(item.Id)).ToArray());
             });
@@ -387,5 +500,11 @@ namespace D365SolutionComparer.Tests
 
         private static void AssertWorkflowColumns(QueryExpression query, params string[] expected) =>
             CollectionAssert.AreEquivalent(expected, query.ColumnSet.Columns.ToArray());
+
+        private static void AssertRawWorkflowColumns(QueryExpression query) =>
+            AssertWorkflowColumns(query, "workflowid", "uniquename", "name", "type", "category",
+                "primaryentity", "mode", "parentworkflowid", "workflowidunique", "statecode", "statuscode",
+                "componentstate", "ismanaged", "subprocess", "businessprocesstype", "modernflowtype",
+                "uiflowtype");
     }
 }

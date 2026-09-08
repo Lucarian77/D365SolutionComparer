@@ -363,7 +363,10 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         var query = new QueryExpression("workflow")
                         {
-                            ColumnSet = new ColumnSet("workflowid", "uniquename", "type", "parentworkflowid")
+                            ColumnSet = new ColumnSet("workflowid", "uniquename", "name", "type", "category",
+                                "primaryentity", "mode", "parentworkflowid", "workflowidunique", "statecode",
+                                "statuscode", "componentstate", "ismanaged", "subprocess", "businessprocesstype",
+                                "modernflowtype", "uiflowtype")
                         };
                         query.Criteria.AddCondition(new ConditionExpression("workflowid", ConditionOperator.In,
                             batch.Select(item => (object)item.ObjectId).ToArray()));
@@ -396,7 +399,7 @@ namespace D365SolutionComparer.Services.Membership
                             var workflowType = ReadOptionValue(row, "type");
                             if (workflowType == 1)
                                 identityCache[key] = ResolutionValue.Unresolved(key.Kind,
-                                    "Workflow definition has a blank uniquename.");
+                                    BuildBlankWorkflowDefinitionDiagnostic(row));
                             else if (workflowType == 2)
                             {
                                 var parent = row.GetAttributeValue<EntityReference>("parentworkflowid");
@@ -504,6 +507,65 @@ namespace D365SolutionComparer.Services.Membership
                 var option = row.GetAttributeValue<OptionSetValue>(attributeName);
                 return option == null ? (int?)null : option.Value;
             }
+
+            private static string BuildBlankWorkflowDefinitionDiagnostic(Entity row)
+            {
+                var evidence = new[]
+                {
+                    "workflowid=" + row.Id.ToString("D"),
+                    "name=" + FormatWorkflowEvidence(row, "name"),
+                    "uniquename=" + FormatWorkflowEvidence(row, "uniquename"),
+                    "type=" + FormatWorkflowEvidence(row, "type"),
+                    "category=" + FormatWorkflowEvidence(row, "category"),
+                    "primaryentity=" + FormatWorkflowEvidence(row, "primaryentity"),
+                    "mode=" + FormatWorkflowEvidence(row, "mode"),
+                    "parentworkflowid=" + FormatWorkflowEvidence(row, "parentworkflowid"),
+                    "workflowidunique=" + FormatWorkflowEvidence(row, "workflowidunique"),
+                    "statecode=" + FormatWorkflowEvidence(row, "statecode"),
+                    "statuscode=" + FormatWorkflowEvidence(row, "statuscode"),
+                    "componentstate=" + FormatWorkflowEvidence(row, "componentstate"),
+                    "ismanaged=" + FormatWorkflowEvidence(row, "ismanaged"),
+                    "subprocess=" + FormatWorkflowEvidence(row, "subprocess"),
+                    "businessprocesstype=" + FormatWorkflowEvidence(row, "businessprocesstype"),
+                    "modernflowtype=" + FormatWorkflowEvidence(row, "modernflowtype"),
+                    "uiflowtype=" + FormatWorkflowEvidence(row, "uiflowtype")
+                };
+                return "Workflow definition has a blank uniquename. Diagnostic evidence: " +
+                    string.Join("; ", evidence) +
+                    ". Diagnostic evidence only; no field listed above is used as a comparison identity.";
+            }
+
+            private static string FormatWorkflowEvidence(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                var reference = value as EntityReference;
+                if (reference != null) return reference.Id == Guid.Empty ? "(empty Guid)" : reference.Id.ToString("D");
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return AppendFormattedWorkflowEvidence(row, attributeName,
+                    ((bool)value).ToString());
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
+
+            private static string AppendFormattedWorkflowEvidence(Entity row, string attributeName,
+                string rawValue)
+            {
+                string formatted;
+                return row.FormattedValues.TryGetValue(attributeName, out formatted) &&
+                    !string.IsNullOrWhiteSpace(formatted)
+                    ? rawValue + " ('" + EscapeDiagnosticText(formatted) + "')"
+                    : rawValue;
+            }
+
+            private static string EscapeDiagnosticText(string value) => value.Replace("\\", "\\\\")
+                .Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t").Replace("'", "\\'");
 
             private static string ReadEntityIdentity(Entity entity, string kind, string identityAttribute)
             {
