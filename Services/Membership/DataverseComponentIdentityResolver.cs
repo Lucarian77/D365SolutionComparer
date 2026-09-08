@@ -62,6 +62,7 @@ namespace D365SolutionComparer.Services.Membership
         private sealed class ResolutionContext
         {
             private const int OptionSetComponentType = 9;
+            private const int SystemFormComponentType = 60;
             private const int AppModuleComponentType = 80;
             private const int CanvasAppComponentType = 300;
             private const int TeamTemplateComponentType = 511;
@@ -75,6 +76,8 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> optionSetDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, IReadOnlyList<string>> systemFormDiagnostics =
+                new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> canvasAppDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
@@ -82,10 +85,13 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<Guid> verifiedTeamTemplates = new HashSet<Guid>();
             private bool connectionMappingLoaded;
             private bool optionSetDiagnosticsLoaded;
+            private bool systemFormDiagnosticsLoaded;
             private bool canvasAppDiagnosticsLoaded;
             private bool teamTemplateDiagnosticsLoaded;
             private Guid? optionSetSummaryComponentId;
             private string optionSetSummaryEvidence;
+            private Guid? systemFormSummaryComponentId;
+            private string systemFormSummaryEvidence;
             private Guid? canvasAppSummaryComponentId;
             private string canvasAppSummaryEvidence;
             private int? connectionTypeCode;
@@ -643,6 +649,8 @@ namespace D365SolutionComparer.Services.Membership
                 var recordList = records.ToList();
                 LoadOptionSetDiagnostics(recordList.Where(item =>
                     item.ComponentType == OptionSetComponentType).ToList(), cancellationToken);
+                LoadSystemFormDiagnostics(recordList.Where(item =>
+                    item.ComponentType == SystemFormComponentType).ToList(), cancellationToken);
                 LoadCanvasAppDiagnostics(recordList.Where(item =>
                     item.ComponentType == CanvasAppComponentType).ToList(), cancellationToken);
                 var broadTypes = recordList.Select(item => item.ComponentType)
@@ -779,6 +787,8 @@ namespace D365SolutionComparer.Services.Membership
             {
                 if (record.ComponentType == OptionSetComponentType)
                     return GetOptionSetDiagnosticEvidence(record);
+                if (record.ComponentType == SystemFormComponentType)
+                    return GetSystemFormDiagnosticEvidence(record);
                 if (record.ComponentType == CanvasAppComponentType)
                     return GetCanvasAppDiagnosticEvidence(record);
                 return new string[0];
@@ -854,6 +864,264 @@ namespace D365SolutionComparer.Services.Membership
                     ? ((int)value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                         " ('" + value.Value + "')"
                     : "(null)";
+
+            private void LoadSystemFormDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                if (records.Count == 0 || systemFormDiagnosticsLoaded) return;
+                systemFormDiagnosticsLoaded = true;
+                systemFormSummaryComponentId = records[0].SolutionComponentId;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
+                var failures = new Dictionary<Guid, string>();
+                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
+                int returnedCount = 0;
+                bool countUnavailable = false;
+
+                foreach (var batch in Batch(objectIds))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("systemform")
+                        {
+                            ColumnSet = new ColumnSet("formid", "uniquename", "name", "objecttypecode",
+                                "type", "formidunique", "componentstate", "ismanaged")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("formid", ConditionOperator.In,
+                            batch.Select(item => (object)item).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        returnedCount += rows.Entities.Count;
+
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid formId;
+                            if (string.Equals(row.LogicalName, "systemform", StringComparison.OrdinalIgnoreCase) &&
+                                TryReadGuid(row, "formid", out formId) && batch.Contains(formId) &&
+                                (row.Id == Guid.Empty || row.Id == formId))
+                            {
+                                returnedById[formId].Add(row);
+                                continue;
+                            }
+
+                            invalidResponse = true;
+                            var detail = "Unassociated or conflicting returned systemform row: " +
+                                DescribeSystemForm(row, EntityLogicalNameDiagnostic.Unverified(
+                                    "(not resolved for an unassociated row)"));
+                            Guid conflictingId;
+                            var affectedIds = TryReadGuid(row, "formid", out conflictingId) &&
+                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
+                            foreach (var objectId in affectedIds)
+                            {
+                                List<string> evidence;
+                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
+                                    unassociatedEvidence[objectId] = evidence = new List<string>();
+                                evidence.Add(detail);
+                            }
+                        }
+
+                        if (rows.MoreRecords)
+                        {
+                            countUnavailable = true;
+                            SetSystemFormFailures(batch,
+                                "System Form diagnostic lookup returned an incomplete result set.", failures);
+                        }
+                        else if (invalidResponse)
+                        {
+                            countUnavailable = true;
+                            SetSystemFormFailures(batch,
+                                "System Form diagnostic lookup returned conflicting or incomplete primary-key data.",
+                                failures);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        countUnavailable = true;
+                        SetSystemFormFailures(batch, "System Form diagnostic lookup failed: " + ex.Message,
+                            failures);
+                    }
+                }
+
+                var numericObjectTypeCodes = returnedById.Values.SelectMany(item => item)
+                    .Select(ReadObjectTypeCode).Where(item => item.HasValue).Select(item => item.Value)
+                    .Distinct().OrderBy(item => item).ToList();
+                var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(numericObjectTypeCodes,
+                    cancellationToken);
+                int correlated = 0;
+                int missing = 0;
+                int nonUnique = 0;
+                int blankUniqueName = 0;
+                int unresolvedEntityName = 0;
+                var candidateIdentities = new List<string>();
+                foreach (var objectId in objectIds)
+                {
+                    var evidence = new List<string>();
+                    string failure;
+                    var matches = returnedById[objectId];
+                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
+                    else if (matches.Count == 0)
+                    {
+                        missing++;
+                        evidence.Add("No systemform row matched this solutioncomponent objectid.");
+                    }
+                    else if (matches.Count > 1)
+                    {
+                        nonUnique++;
+                        evidence.Add("Multiple systemform rows matched this solutioncomponent objectid.");
+                    }
+
+                    foreach (var row in matches)
+                        evidence.Add(DescribeSystemForm(row,
+                            ResolveSystemFormEntityLogicalName(row, entityLogicalNames)));
+                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    {
+                        correlated++;
+                        var row = matches[0];
+                        var uniqueName = row.GetAttributeValue<string>("uniquename");
+                        if (string.IsNullOrWhiteSpace(uniqueName)) blankUniqueName++;
+                        var entityName = ResolveSystemFormEntityLogicalName(row, entityLogicalNames);
+                        if (!entityName.IsVerified) unresolvedEntityName++;
+                        else if (!string.IsNullOrWhiteSpace(uniqueName))
+                            candidateIdentities.Add(entityName.DisplayValue + "." + uniqueName);
+                    }
+                    List<string> unassociated;
+                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    systemFormDiagnostics[objectId] = evidence.AsReadOnly();
+                }
+
+                int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
+                    item.ObjectId.Value == Guid.Empty);
+                var distinctCandidates = candidateIdentities
+                    .GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                systemFormSummaryEvidence = DescribeSystemFormSummary(records.Count, objectIds.Count,
+                    countUnavailable ? (int?)null : returnedCount,
+                    countUnavailable ? (int?)null : correlated,
+                    countUnavailable ? (int?)null : missing, missingObjectIds,
+                    countUnavailable ? (int?)null : blankUniqueName,
+                    countUnavailable ? (int?)null : unresolvedEntityName,
+                    countUnavailable ? (int?)null : nonUnique,
+                    countUnavailable ? null : distinctCandidates);
+            }
+
+            private IEnumerable<string> GetSystemFormDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType != SystemFormComponentType || !systemFormDiagnosticsLoaded)
+                    return new string[0];
+                var result = new List<string>();
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    result.Add("System Form diagnostic lookup was not attempted because objectid is unavailable.");
+                else
+                {
+                    IReadOnlyList<string> evidence;
+                    result.AddRange(systemFormDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                        ? evidence : new[] { "System Form diagnostic lookup produced no auditable result." });
+                }
+                if (record.SolutionComponentId == systemFormSummaryComponentId &&
+                    !string.IsNullOrWhiteSpace(systemFormSummaryEvidence))
+                    result.Add(systemFormSummaryEvidence);
+                return result;
+            }
+
+            private static void SetSystemFormFailures(IEnumerable<Guid> objectIds, string diagnostic,
+                IDictionary<Guid, string> failures)
+            {
+                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
+            }
+
+            private static EntityLogicalNameDiagnostic ResolveSystemFormEntityLogicalName(Entity row,
+                IDictionary<int, EntityLogicalNameDiagnostic> metadataNames)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue("objecttypecode", out value) || value == null)
+                    return EntityLogicalNameDiagnostic.Unverified("(objecttypecode unavailable)");
+                var logicalName = value as string;
+                if (logicalName != null)
+                    return string.IsNullOrWhiteSpace(logicalName)
+                        ? EntityLogicalNameDiagnostic.Unverified("(objecttypecode entity logical name is blank)")
+                        : EntityLogicalNameDiagnostic.Verified(logicalName);
+                var objectTypeCode = ReadObjectTypeCode(row);
+                EntityLogicalNameDiagnostic result;
+                return objectTypeCode.HasValue && metadataNames.TryGetValue(objectTypeCode.Value, out result)
+                    ? result : EntityLogicalNameDiagnostic.Unverified(
+                        "(objecttypecode has no supported entity-name representation)");
+            }
+
+            private static string DescribeSystemForm(Entity row, EntityLogicalNameDiagnostic entityLogicalName)
+            {
+                var uniqueName = row.GetAttributeValue<string>("uniquename");
+                var candidate = entityLogicalName.IsVerified && !string.IsNullOrWhiteSpace(uniqueName)
+                    ? "'" + EscapeDiagnosticText(entityLogicalName.DisplayValue + "." + uniqueName) + "'"
+                    : "(unavailable)";
+                bool complete = HasGuid(row, "formid") && HasText(row, "uniquename") &&
+                    HasText(row, "name") && HasSystemFormObjectType(row) && HasOption(row, "type") &&
+                    HasGuid(row, "formidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+                return (complete ? "System Form diagnostic lookup matched. " :
+                    "System Form diagnostic lookup matched but returned incomplete data. ") +
+                    "formid=" + FormatSystemFormValue(row, "formid") +
+                    "; uniquename=" + FormatSystemFormValue(row, "uniquename") +
+                    "; name=" + FormatSystemFormValue(row, "name") +
+                    "; objecttypecode=" + FormatSystemFormValue(row, "objecttypecode") +
+                    "; entitylogicalname=" + entityLogicalName.DisplayValue +
+                    "; type=" + FormatSystemFormValue(row, "type") +
+                    "; formidunique=" + FormatSystemFormValue(row, "formidunique") +
+                    "; componentstate=" + FormatSystemFormValue(row, "componentstate") +
+                    "; ismanaged=" + FormatSystemFormValue(row, "ismanaged") +
+                    "; candidateportableidentity=" + candidate +
+                    ". Diagnostic evidence only; the candidate is not used for membership comparison.";
+            }
+
+            private static string DescribeSystemFormSummary(int rawCount, int distinctObjectIdCount,
+                int? returnedCount, int? correlatedCount, int? missingCount, int missingObjectIdCount,
+                int? blankUniqueNameCount, int? unresolvedEntityNameCount, int? nonUniqueCount,
+                IReadOnlyList<string> candidateIdentities)
+            {
+                return "System Form diagnostic summary: RawType60MembershipCount=" + rawCount +
+                    "; DistinctNonemptyObjectIdCount=" + distinctObjectIdCount +
+                    "; ReturnedSystemFormRowCount=" + FormatOptionSetCount(returnedCount) +
+                    "; UniqueObjectIdCorrelationCount=" + FormatOptionSetCount(correlatedCount) +
+                    "; MissingRequestedObjectIdCount=" + FormatOptionSetCount(missingCount) +
+                    "; MissingObjectIdRecordCount=" + missingObjectIdCount +
+                    "; BlankUniqueNameCount=" + FormatOptionSetCount(blankUniqueNameCount) +
+                    "; UnresolvedEntityLogicalNameCount=" + FormatOptionSetCount(unresolvedEntityNameCount) +
+                    "; NonUniqueObjectIdCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; DistinctCandidatePortableIdentities=" + (candidateIdentities == null ? "(unavailable)" :
+                        "[" + string.Join(", ", candidateIdentities.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") + ".";
+            }
+
+            private static bool HasSystemFormObjectType(Entity row)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue("objecttypecode", out value) || value == null) return false;
+                var text = value as string;
+                return text != null ? !string.IsNullOrWhiteSpace(text) : ReadObjectTypeCode(row).HasValue;
+            }
+
+            private static string FormatSystemFormValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                if (value is int) return ((int)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
 
             private void LoadCanvasAppDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
                 CancellationToken cancellationToken)
