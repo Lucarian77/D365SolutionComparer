@@ -1120,6 +1120,232 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void Type300CanvasAppLookupCorrelatesByIdAndPreservesEveryRequestedField()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
+            var service = CanvasAppService(solution, query =>
+            {
+                AssertCanvasAppQuery(query, objectId);
+                return Rows(CanvasApp(objectId, "new_InspectionApp", "Inspection App",
+                    "a52d4d32-54af-42f6-a4cd-6d494b072cb1", false));
+            });
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                new SolutionComponentRecord(componentId, 300, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:300", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            var evidence = result.DiagnosticEvidence.First();
+            StringAssert.Contains(evidence, "canvasappid=" + objectId.ToString("D"));
+            StringAssert.Contains(evidence, "name='new_InspectionApp'");
+            StringAssert.Contains(evidence, "displayname='Inspection App'");
+            StringAssert.Contains(evidence, "uniquecanvasappid='a52d4d32-54af-42f6-a4cd-6d494b072cb1'");
+            StringAssert.Contains(evidence, "componentstate=0 ('Published')");
+            StringAssert.Contains(evidence, "ismanaged=False");
+            var summary = result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType300MembershipCount=1");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=1");
+            StringAssert.Contains(summary, "ReturnedCanvasAppRowCount=1");
+            StringAssert.Contains(summary, "UniqueObjectIdCorrelationCount=1");
+            StringAssert.Contains(summary, "BlankNameCount=0");
+            StringAssert.Contains(summary, "DistinctCandidateNames=['new_InspectionApp']");
+        }
+
+        [TestMethod]
+        public void Type300CanvasAppLookupBatchesDeduplicatesAndCountsRequests()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(0, 201).Select(index => Guid.NewGuid()).ToList();
+            var records = objectIds.Concat(new[] { objectIds[0] }).Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+            var queriedIds = new List<Guid>();
+            var service = CanvasAppService(solution, query =>
+            {
+                var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
+                Assert.IsTrue(ids.Count <= 200);
+                Assert.AreEqual(ids.Count, ids.Distinct().Count());
+                queriedIds.AddRange(ids);
+                return Rows(ids.Select((id, index) => CanvasApp(id, "new_App" + index,
+                    "App " + index, Guid.NewGuid().ToString("D"), false)).ToArray());
+            });
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            CollectionAssert.AreEquivalent(objectIds, queriedIds);
+            Assert.AreEqual(2, counter.GetQueryCount("canvasapp"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(3, counter.TotalRequests);
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported &&
+                item.SemanticKind == "unsupported:componenttype:300" && item.ComparisonKey == null));
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType300MembershipCount=202");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=201");
+            StringAssert.Contains(summary, "UniqueObjectIdCorrelationCount=201");
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                "unsupported:componenttype:300");
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(202, bucket.AuditEvidence.Count);
+        }
+
+        [TestMethod]
+        public void Type300BlankNameIsExplicitAndRemainsDiagnosticOnly()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => Rows(
+                    CanvasApp(objectId, " ", "Display only", "unique-canvas-app", false))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:300", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "name=' '");
+            var summary = result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "UniqueObjectIdCorrelationCount=1");
+            StringAssert.Contains(summary, "BlankNameCount=1");
+            StringAssert.Contains(summary, "DistinctCandidateNames=[]");
+        }
+
+        [TestMethod]
+        public void Type300ZeroAndDuplicateResultsRemainDiagnosticOnly()
+        {
+            var solution = Solution(); var missingId = Guid.NewGuid(); var duplicateId = Guid.NewGuid();
+            var service = CanvasAppService(solution, query => Rows(
+                CanvasApp(duplicateId, "new_First", "First", "unique-first", false),
+                CanvasApp(duplicateId, "new_Second", "Second", "unique-second", true)));
+            var records = new[] { missingId, duplicateId }.Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            StringAssert.Contains(result.Components[0].DiagnosticEvidence.First(), "No canvasapp row matched");
+            StringAssert.Contains(result.Components[1].DiagnosticEvidence.First(), "Multiple canvasapp rows matched");
+            Assert.IsTrue(result.Components[1].DiagnosticEvidence.Any(item => item.Contains("name='new_First'")));
+            Assert.IsTrue(result.Components[1].DiagnosticEvidence.Any(item => item.Contains("name='new_Second'")));
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "ReturnedCanvasAppRowCount=2");
+            StringAssert.Contains(summary, "UniqueObjectIdCorrelationCount=0");
+            StringAssert.Contains(summary, "MissingRequestedObjectIdCount=1");
+            StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+        }
+
+        [TestMethod]
+        public void Type300ConflictingResultPreservesEvidenceAndRemainsUnsupported()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var conflicting = CanvasApp(objectId, "new_Conflict", "Conflict", "unique-conflict", false);
+            conflicting.Id = Guid.NewGuid();
+
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => Rows(conflicting)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:300", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("name='new_Conflict'")));
+            StringAssert.Contains(result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal)),
+                "ReturnedCanvasAppRowCount=(unavailable)");
+        }
+
+        [TestMethod]
+        public void Type300FaultRemainsDiagnosticOnlyAndCancellationPropagates()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var faulted = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => throw new FaultException("Canvas App denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual("unsupported:componenttype:300", faulted.SemanticKind);
+            Assert.IsNull(faulted.ComparisonKey);
+            StringAssert.Contains(faulted.DiagnosticEvidence.First(), "Canvas App denied");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = CanvasAppService(solution, query =>
+                {
+                    cancellation.Cancel();
+                    return Rows(CanvasApp(objectId, "new_App", "App", "unique-app", false));
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 300, objectId), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void Type300NamesRemainEvidenceAndCannotCreatePortableMatches()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var resolver = new DataverseComponentIdentityResolver();
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid();
+            var source = resolver.Resolve(CanvasAppService(sourceSolution, query => Rows(
+                    CanvasApp(sourceId, "new_PortableApp", "DEV App", "dev-unique", false))),
+                sourceSolution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, sourceId),
+                CancellationToken.None);
+            var target = resolver.Resolve(CanvasAppService(targetSolution, query => Rows(
+                    CanvasApp(targetId, "NEW_PORTABLEAPP", "UAT App", "uat-unique", true))),
+                targetSolution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, targetId),
+                CancellationToken.None);
+
+            Assert.IsTrue(source.DiagnosticEvidence.Any(item => item.Contains("name='new_PortableApp'")));
+            Assert.IsTrue(target.DiagnosticEvidence.Any(item => item.Contains("name='NEW_PORTABLEAPP'")));
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(2, compared.Count);
+            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
+            Assert.IsTrue(compared.All(item => item.Source == null || item.Source.ComparisonKey == null));
+            Assert.IsTrue(compared.All(item => item.Target == null || item.Target.ComparisonKey == null));
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow));
+            var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                "unsupported:componenttype:300");
+            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(source.Diagnostic, bucket.DiagnosticGroups.Single().Diagnostic);
+        }
+
+        [TestMethod]
+        public void Type300MissingObjectIdDoesNotQueryCanvasApp()
+        {
+            var solution = Solution(); int queryCount = 0;
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => { queryCount++; return Rows(); }), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 300, null), CancellationToken.None);
+
+            Assert.AreEqual(0, queryCount);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:300", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
+        }
+
+        [TestMethod]
         public void Type511SingleCompleteTeamTemplateIsClassifiedWithoutPortableIdentity()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
@@ -1651,6 +1877,50 @@ namespace D365SolutionComparer.Tests
             };
             typeof(OptionSetMetadataBase).GetProperty("IsManaged").SetValue(metadata, isManaged);
             return metadata;
+        }
+
+        private static FakeOrganizationService CanvasAppService(SolutionIdentity solution,
+            Func<QueryExpression, EntityCollection> canvasAppQuery)
+        {
+            var service = Service(solution, query =>
+            {
+                if (query.EntityName == "canvasapp") return canvasAppQuery(query);
+                Assert.Fail("Type 300 diagnostics must not query table " + query.EntityName);
+                return Rows();
+            });
+            service.ExecuteRequest = request => request is WhoAmIRequest
+                ? (OrganizationResponse)WhoAmI(solution.Environment.OrganizationId)
+                : throw new NotSupportedException(request.RequestName);
+            return service;
+        }
+
+        private static void AssertCanvasAppQuery(QueryExpression query, params Guid[] objectIds)
+        {
+            Assert.AreEqual("canvasapp", query.EntityName);
+            CollectionAssert.AreEquivalent(new[] { "canvasappid", "name", "displayname",
+                "uniquecanvasappid", "componentstate", "ismanaged" }, query.ColumnSet.Columns.ToArray());
+            Assert.AreEqual(1, query.Criteria.Conditions.Count);
+            var condition = query.Criteria.Conditions.Single();
+            Assert.AreEqual("canvasappid", condition.AttributeName);
+            Assert.AreEqual(ConditionOperator.In, condition.Operator);
+            Assert.IsTrue(condition.Values.All(value => value != null && value.GetType() == typeof(Guid)));
+            CollectionAssert.AreEquivalent(objectIds, condition.Values.Cast<Guid>().ToArray());
+        }
+
+        private static Entity CanvasApp(Guid id, string name, string displayName, string uniqueCanvasAppId,
+            bool isManaged)
+        {
+            var row = new Entity("canvasapp", id)
+            {
+                ["canvasappid"] = id,
+                ["name"] = name,
+                ["displayname"] = displayName,
+                ["uniquecanvasappid"] = uniqueCanvasAppId,
+                ["componentstate"] = new OptionSetValue(0),
+                ["ismanaged"] = isManaged
+            };
+            row.FormattedValues["componentstate"] = "Published";
+            return row;
         }
 
         private static FakeOrganizationService TeamTemplateService(SolutionIdentity solution,

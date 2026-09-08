@@ -63,6 +63,7 @@ namespace D365SolutionComparer.Services.Membership
         {
             private const int OptionSetComponentType = 9;
             private const int AppModuleComponentType = 80;
+            private const int CanvasAppComponentType = 300;
             private const int TeamTemplateComponentType = 511;
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
@@ -74,14 +75,19 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> optionSetDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, IReadOnlyList<string>> canvasAppDiagnostics =
+                new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly HashSet<Guid> verifiedTeamTemplates = new HashSet<Guid>();
             private bool connectionMappingLoaded;
             private bool optionSetDiagnosticsLoaded;
+            private bool canvasAppDiagnosticsLoaded;
             private bool teamTemplateDiagnosticsLoaded;
             private Guid? optionSetSummaryComponentId;
             private string optionSetSummaryEvidence;
+            private Guid? canvasAppSummaryComponentId;
+            private string canvasAppSummaryEvidence;
             private int? connectionTypeCode;
             private string connectionMappingDiagnostic;
             private IdentityResolutionStatus connectionMappingStatus = IdentityResolutionStatus.Unresolved;
@@ -171,7 +177,7 @@ namespace D365SolutionComparer.Services.Membership
                         if (ComponentSemanticKinds.IsKnownBuiltInType(record.ComponentType))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
                                 "No identity resolver supports this known component type.",
-                                diagnosticEvidence: GetOptionSetDiagnosticEvidence(record));
+                                diagnosticEvidence: GetKnownComponentDiagnosticEvidence(record));
                         cancellationToken.ThrowIfCancellationRequested();
                         if (connectionMappingDiagnostic == null && connectionTypeCode.HasValue &&
                             connectionTypeCode.Value == record.ComponentType)
@@ -637,6 +643,8 @@ namespace D365SolutionComparer.Services.Membership
                 var recordList = records.ToList();
                 LoadOptionSetDiagnostics(recordList.Where(item =>
                     item.ComponentType == OptionSetComponentType).ToList(), cancellationToken);
+                LoadCanvasAppDiagnostics(recordList.Where(item =>
+                    item.ComponentType == CanvasAppComponentType).ToList(), cancellationToken);
                 var broadTypes = recordList.Select(item => item.ComponentType)
                     .Where(type => !ComponentSemanticKinds.IsKnownBuiltInType(type))
                     .Distinct().OrderBy(type => type).ToList();
@@ -767,6 +775,15 @@ namespace D365SolutionComparer.Services.Membership
                 return result;
             }
 
+            private IEnumerable<string> GetKnownComponentDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType == OptionSetComponentType)
+                    return GetOptionSetDiagnosticEvidence(record);
+                if (record.ComponentType == CanvasAppComponentType)
+                    return GetCanvasAppDiagnosticEvidence(record);
+                return new string[0];
+            }
+
             private void SetOptionSetDiagnosticFailures(IEnumerable<Guid> objectIds, string diagnostic)
             {
                 foreach (var objectId in objectIds)
@@ -837,6 +854,213 @@ namespace D365SolutionComparer.Services.Membership
                     ? ((int)value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                         " ('" + value.Value + "')"
                     : "(null)";
+
+            private void LoadCanvasAppDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                if (records.Count == 0 || canvasAppDiagnosticsLoaded) return;
+                canvasAppDiagnosticsLoaded = true;
+                canvasAppSummaryComponentId = records[0].SolutionComponentId;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
+                var failures = new Dictionary<Guid, string>();
+                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
+                int returnedCount = 0;
+                bool countUnavailable = false;
+
+                foreach (var batch in Batch(objectIds))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("canvasapp")
+                        {
+                            ColumnSet = new ColumnSet("canvasappid", "name", "displayname",
+                                "uniquecanvasappid", "componentstate", "ismanaged")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("canvasappid", ConditionOperator.In,
+                            batch.Select(item => (object)item).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        returnedCount += rows.Entities.Count;
+
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid canvasAppId;
+                            if (string.Equals(row.LogicalName, "canvasapp", StringComparison.OrdinalIgnoreCase) &&
+                                TryReadGuid(row, "canvasappid", out canvasAppId) &&
+                                batch.Contains(canvasAppId) &&
+                                (row.Id == Guid.Empty || row.Id == canvasAppId))
+                            {
+                                returnedById[canvasAppId].Add(row);
+                                continue;
+                            }
+
+                            invalidResponse = true;
+                            var detail = "Unassociated or conflicting returned canvasapp row: " +
+                                DescribeCanvasApp(row);
+                            Guid conflictingId;
+                            var affectedIds = TryReadGuid(row, "canvasappid", out conflictingId) &&
+                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
+                            foreach (var objectId in affectedIds)
+                            {
+                                List<string> evidence;
+                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
+                                    unassociatedEvidence[objectId] = evidence = new List<string>();
+                                evidence.Add(detail);
+                            }
+                        }
+
+                        if (rows.MoreRecords)
+                        {
+                            countUnavailable = true;
+                            SetCanvasAppFailures(batch,
+                                "Canvas App diagnostic lookup returned an incomplete result set.", failures);
+                        }
+                        else if (invalidResponse)
+                        {
+                            countUnavailable = true;
+                            SetCanvasAppFailures(batch,
+                                "Canvas App diagnostic lookup returned conflicting or incomplete primary-key data.",
+                                failures);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        countUnavailable = true;
+                        SetCanvasAppFailures(batch, "Canvas App diagnostic lookup failed: " + ex.Message,
+                            failures);
+                    }
+                }
+
+                int correlated = 0;
+                int missing = 0;
+                int nonUnique = 0;
+                int blankName = 0;
+                var candidateNames = new List<string>();
+                foreach (var objectId in objectIds)
+                {
+                    var evidence = new List<string>();
+                    string failure;
+                    var matches = returnedById[objectId];
+                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
+                    else if (matches.Count == 0)
+                    {
+                        missing++;
+                        evidence.Add("No canvasapp row matched this solutioncomponent objectid.");
+                    }
+                    else if (matches.Count > 1)
+                    {
+                        nonUnique++;
+                        evidence.Add("Multiple canvasapp rows matched this solutioncomponent objectid.");
+                    }
+
+                    foreach (var row in matches) evidence.Add(DescribeCanvasApp(row));
+                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    {
+                        correlated++;
+                        var name = matches[0].GetAttributeValue<string>("name");
+                        if (string.IsNullOrWhiteSpace(name)) blankName++;
+                        else candidateNames.Add(name);
+                    }
+                    List<string> unassociated;
+                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    canvasAppDiagnostics[objectId] = evidence.AsReadOnly();
+                }
+
+                int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
+                    item.ObjectId.Value == Guid.Empty);
+                var distinctNames = candidateNames.GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                canvasAppSummaryEvidence = DescribeCanvasAppSummary(records.Count, objectIds.Count,
+                    countUnavailable ? (int?)null : returnedCount,
+                    countUnavailable ? (int?)null : correlated,
+                    countUnavailable ? (int?)null : missing, missingObjectIds,
+                    countUnavailable ? (int?)null : blankName,
+                    countUnavailable ? (int?)null : nonUnique,
+                    countUnavailable ? null : distinctNames);
+            }
+
+            private IEnumerable<string> GetCanvasAppDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType != CanvasAppComponentType || !canvasAppDiagnosticsLoaded)
+                    return new string[0];
+                var result = new List<string>();
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    result.Add("Canvas App diagnostic lookup was not attempted because objectid is unavailable.");
+                else
+                {
+                    IReadOnlyList<string> evidence;
+                    result.AddRange(canvasAppDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                        ? evidence : new[] { "Canvas App diagnostic lookup produced no auditable result." });
+                }
+                if (record.SolutionComponentId == canvasAppSummaryComponentId &&
+                    !string.IsNullOrWhiteSpace(canvasAppSummaryEvidence))
+                    result.Add(canvasAppSummaryEvidence);
+                return result;
+            }
+
+            private static void SetCanvasAppFailures(IEnumerable<Guid> objectIds, string diagnostic,
+                IDictionary<Guid, string> failures)
+            {
+                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
+            }
+
+            private static string DescribeCanvasApp(Entity row)
+            {
+                bool complete = HasGuid(row, "canvasappid") && HasText(row, "name") &&
+                    HasText(row, "displayname") && HasText(row, "uniquecanvasappid") &&
+                    HasOption(row, "componentstate") && row.Attributes.ContainsKey("ismanaged") &&
+                    row.Attributes["ismanaged"] is bool;
+                return (complete ? "Canvas App diagnostic lookup matched. " :
+                    "Canvas App diagnostic lookup matched but returned incomplete data. ") +
+                    "canvasappid=" + FormatCanvasAppValue(row, "canvasappid") +
+                    "; name=" + FormatCanvasAppValue(row, "name") +
+                    "; displayname=" + FormatCanvasAppValue(row, "displayname") +
+                    "; uniquecanvasappid=" + FormatCanvasAppValue(row, "uniquecanvasappid") +
+                    "; componentstate=" + FormatCanvasAppValue(row, "componentstate") +
+                    "; ismanaged=" + FormatCanvasAppValue(row, "ismanaged") +
+                    ". Diagnostic evidence only; none of these values is used as a portable comparison identity.";
+            }
+
+            private static string DescribeCanvasAppSummary(int rawCount, int distinctObjectIdCount,
+                int? returnedCount, int? correlatedCount, int? missingCount, int missingObjectIdCount,
+                int? blankNameCount, int? nonUniqueCount, IReadOnlyList<string> distinctNames)
+            {
+                return "Canvas App diagnostic summary: RawType300MembershipCount=" + rawCount +
+                    "; DistinctNonemptyObjectIdCount=" + distinctObjectIdCount +
+                    "; ReturnedCanvasAppRowCount=" + FormatOptionSetCount(returnedCount) +
+                    "; UniqueObjectIdCorrelationCount=" + FormatOptionSetCount(correlatedCount) +
+                    "; MissingRequestedObjectIdCount=" + FormatOptionSetCount(missingCount) +
+                    "; MissingObjectIdRecordCount=" + missingObjectIdCount +
+                    "; BlankNameCount=" + FormatOptionSetCount(blankNameCount) +
+                    "; NonUniqueObjectIdCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; DistinctCandidateNames=" + (distinctNames == null ? "(unavailable)" :
+                        "[" + string.Join(", ", distinctNames.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") + ".";
+            }
+
+            private static string FormatCanvasAppValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
 
             private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
                 CancellationToken cancellationToken)
