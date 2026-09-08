@@ -102,41 +102,41 @@ namespace D365SolutionComparer.Tests
             const string exact = "Unsupported component type.";
             var candidates = new[]
             {
-                Candidate(IdentityResolutionStatus.Unsupported, 80, diagnostic: exact),
-                Candidate(IdentityResolutionStatus.Unsupported, 80, diagnostic: exact),
+                Candidate(IdentityResolutionStatus.Unsupported, 98765, diagnostic: exact),
+                Candidate(IdentityResolutionStatus.Unsupported, 98765, diagnostic: exact),
                 Candidate(IdentityResolutionStatus.Unsupported, 511, diagnostic: exact)
             };
             var diagnostics = builder.Build(Snapshot(candidates));
 
             Assert.AreEqual(3, diagnostics.BroadUnclassifiable.TotalCandidates);
             Assert.AreEqual(2, diagnostics.BroadRawComponentTypes.Count);
-            var type80 = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 80);
+            var type98765 = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 98765);
             var type511 = diagnostics.BroadRawComponentTypes.Single(group => group.ComponentType == 511);
-            Assert.AreEqual(2, type80.Count);
+            Assert.AreEqual(2, type98765.Count);
             Assert.AreEqual(1, type511.Count);
-            Assert.AreEqual(2, type80.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(2, type98765.DiagnosticGroups.Single().Count);
             Assert.AreEqual(1, type511.DiagnosticGroups.Single().Count);
-            Assert.AreEqual(exact, type80.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(exact, type98765.DiagnosticGroups.Single().Diagnostic);
             Assert.AreEqual(exact, type511.DiagnosticGroups.Single().Diagnostic);
-            Assert.AreEqual(2, type80.Evidence.Count);
+            Assert.AreEqual(2, type98765.Evidence.Count);
             Assert.AreEqual(1, type511.Evidence.Count);
-            Assert.IsTrue(type80.Evidence.Concat(type511.Evidence).All(item =>
+            Assert.IsTrue(type98765.Evidence.Concat(type511.Evidence).All(item =>
                 item.ResolutionStatus == IdentityResolutionStatus.Unsupported && item.Diagnostic == exact));
-            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 80)
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 98765)
                     .Select(item => item.Record.SolutionComponentId).ToArray(),
-                type80.Evidence.Select(item => item.SolutionComponentId).ToArray());
-            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 80)
+                type98765.Evidence.Select(item => item.SolutionComponentId).ToArray());
+            CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 98765)
                     .Select(item => item.Record.ObjectId.Value).ToArray(),
-                type80.Evidence.Select(item => item.ObjectId.Value).ToArray());
+                type98765.Evidence.Select(item => item.ObjectId.Value).ToArray());
             CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 511)
                     .Select(item => item.Record.SolutionComponentId).ToArray(),
                 type511.Evidence.Select(item => item.SolutionComponentId).ToArray());
             CollectionAssert.AreEquivalent(candidates.Where(item => item.Record.ComponentType == 511)
                     .Select(item => item.Record.ObjectId.Value).ToArray(),
                 type511.Evidence.Select(item => item.ObjectId.Value).ToArray());
-            Assert.IsFalse(type80.Evidence.Select(item => item.SolutionComponentId)
+            Assert.IsFalse(type98765.Evidence.Select(item => item.SolutionComponentId)
                 .Intersect(type511.Evidence.Select(item => item.SolutionComponentId)).Any());
-            Assert.IsFalse(type80.Evidence.Select(item => item.ObjectId)
+            Assert.IsFalse(type98765.Evidence.Select(item => item.ObjectId)
                 .Intersect(type511.Evidence.Select(item => item.ObjectId)).Any());
             CollectionAssert.AreEquivalent(candidates.Select(item => item.Record.SolutionComponentId).ToArray(),
                 diagnostics.BroadRawComponentTypes.SelectMany(group => group.Evidence)
@@ -196,6 +196,31 @@ namespace D365SolutionComparer.Tests
             var column = Kind(diagnostics, ComponentSemanticKinds.Column);
             Assert.AreEqual(1, column.Ambiguous);
             Assert.AreEqual(MembershipCoverageStatus.Incomplete, column.CoverageStatus);
+        }
+
+        [TestMethod]
+        public void AppModuleAuditEvidenceRemainsAssociatedWithItsSemanticBucket()
+        {
+            var solutionComponentId = Guid.NewGuid(); var objectId = Guid.NewGuid();
+            const string evidenceText = "appmoduleid=local; uniquename='new_App'; diagnostic fields only";
+            var appModule = new ComponentIdentity(
+                new SolutionComponentRecord(solutionComponentId, 80, objectId),
+                IdentityResolutionStatus.Resolved, "new_App",
+                componentTypeKey: ComponentSemanticKinds.AppModule,
+                diagnosticEvidence: new[] { evidenceText });
+
+            var diagnostics = builder.Build(Snapshot(appModule));
+            var bucket = Kind(diagnostics, ComponentSemanticKinds.AppModule);
+
+            Assert.AreEqual("Model-driven App / AppModule", bucket.DisplayName);
+            Assert.AreEqual(1, bucket.TotalCandidates);
+            Assert.AreEqual(1, bucket.Resolved);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, bucket.CoverageStatus);
+            Assert.AreEqual(1, bucket.AuditEvidence.Count);
+            Assert.AreEqual(solutionComponentId, bucket.AuditEvidence.Single().SolutionComponentId);
+            Assert.AreEqual(objectId, bucket.AuditEvidence.Single().ObjectId);
+            Assert.AreEqual(evidenceText, bucket.AuditEvidence.Single().DiagnosticEvidence.Single());
+            Assert.IsFalse(diagnostics.BroadRawComponentTypes.Any(item => item.ComponentType == 80));
         }
 
         [TestMethod]

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace D365SolutionComparer.Models.Membership
 {
@@ -9,7 +10,8 @@ namespace D365SolutionComparer.Models.Membership
     {
         public ComponentIdentity(SolutionComponentRecord record, IdentityResolutionStatus status,
             string comparisonKey = null, string diagnostic = null, string componentTypeKey = null,
-            string semanticKind = null, SolutionComponentDefinitionIdentity registeredDefinition = null)
+            string semanticKind = null, SolutionComponentDefinitionIdentity registeredDefinition = null,
+            IEnumerable<string> diagnosticEvidence = null)
         {
             Record = record ?? throw new ArgumentNullException(nameof(record));
             if (!Enum.IsDefined(typeof(IdentityResolutionStatus), status)) throw new ArgumentOutOfRangeException(nameof(status));
@@ -36,6 +38,7 @@ namespace D365SolutionComparer.Models.Membership
             ComparisonKey = comparisonKey;
             Diagnostic = diagnostic ?? string.Empty;
             RegisteredDefinition = registeredDefinition;
+            DiagnosticEvidence = new List<string>(diagnosticEvidence ?? new string[0]).AsReadOnly();
         }
 
         public SolutionComponentRecord Record { get; }
@@ -47,5 +50,7 @@ namespace D365SolutionComparer.Models.Membership
         public string ComparisonKey { get; }
         public string Diagnostic { get; }
         public SolutionComponentDefinitionIdentity RegisteredDefinition { get; }
+        /// <summary>Per-record audit data that is never used as an identity or diagnostic grouping key.</summary>
+        public IReadOnlyList<string> DiagnosticEvidence { get; }
     }
 }

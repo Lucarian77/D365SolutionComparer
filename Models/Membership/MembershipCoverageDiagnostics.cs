@@ -37,7 +37,8 @@ namespace D365SolutionComparer.Models.Membership
         public MembershipCoverageBucket(string semanticKind, string displayName,
             MembershipCoverageBucketType bucketType, int totalCandidates, int resolved,
             int unsupported, int unresolved, int ambiguous, MembershipCoverageStatus coverageStatus,
-            IEnumerable<MembershipCoverageDiagnosticGroup> diagnosticGroups)
+            IEnumerable<MembershipCoverageDiagnosticGroup> diagnosticGroups,
+            IEnumerable<MembershipCoverageRawComponentEvidence> auditEvidence = null)
         {
             if (bucketType != MembershipCoverageBucketType.BroadUnclassifiable &&
                 string.IsNullOrWhiteSpace(semanticKind))
@@ -61,6 +62,10 @@ namespace D365SolutionComparer.Models.Membership
             CoverageStatus = coverageStatus;
             DiagnosticGroups = new List<MembershipCoverageDiagnosticGroup>(diagnosticGroups ??
                 throw new ArgumentNullException(nameof(diagnosticGroups))).AsReadOnly();
+            AuditEvidence = new List<MembershipCoverageRawComponentEvidence>(auditEvidence ??
+                new MembershipCoverageRawComponentEvidence[0]).AsReadOnly();
+            if (AuditEvidence.Count > totalCandidates)
+                throw new ArgumentException("Audit evidence cannot exceed the candidate count.", nameof(auditEvidence));
         }
 
         public string SemanticKind { get; }
@@ -73,6 +78,7 @@ namespace D365SolutionComparer.Models.Membership
         public int Ambiguous { get; }
         public MembershipCoverageStatus CoverageStatus { get; }
         public IReadOnlyList<MembershipCoverageDiagnosticGroup> DiagnosticGroups { get; }
+        public IReadOnlyList<MembershipCoverageRawComponentEvidence> AuditEvidence { get; }
     }
 
     public sealed class MembershipCoverageRawComponentTypeGroup
@@ -105,7 +111,8 @@ namespace D365SolutionComparer.Models.Membership
     public sealed class MembershipCoverageRawComponentEvidence
     {
         public MembershipCoverageRawComponentEvidence(Guid solutionComponentId, Guid? objectId,
-            IdentityResolutionStatus resolutionStatus, string diagnostic)
+            IdentityResolutionStatus resolutionStatus, string diagnostic,
+            IEnumerable<string> diagnosticEvidence)
         {
             if (solutionComponentId == Guid.Empty)
                 throw new ArgumentException("A solution component ID is required.", nameof(solutionComponentId));
@@ -113,12 +120,15 @@ namespace D365SolutionComparer.Models.Membership
             ObjectId = objectId;
             ResolutionStatus = resolutionStatus;
             Diagnostic = diagnostic ?? string.Empty;
+            DiagnosticEvidence = new List<string>(diagnosticEvidence ??
+                throw new ArgumentNullException(nameof(diagnosticEvidence))).AsReadOnly();
         }
 
         public Guid SolutionComponentId { get; }
         public Guid? ObjectId { get; }
         public IdentityResolutionStatus ResolutionStatus { get; }
         public string Diagnostic { get; }
+        public IReadOnlyList<string> DiagnosticEvidence { get; }
     }
 
     public sealed class MembershipCoverageDynamicComponentTypeGroup

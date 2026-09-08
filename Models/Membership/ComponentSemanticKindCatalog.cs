@@ -14,6 +14,7 @@ namespace D365SolutionComparer.Models.Membership
         public const string SecurityRole = "securityrole";
         public const string EnvironmentVariableDefinition = "environmentvariabledefinition";
         public const string ConnectionReference = "connectionreference";
+        public const string AppModule = "appmodule";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
 
         // Published componenttype choices assigned to built-in kinds other than Connection Reference.
@@ -22,7 +23,7 @@ namespace D365SolutionComparer.Models.Membership
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18,
             20, 21, 22, 23, 24, 25, 26, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39,
             44, 45, 46, 47, 48, 49, 50, 52, 53, 55, 59, 60, 61, 62, 63, 64, 65, 66, 68,
-            70, 71, 90, 91, 92, 93, 95, 150, 151, 152, 153, 154, 155, 161, 162, 165, 166,
+            70, 71, 80, 90, 91, 92, 93, 95, 150, 151, 152, 153, 154, 155, 161, 162, 165, 166,
             201, 202, 203, 204, 205, 206, 207, 208, 210, 300, 371, 372, 380, 381,
             400, 401, 402, 430, 431, 432
         };
@@ -51,6 +52,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 20: return SecurityRole;
                 case 29: return Process;
                 case 61: return WebResource;
+                case 80: return AppModule;
                 case 380: return EnvironmentVariableDefinition;
                 default:
                     return IsKnownBuiltInType(componentType)

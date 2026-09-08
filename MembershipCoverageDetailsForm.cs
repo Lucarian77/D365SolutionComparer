@@ -128,6 +128,20 @@ namespace D365SolutionComparer
                 }
             }
             if (!wroteDiagnostic) text.AppendLine("None");
+
+            text.AppendLine();
+            text.AppendLine("Component identity diagnostic evidence:");
+            bool wroteEvidence = false;
+            foreach (var bucket in diagnostics.SemanticKinds.Where(item => item.AuditEvidence.Count > 0))
+            {
+                text.AppendLine("[" + bucket.DisplayName + "]");
+                foreach (var evidence in bucket.AuditEvidence)
+                {
+                    wroteEvidence = true;
+                    AppendRawEvidence(text, evidence);
+                }
+            }
+            if (!wroteEvidence) text.AppendLine("None");
             return text.ToString();
         }
 
@@ -145,6 +159,8 @@ namespace D365SolutionComparer
             text.Append("    solutioncomponentid=").Append(evidence.SolutionComponentId.ToString("D"))
                 .Append("  objectid=").AppendLine(evidence.ObjectId.HasValue
                     ? evidence.ObjectId.Value.ToString("D") : "(null)");
+            foreach (var detail in evidence.DiagnosticEvidence)
+                text.Append("      ").AppendLine(detail);
         }
 
         private static void AppendBucket(StringBuilder text, MembershipCoverageBucket bucket)

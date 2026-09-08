@@ -61,6 +61,7 @@ namespace D365SolutionComparer.Services.Membership
 
         private sealed class ResolutionContext
         {
+            private const int AppModuleComponentType = 80;
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
@@ -120,7 +121,9 @@ namespace D365SolutionComparer.Services.Membership
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var keys = group.ToList();
-                    if (group.Key == "process") ResolveProcessBatches(keys, cancellationToken);
+                    if (group.Key == ComponentSemanticKinds.Process) ResolveProcessBatches(keys, cancellationToken);
+                    else if (group.Key == ComponentSemanticKinds.AppModule)
+                        ResolveAppModuleBatches(keys, cancellationToken);
                     else if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
                     else if (group.Key == "table") ResolveTableBatches(keys, cancellationToken);
                     else foreach (var key in keys) identityCache[key] = ResolveOne(key, cancellationToken);
@@ -144,6 +147,7 @@ namespace D365SolutionComparer.Services.Membership
                     case 2: kind = "column"; break;
                     case 10: kind = "relationship"; break;
                     case 61: kind = "webresource"; break;
+                    case AppModuleComponentType: kind = ComponentSemanticKinds.AppModule; break;
                     case 29: kind = "process"; break;
                     case 20: kind = "securityrole"; break;
                     case 380: kind = "environmentvariabledefinition"; break;
@@ -188,6 +192,11 @@ namespace D365SolutionComparer.Services.Membership
                 if (key.Kind == "process")
                 {
                     ResolveProcessBatches(new[] { key }, cancellationToken);
+                    return identityCache[key];
+                }
+                if (key.Kind == ComponentSemanticKinds.AppModule)
+                {
+                    ResolveAppModuleBatches(new[] { key }, cancellationToken);
                     return identityCache[key];
                 }
                 try
@@ -816,6 +825,160 @@ namespace D365SolutionComparer.Services.Membership
                 return labels.Count == 0 ? "(none)" : string.Join(", ", labels);
             }
 
+            private void ResolveAppModuleBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                foreach (var batch in Batch(keys))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("appmodule")
+                        {
+                            ColumnSet = new ColumnSet("appmoduleid", "uniquename", "name",
+                                "appmoduleidunique", "componentstate", "ismanaged")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("appmoduleid", ConditionOperator.In,
+                            batch.Select(item => (object)item.ObjectId).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (rows.MoreRecords)
+                        {
+                            SetAppModuleResults(batch, IdentityResolutionStatus.Ambiguous,
+                                "AppModule identity lookup returned an incomplete result set.");
+                            continue;
+                        }
+
+                        var returned = new List<KeyValuePair<Guid, Entity>>();
+                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid appModuleId;
+                            if (!string.Equals(row.LogicalName, "appmodule", StringComparison.OrdinalIgnoreCase) ||
+                                !TryReadGuid(row, "appmoduleid", out appModuleId) ||
+                                !requested.Contains(appModuleId) ||
+                                row.Id != Guid.Empty && row.Id != appModuleId)
+                            {
+                                invalidResponse = true;
+                                break;
+                            }
+                            returned.Add(new KeyValuePair<Guid, Entity>(appModuleId, row));
+                        }
+                        if (invalidResponse)
+                        {
+                            SetAppModuleResults(batch, IdentityResolutionStatus.Ambiguous,
+                                "AppModule identity lookup returned conflicting or incomplete primary-key data.");
+                            continue;
+                        }
+
+                        foreach (var key in batch)
+                        {
+                            var matches = returned.Where(item => item.Key == key.ObjectId)
+                                .Select(item => item.Value).ToList();
+                            if (matches.Count == 0)
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "No appmodule row matched the component object ID.");
+                            else if (matches.Count > 1)
+                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
+                                    "An appmodule object ID lookup returned multiple records.",
+                                    matches.Select(DescribeAppModule));
+                            else
+                            {
+                                var row = matches[0];
+                                var evidence = new[] { DescribeAppModule(row) };
+                                var uniqueName = row.GetAttributeValue<string>("uniquename");
+                                identityCache[key] = string.IsNullOrWhiteSpace(uniqueName)
+                                    ? ResolutionValue.Unresolved(key.Kind,
+                                        "The appmodule record has no nonblank uniquename.", evidence)
+                                    : ResolutionValue.FromKey(key.Kind, uniqueName,
+                                        diagnosticEvidence: evidence);
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetAppModuleResults(batch, IdentityResolutionStatus.Unresolved,
+                            "AppModule identity lookup failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private void SetAppModuleResults(IEnumerable<LookupKey> keys, IdentityResolutionStatus status,
+                string diagnostic)
+            {
+                foreach (var key in keys)
+                    identityCache[key] = status == IdentityResolutionStatus.Ambiguous
+                        ? ResolutionValue.Ambiguous(key.Kind, diagnostic)
+                        : ResolutionValue.Unresolved(key.Kind, diagnostic);
+            }
+
+            private static string DescribeAppModule(Entity row)
+            {
+                bool complete = HasGuid(row, "appmoduleid") && HasText(row, "uniquename") &&
+                    HasText(row, "name") && HasGuid(row, "appmoduleidunique") &&
+                    HasOption(row, "componentstate") && row.Attributes.ContainsKey("ismanaged") &&
+                    row.Attributes["ismanaged"] is bool;
+                return (complete ? "AppModule identity lookup matched. " :
+                    "AppModule identity lookup matched but returned incomplete diagnostic data. ") +
+                    "appmoduleid=" + FormatAppModuleValue(row, "appmoduleid") +
+                    "; uniquename=" + FormatAppModuleValue(row, "uniquename") +
+                    "; name=" + FormatAppModuleValue(row, "name") +
+                    "; appmoduleidunique=" + FormatAppModuleValue(row, "appmoduleidunique") +
+                    "; componentstate=" + FormatAppModuleValue(row, "componentstate") +
+                    "; ismanaged=" + FormatAppModuleValue(row, "ismanaged") +
+                    ". Only nonblank uniquename is used as the portable comparison identity; all fields in this evidence are diagnostic.";
+            }
+
+            private static string FormatAppModuleValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
+
+            private static bool TryReadGuid(Entity row, string attributeName, out Guid value)
+            {
+                object raw;
+                if (row.Attributes.TryGetValue(attributeName, out raw) && raw is Guid)
+                {
+                    value = (Guid)raw;
+                    return value != Guid.Empty;
+                }
+                value = Guid.Empty;
+                return false;
+            }
+
+            private static bool HasGuid(Entity row, string attributeName)
+            {
+                Guid value;
+                return TryReadGuid(row, attributeName, out value);
+            }
+
+            private static bool HasText(Entity row, string attributeName)
+            {
+                object value;
+                return row.Attributes.TryGetValue(attributeName, out value) &&
+                    !string.IsNullOrWhiteSpace(value as string);
+            }
+
+            private static bool HasOption(Entity row, string attributeName)
+            {
+                object value;
+                return row.Attributes.TryGetValue(attributeName, out value) && value is OptionSetValue;
+            }
+
             private void AppendMetadataDiagnostic(IEnumerable<int> componentTypes, string diagnostic)
             {
                 foreach (var type in componentTypes) AppendMetadataDiagnostic(type, diagnostic);
@@ -887,8 +1050,9 @@ namespace D365SolutionComparer.Services.Membership
             }
 
             private static ComponentIdentity Unknown(SolutionComponentRecord record, IdentityResolutionStatus status,
-                string diagnostic, string kind = null) =>
-                new ComponentIdentity(record, status, diagnostic: diagnostic, componentTypeKey: kind);
+                string diagnostic, string kind = null, IEnumerable<string> diagnosticEvidence = null) =>
+                new ComponentIdentity(record, status, diagnostic: diagnostic, componentTypeKey: kind,
+                    diagnosticEvidence: diagnosticEvidence);
 
             private sealed class DefinitionMapping
             {
@@ -931,27 +1095,37 @@ namespace D365SolutionComparer.Services.Membership
 
             private sealed class ResolutionValue
             {
-                private ResolutionValue(string kind, IdentityResolutionStatus status, string key, string diagnostic)
+                private ResolutionValue(string kind, IdentityResolutionStatus status, string key, string diagnostic,
+                    IEnumerable<string> diagnosticEvidence)
                 {
                     Kind = kind;
                     Status = status;
                     Key = key;
                     Diagnostic = diagnostic;
+                    DiagnosticEvidence = new List<string>(diagnosticEvidence ?? new string[0]).AsReadOnly();
                 }
                 public string Kind { get; }
                 public IdentityResolutionStatus Status { get; }
                 public string Key { get; }
                 public string Diagnostic { get; }
+                public IReadOnlyList<string> DiagnosticEvidence { get; }
                 public ComponentIdentity ToIdentity(SolutionComponentRecord record) =>
-                    new ComponentIdentity(record, Status, Key, Diagnostic, Kind);
-                public static ResolutionValue FromKey(string kind, string key, string diagnostic = null) =>
+                    new ComponentIdentity(record, Status, Key, Diagnostic, Kind,
+                        diagnosticEvidence: DiagnosticEvidence);
+                public static ResolutionValue FromKey(string kind, string key, string diagnostic = null,
+                    IEnumerable<string> diagnosticEvidence = null) =>
                     string.IsNullOrWhiteSpace(key)
                     ? Unresolved(kind, "No strong portable identity was available; display names and local GUIDs are not used.")
-                    : new ResolutionValue(kind, IdentityResolutionStatus.Resolved, key, diagnostic);
-                public static ResolutionValue Unresolved(string kind, string diagnostic) =>
-                    new ResolutionValue(kind, IdentityResolutionStatus.Unresolved, null, diagnostic);
-                public static ResolutionValue Ambiguous(string kind, string diagnostic) =>
-                    new ResolutionValue(kind, IdentityResolutionStatus.Ambiguous, null, diagnostic);
+                    : new ResolutionValue(kind, IdentityResolutionStatus.Resolved, key, diagnostic,
+                        diagnosticEvidence);
+                public static ResolutionValue Unresolved(string kind, string diagnostic,
+                    IEnumerable<string> diagnosticEvidence = null) =>
+                    new ResolutionValue(kind, IdentityResolutionStatus.Unresolved, null, diagnostic,
+                        diagnosticEvidence);
+                public static ResolutionValue Ambiguous(string kind, string diagnostic,
+                    IEnumerable<string> diagnosticEvidence = null) =>
+                    new ResolutionValue(kind, IdentityResolutionStatus.Ambiguous, null, diagnostic,
+                        diagnosticEvidence);
             }
 
             private sealed class PendingWorkflowActivation

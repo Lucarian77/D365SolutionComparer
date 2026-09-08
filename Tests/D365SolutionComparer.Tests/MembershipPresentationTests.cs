@@ -51,6 +51,17 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void AppModuleIdentityUsesModelDrivenAppPresentationLabel()
+        {
+            var presentation = Present(
+                Snapshot(Identity("new_App", 80, kind: ComponentSemanticKinds.AppModule)),
+                Snapshot(Identity("NEW_APP", 80, kind: ComponentSemanticKinds.AppModule)));
+
+            Assert.AreEqual("Model-driven App / AppModule", presentation.Rows.Single().ComponentKind);
+            Assert.AreEqual("Present in Both", presentation.Rows.Single().MembershipStatus);
+        }
+
+        [TestMethod]
         public void CompleteResolvedOppositeInventoryPresentsGenuineMissing()
         {
             var presentation = Present(Snapshot(Identity("new_/script.js")), Snapshot());

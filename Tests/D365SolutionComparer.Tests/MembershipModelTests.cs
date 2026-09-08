@@ -56,6 +56,7 @@ namespace D365SolutionComparer.Tests
         [DataRow(11, ComponentSemanticKinds.Relationship)]
         [DataRow(12, ComponentSemanticKinds.Relationship)]
         [DataRow(61, ComponentSemanticKinds.WebResource)]
+        [DataRow(80, ComponentSemanticKinds.AppModule)]
         [DataRow(29, ComponentSemanticKinds.Process)]
         [DataRow(20, ComponentSemanticKinds.SecurityRole)]
         [DataRow(380, ComponentSemanticKinds.EnvironmentVariableDefinition)]

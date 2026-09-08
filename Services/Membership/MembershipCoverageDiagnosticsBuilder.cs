@@ -17,7 +17,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.Process,
             ComponentSemanticKinds.SecurityRole,
             ComponentSemanticKinds.EnvironmentVariableDefinition,
-            ComponentSemanticKinds.ConnectionReference
+            ComponentSemanticKinds.ConnectionReference,
+            ComponentSemanticKinds.AppModule
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -108,7 +109,8 @@ namespace D365SolutionComparer.Services.Membership
             return new MembershipCoverageBucket(semanticKind, displayName, bucketType, candidates.Count,
                 resolved, unsupported, unresolved, ambiguous,
                 complete ? MembershipCoverageStatus.Complete : MembershipCoverageStatus.Incomplete,
-                CreateDiagnosticGroups(candidates));
+                CreateDiagnosticGroups(candidates), candidates.Where(item => item.DiagnosticEvidence.Count > 0)
+                    .Select(CreateRawEvidence));
         }
 
         private static IReadOnlyList<MembershipCoverageDiagnosticGroup> CreateDiagnosticGroups(
@@ -125,7 +127,8 @@ namespace D365SolutionComparer.Services.Membership
         private static MembershipCoverageRawComponentEvidence CreateRawEvidence(ComponentIdentity candidate)
         {
             return new MembershipCoverageRawComponentEvidence(candidate.Record.SolutionComponentId,
-                candidate.Record.ObjectId, candidate.Status, candidate.Diagnostic);
+                candidate.Record.ObjectId, candidate.Status, candidate.Diagnostic,
+                candidate.DiagnosticEvidence);
         }
 
         private static string DisplayName(string semanticKind, IReadOnlyList<ComponentIdentity> candidates)
@@ -140,6 +143,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SecurityRole: return "Security Role";
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
+                case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

@@ -86,6 +86,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "securityrole": return "Security Role";
                 case "environmentvariabledefinition": return "Environment Variable Definition";
                 case "connectionreference": return "Connection Reference";
+                case "appmodule": return "Model-driven App / AppModule";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -167,6 +168,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SecurityRole: return "Security Role";
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
+                case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 default: return DisplayKind(identity);
             }
         }
