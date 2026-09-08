@@ -510,7 +510,8 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(0, appModuleQueries);
             Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
             Assert.IsNull(result.SemanticKind);
-            Assert.AreEqual(0, result.DiagnosticEvidence.Count);
+            Assert.AreEqual(1, result.DiagnosticEvidence.Count);
+            StringAssert.Contains(result.DiagnosticEvidence.Single(), "No teamtemplate row matched");
         }
 
         [TestMethod]
@@ -887,6 +888,232 @@ namespace D365SolutionComparer.Tests
             }
         }
 
+        [TestMethod]
+        public void Type511TeamTemplateLookupAddsCompleteDiagnosticEvidenceWithoutClassification()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
+            int teamTemplateQueries = 0; int entityNameMetadataQueries = 0;
+            var service = TeamTemplateService(solution, query =>
+            {
+                teamTemplateQueries++;
+                AssertTeamTemplateQuery(query, objectId);
+                return Rows(TeamTemplate(objectId, "Account access team", 1, 3, false));
+            }, request =>
+            {
+                var codes = AssertEntityLogicalNameMetadataQuery(request);
+                entityNameMetadataQueries++;
+                CollectionAssert.AreEquivalent(new[] { 1 }, codes);
+                return MetadataRows(EntityMetadata(1, "account", "Account"));
+            });
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                new SolutionComponentRecord(componentId, 511, objectId), CancellationToken.None);
+
+            Assert.AreEqual(1, teamTemplateQueries);
+            Assert.AreEqual(1, entityNameMetadataQueries);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            var evidence = result.DiagnosticEvidence.Single();
+            StringAssert.Contains(evidence, "teamtemplateid=" + objectId.ToString("D"));
+            StringAssert.Contains(evidence, "teamtemplatename='Account access team'");
+            StringAssert.Contains(evidence, "objecttypecode=1");
+            StringAssert.Contains(evidence, "entitylogicalname=account");
+            StringAssert.Contains(evidence, "defaultaccessrightsmask=3");
+            StringAssert.Contains(evidence, "componentidunique=");
+            StringAssert.Contains(evidence, "componentstate=0 ('Published')");
+            StringAssert.Contains(evidence, "ismanaged=False");
+
+            var audit = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow))
+                .BroadRawComponentTypes.Single(item => item.ComponentType == 511).Evidence.Single();
+            Assert.AreEqual(componentId, audit.SolutionComponentId);
+            Assert.AreEqual(objectId, audit.ObjectId);
+            Assert.AreEqual(evidence, audit.DiagnosticEvidence.Single());
+        }
+
+        [TestMethod]
+        public void Type511TeamTemplateLookupZeroResultRemainsBroadWithStableEvidence()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows()), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 511, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual(1, result.DiagnosticEvidence.Count);
+            StringAssert.Contains(result.DiagnosticEvidence.Single(), "No teamtemplate row matched");
+            Assert.IsFalse(result.DiagnosticEvidence.Single().Contains(objectId.ToString("D")));
+        }
+
+        [TestMethod]
+        public void Type511DuplicateTeamTemplateResultsRemainBroadAndPreserveEveryReturnedRow()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows(
+                    TeamTemplate(objectId, "First template", 1, 1, false),
+                    TeamTemplate(objectId, "Second template", 1, 2, true)),
+                    request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual(3, result.DiagnosticEvidence.Count);
+            StringAssert.Contains(result.DiagnosticEvidence[0], "Multiple teamtemplate rows matched");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("teamtemplatename='First template'")));
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("teamtemplatename='Second template'")));
+        }
+
+        [TestMethod]
+        public void Type511ConflictingTeamTemplateResultRemainsBroadAndPreservesReturnedValues()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var conflicting = TeamTemplate(objectId, "Conflicting template", 1, 7, false);
+            conflicting.Id = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows(conflicting)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 511, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("Conflicting template")));
+        }
+
+        [TestMethod]
+        public void Type511TeamTemplateLookupBatchesDeduplicatesAndCountsRequests()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(0, 201).Select(index => Guid.NewGuid()).ToList();
+            var records = objectIds.Concat(new[] { objectIds[0] }).Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+            var queriedIds = new List<Guid>(); int entityNameMetadataQueries = 0;
+            var service = TeamTemplateService(solution, query =>
+            {
+                var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
+                Assert.IsTrue(ids.Count <= 200);
+                Assert.AreEqual(ids.Count, ids.Distinct().Count());
+                queriedIds.AddRange(ids);
+                return Rows(ids.Select(id => TeamTemplate(id, "Template", 1, 1, false)).ToArray());
+            }, request =>
+            {
+                entityNameMetadataQueries++;
+                CollectionAssert.AreEquivalent(new[] { 1 }, AssertEntityLogicalNameMetadataQuery(request));
+                return MetadataRows(EntityMetadata(1, "account", "Account"));
+            });
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            Assert.AreEqual(201, queriedIds.Count);
+            CollectionAssert.AreEquivalent(objectIds, queriedIds);
+            Assert.AreEqual(1, entityNameMetadataQueries);
+            Assert.AreEqual(2, counter.GetQueryCount("teamtemplate"));
+            Assert.AreEqual(2, counter.GetQueryCount("solutioncomponentdefinition"));
+            Assert.AreEqual(2, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveAttribute"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(8, counter.TotalRequests);
+            Assert.AreEqual(202, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
+                item.SemanticKind == null && item.ComparisonKey == null &&
+                item.DiagnosticEvidence.Single().Contains("entitylogicalname=account")));
+        }
+
+        [TestMethod]
+        public void Type511TeamTemplateFaultAndMetadataFaultRemainDiagnosticOnly()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var lookupFault = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => throw new FaultException("TeamTemplate denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, lookupFault.Status);
+            Assert.IsNull(lookupFault.SemanticKind);
+            Assert.IsNull(lookupFault.ComparisonKey);
+            StringAssert.Contains(lookupFault.DiagnosticEvidence.Single(), "TeamTemplate denied");
+
+            var metadataFault = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution,
+                    query => Rows(TeamTemplate(objectId, "Template", 1, 1, false)),
+                    request => throw new FaultException("Entity metadata denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, metadataFault.Status);
+            Assert.IsNull(metadataFault.SemanticKind);
+            Assert.IsNull(metadataFault.ComparisonKey);
+            StringAssert.Contains(metadataFault.DiagnosticEvidence.Single(), "Entity metadata denied");
+        }
+
+        [TestMethod]
+        public void CancellationDuringType511TeamTemplateLookupPropagates()
+        {
+            var solution = Solution();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = TeamTemplateService(solution, query =>
+                {
+                    cancellation.Cancel();
+                    return Rows();
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 511, Guid.NewGuid()), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void CancellationDuringType511EntityLogicalNameLookupPropagates()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = TeamTemplateService(solution,
+                    query => Rows(TeamTemplate(objectId, "Template", 1, 1, false)),
+                    request =>
+                    {
+                        cancellation.Cancel();
+                        return MetadataRows(EntityMetadata(1, "account", "Account"));
+                    });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 511, objectId), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void Type511DiagnosticEvidenceDoesNotChangeBroadAbsenceBlocking()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var type511 = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution,
+                    query => Rows(TeamTemplate(objectId, "Account template", 1, 1, false)),
+                    request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
+                CancellationToken.None);
+            var sourceColumn = Identity("account.name", 2, kind: ComponentSemanticKinds.Column);
+
+            var comparison = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(solution, new[] { sourceColumn }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(solution, new[] { type511 }, DateTimeOffset.UtcNow));
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                comparison.Single(item => item.Source == sourceColumn).Presence);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                comparison.Single(item => item.Target != null).Presence);
+            Assert.IsNull(type511.SemanticKind);
+            Assert.IsNull(type511.ComparisonKey);
+        }
+
         [DataTestMethod]
         [DataRow(3)]
         [DataRow(11)]
@@ -1080,6 +1307,74 @@ namespace D365SolutionComparer.Tests
             var response = new RetrieveAttributeResponse();
             response.Results["AttributeMetadata"] = new PicklistAttributeMetadata { OptionSet = optionSet };
             return response;
+        }
+
+        private static FakeOrganizationService TeamTemplateService(SolutionIdentity solution,
+            Func<QueryExpression, EntityCollection> teamTemplateQuery,
+            Func<RetrieveMetadataChangesRequest, RetrieveMetadataChangesResponse> entityNameMetadataQuery = null)
+        {
+            var service = Service(solution, query => query.EntityName == "teamtemplate"
+                ? teamTemplateQuery(query) : Rows());
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                var metadataRequest = request as RetrieveMetadataChangesRequest;
+                if (metadataRequest != null)
+                {
+                    bool isEntityNameLookup = metadataRequest.Query.Properties.PropertyNames.Count == 2 &&
+                        metadataRequest.Query.Properties.PropertyNames.Contains("ObjectTypeCode") &&
+                        metadataRequest.Query.Properties.PropertyNames.Contains("LogicalName");
+                    return isEntityNameLookup && entityNameMetadataQuery != null
+                        ? entityNameMetadataQuery(metadataRequest) : MetadataRows();
+                }
+                if (request is RetrieveAttributeRequest)
+                    return ComponentTypeChoices(new OptionMetadata(new Label("Team Template", 1033), 511));
+                throw new NotSupportedException(request.RequestName);
+            };
+            return service;
+        }
+
+        private static int[] AssertEntityLogicalNameMetadataQuery(RetrieveMetadataChangesRequest request)
+        {
+            CollectionAssert.AreEquivalent(new[] { "ObjectTypeCode", "LogicalName" },
+                request.Query.Properties.PropertyNames.ToArray());
+            Assert.AreEqual(LogicalOperator.Or, request.Query.Criteria.FilterOperator);
+            Assert.IsTrue(request.Query.Criteria.Conditions.All(condition =>
+                condition.PropertyName == "ObjectTypeCode" &&
+                condition.ConditionOperator == MetadataConditionOperator.Equals &&
+                condition.Value != null && condition.Value.GetType() == typeof(int)));
+            return request.Query.Criteria.Conditions.Select(condition => (int)condition.Value).ToArray();
+        }
+
+        private static void AssertTeamTemplateQuery(QueryExpression query, params Guid[] objectIds)
+        {
+            Assert.AreEqual("teamtemplate", query.EntityName);
+            CollectionAssert.AreEquivalent(new[] { "teamtemplateid", "teamtemplatename", "objecttypecode",
+                "defaultaccessrightsmask", "componentidunique", "componentstate", "ismanaged" },
+                query.ColumnSet.Columns.ToArray());
+            Assert.AreEqual(1, query.Criteria.Conditions.Count);
+            var condition = query.Criteria.Conditions.Single();
+            Assert.AreEqual("teamtemplateid", condition.AttributeName);
+            Assert.AreEqual(ConditionOperator.In, condition.Operator);
+            Assert.IsTrue(condition.Values.All(value => value != null && value.GetType() == typeof(Guid)));
+            CollectionAssert.AreEquivalent(objectIds, condition.Values.Cast<Guid>().ToArray());
+        }
+
+        private static Entity TeamTemplate(Guid id, string name, int objectTypeCode, int accessMask,
+            bool isManaged)
+        {
+            var row = new Entity("teamtemplate", id)
+            {
+                ["teamtemplateid"] = id,
+                ["teamtemplatename"] = name,
+                ["objecttypecode"] = objectTypeCode,
+                ["defaultaccessrightsmask"] = accessMask,
+                ["componentidunique"] = Guid.NewGuid(),
+                ["componentstate"] = new OptionSetValue(0),
+                ["ismanaged"] = isManaged
+            };
+            row.FormattedValues["componentstate"] = "Published";
+            return row;
         }
 
         private static FakeOrganizationService BroadTypeService(SolutionIdentity solution,

@@ -62,6 +62,7 @@ namespace D365SolutionComparer.Services.Membership
         private sealed class ResolutionContext
         {
             private const int AppModuleComponentType = 80;
+            private const int TeamTemplateComponentType = 511;
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
@@ -70,7 +71,10 @@ namespace D365SolutionComparer.Services.Membership
             private readonly Dictionary<int, DefinitionMapping> definitionMappings =
                 new Dictionary<int, DefinitionMapping>();
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
+            private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
+                new Dictionary<Guid, IReadOnlyList<string>>();
             private bool connectionMappingLoaded;
+            private bool teamTemplateDiagnosticsLoaded;
             private int? connectionTypeCode;
             private string connectionMappingDiagnostic;
             private IdentityResolutionStatus connectionMappingStatus = IdentityResolutionStatus.Unresolved;
@@ -170,7 +174,8 @@ namespace D365SolutionComparer.Services.Membership
                         DefinitionMapping mapping;
                         if (!definitionMappings.TryGetValue(record.ComponentType, out mapping))
                             return Unknown(record, IdentityResolutionStatus.Unsupported,
-                                "No identity resolver supports this component type.");
+                                "No identity resolver supports this component type.",
+                                diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
                         if (mapping.Definition != null)
                             return new ComponentIdentity(record, IdentityResolutionStatus.Unsupported,
                                 diagnostic: "No portable identity resolver supports registered solution-component family '" +
@@ -178,8 +183,10 @@ namespace D365SolutionComparer.Services.Membership
                                 semanticKind: mapping.Definition.SemanticKind,
                                 registeredDefinition: mapping.Definition);
                         if (connectionMappingDiagnostic != null)
-                            return Unknown(record, connectionMappingStatus, connectionMappingDiagnostic);
-                        return Unknown(record, mapping.Status, mapping.Diagnostic);
+                            return Unknown(record, connectionMappingStatus, connectionMappingDiagnostic,
+                                diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
+                        return Unknown(record, mapping.Status, mapping.Diagnostic,
+                            diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
                 }
                 if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
                     return Unknown(record, IdentityResolutionStatus.Unresolved,
@@ -612,7 +619,8 @@ namespace D365SolutionComparer.Services.Membership
             private void PrepareClassifications(IEnumerable<SolutionComponentRecord> records,
                 CancellationToken cancellationToken)
             {
-                var broadTypes = records.Select(item => item.ComponentType)
+                var recordList = records.ToList();
+                var broadTypes = recordList.Select(item => item.ComponentType)
                     .Where(type => !ComponentSemanticKinds.IsKnownBuiltInType(type))
                     .Distinct().OrderBy(type => type).ToList();
                 if (broadTypes.Count == 0) return;
@@ -626,6 +634,11 @@ namespace D365SolutionComparer.Services.Membership
                     definitionMappings[type].Status == IdentityResolutionStatus.Unsupported).ToList();
                 LoadEntityMetadataDiagnostics(unclassifiedTypes, cancellationToken);
                 LoadComponentTypeChoiceDiagnostics(unclassifiedTypes, cancellationToken);
+                bool type511RemainsBroad = definitionTypes.Contains(TeamTemplateComponentType) &&
+                    definitionMappings[TeamTemplateComponentType].Definition == null;
+                if (type511RemainsBroad)
+                    LoadTeamTemplateDiagnostics(recordList.Where(item =>
+                        item.ComponentType == TeamTemplateComponentType).ToList(), cancellationToken);
             }
 
             private void LoadDefinitionMappings(IReadOnlyList<int> componentTypes,
@@ -823,6 +836,225 @@ namespace D365SolutionComparer.Services.Membership
                         ":'" + label.Label + "'")
                     .ToList() ?? new List<string>();
                 return labels.Count == 0 ? "(none)" : string.Join(", ", labels);
+            }
+
+            private void LoadTeamTemplateDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                teamTemplateDiagnosticsLoaded = true;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
+                var failures = new Dictionary<Guid, string>();
+                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
+
+                foreach (var batch in Batch(objectIds))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("teamtemplate")
+                        {
+                            ColumnSet = new ColumnSet("teamtemplateid", "teamtemplatename", "objecttypecode",
+                                "defaultaccessrightsmask", "componentidunique", "componentstate", "ismanaged")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("teamtemplateid", ConditionOperator.In,
+                            batch.Select(item => (object)item).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid teamTemplateId;
+                            if (string.Equals(row.LogicalName, "teamtemplate", StringComparison.OrdinalIgnoreCase) &&
+                                TryReadGuid(row, "teamtemplateid", out teamTemplateId) &&
+                                batch.Contains(teamTemplateId) &&
+                                (row.Id == Guid.Empty || row.Id == teamTemplateId))
+                            {
+                                returnedById[teamTemplateId].Add(row);
+                                continue;
+                            }
+
+                            invalidResponse = true;
+                            var detail = "Unassociated or conflicting returned row: " +
+                                DescribeTeamTemplate(row, "(not resolved for an unassociated row)");
+                            Guid conflictingId;
+                            var affectedIds = TryReadGuid(row, "teamtemplateid", out conflictingId) &&
+                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
+                            foreach (var objectId in affectedIds)
+                            {
+                                List<string> evidence;
+                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
+                                    unassociatedEvidence[objectId] = evidence = new List<string>();
+                                evidence.Add(detail);
+                            }
+                        }
+
+                        if (rows.MoreRecords)
+                            SetTeamTemplateFailures(batch,
+                                "TeamTemplate diagnostic lookup returned an incomplete result set.", failures);
+                        else if (invalidResponse)
+                            SetTeamTemplateFailures(batch,
+                                "TeamTemplate diagnostic lookup returned conflicting or incomplete primary-key data.",
+                                failures);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetTeamTemplateFailures(batch, "TeamTemplate diagnostic lookup failed: " + ex.Message,
+                            failures);
+                    }
+                }
+
+                var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(returnedById.Values
+                    .SelectMany(item => item).Select(ReadObjectTypeCode).Where(item => item.HasValue)
+                    .Select(item => item.Value).Distinct().OrderBy(item => item).ToList(), cancellationToken);
+                foreach (var objectId in objectIds)
+                {
+                    var evidence = new List<string>();
+                    string failure;
+                    var matches = returnedById[objectId];
+                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
+                    else if (matches.Count == 0)
+                        evidence.Add("No teamtemplate row matched this solutioncomponent objectid.");
+                    else if (matches.Count > 1)
+                        evidence.Add("Multiple teamtemplate rows matched this solutioncomponent objectid.");
+
+                    foreach (var row in matches)
+                    {
+                        var objectTypeCode = ReadObjectTypeCode(row);
+                        string entityLogicalName;
+                        evidence.Add(DescribeTeamTemplate(row, objectTypeCode.HasValue &&
+                            entityLogicalNames.TryGetValue(objectTypeCode.Value, out entityLogicalName)
+                            ? entityLogicalName : "(objecttypecode unavailable)"));
+                    }
+                    List<string> unassociated;
+                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    teamTemplateDiagnostics[objectId] = evidence.AsReadOnly();
+                }
+            }
+
+            private IDictionary<int, string> ResolveEntityLogicalNameDiagnostics(IReadOnlyList<int> objectTypeCodes,
+                CancellationToken cancellationToken)
+            {
+                var results = new Dictionary<int, string>();
+                foreach (var batch in Batch(objectTypeCodes))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new EntityQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression("ObjectTypeCode", "LogicalName"),
+                            Criteria = new MetadataFilterExpression(LogicalOperator.Or)
+                        };
+                        foreach (var objectTypeCode in batch)
+                            query.Criteria.Conditions.Add(new MetadataConditionExpression("ObjectTypeCode",
+                                MetadataConditionOperator.Equals, objectTypeCode));
+                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
+                            as RetrieveMetadataChangesResponse;
+                        var metadata = response?.EntityMetadata ?? new EntityMetadataCollection();
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (metadata.Any(item => !item.ObjectTypeCode.HasValue ||
+                            !batch.Contains(item.ObjectTypeCode.Value)))
+                        {
+                            SetEntityLogicalNameDiagnostics(batch,
+                                "(metadata lookup returned conflicting ObjectTypeCode data)", results);
+                            continue;
+                        }
+
+                        foreach (var objectTypeCode in batch)
+                        {
+                            var matches = metadata.Where(item => item.ObjectTypeCode == objectTypeCode).ToList();
+                            if (matches.Count == 0)
+                                results[objectTypeCode] = "(no entity metadata match)";
+                            else if (matches.Count > 1)
+                                results[objectTypeCode] = "(multiple entity metadata matches: " +
+                                    string.Join(", ", matches.Select(item => item.LogicalName ?? "(blank)")) + ")";
+                            else
+                                results[objectTypeCode] = string.IsNullOrWhiteSpace(matches[0].LogicalName)
+                                    ? "(entity metadata LogicalName is blank)" : matches[0].LogicalName;
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetEntityLogicalNameDiagnostics(batch,
+                            "(entity metadata lookup failed: " + ex.Message + ")", results);
+                    }
+                }
+                return results;
+            }
+
+            private IEnumerable<string> GetTeamTemplateDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (record.ComponentType != TeamTemplateComponentType || !teamTemplateDiagnosticsLoaded)
+                    return new string[0];
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    return new[] { "TeamTemplate diagnostic lookup was not attempted because objectid is unavailable." };
+                IReadOnlyList<string> evidence;
+                return teamTemplateDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                    ? evidence : new[] { "TeamTemplate diagnostic lookup produced no auditable result." };
+            }
+
+            private static void SetTeamTemplateFailures(IEnumerable<Guid> objectIds, string diagnostic,
+                IDictionary<Guid, string> failures)
+            {
+                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
+            }
+
+            private static void SetEntityLogicalNameDiagnostics(IEnumerable<int> objectTypeCodes, string diagnostic,
+                IDictionary<int, string> results)
+            {
+                foreach (var objectTypeCode in objectTypeCodes) results[objectTypeCode] = diagnostic;
+            }
+
+            private static string DescribeTeamTemplate(Entity row, string entityLogicalName)
+            {
+                bool complete = HasGuid(row, "teamtemplateid") && HasText(row, "teamtemplatename") &&
+                    ReadObjectTypeCode(row).HasValue && HasInteger(row, "defaultaccessrightsmask") &&
+                    HasGuid(row, "componentidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+                return (complete ? "TeamTemplate diagnostic lookup matched. " :
+                    "TeamTemplate diagnostic lookup matched but returned incomplete data. ") +
+                    "teamtemplateid=" + FormatTeamTemplateValue(row, "teamtemplateid") +
+                    "; teamtemplatename=" + FormatTeamTemplateValue(row, "teamtemplatename") +
+                    "; objecttypecode=" + FormatTeamTemplateValue(row, "objecttypecode") +
+                    "; entitylogicalname=" + entityLogicalName +
+                    "; defaultaccessrightsmask=" + FormatTeamTemplateValue(row, "defaultaccessrightsmask") +
+                    "; componentidunique=" + FormatTeamTemplateValue(row, "componentidunique") +
+                    "; componentstate=" + FormatTeamTemplateValue(row, "componentstate") +
+                    "; ismanaged=" + FormatTeamTemplateValue(row, "ismanaged") +
+                    ". Diagnostic evidence only; no semantic classification or comparison identity was assigned.";
+            }
+
+            private static string FormatTeamTemplateValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                if (value is int) return ((int)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (value is long) return ((long)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
+
+            private static bool HasInteger(Entity row, string attributeName)
+            {
+                object value;
+                return row.Attributes.TryGetValue(attributeName, out value) &&
+                    (value is int || value is long);
             }
 
             private void ResolveAppModuleBatches(IReadOnlyList<LookupKey> keys,
