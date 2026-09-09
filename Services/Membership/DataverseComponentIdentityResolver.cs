@@ -1482,11 +1482,27 @@ namespace D365SolutionComparer.Services.Membership
                 int nonUnique = 0;
                 int blankUniqueName = 0;
                 int unresolvedEntityName = 0;
-                var candidateIdentities = new List<string>();
+                var analyses = objectIds.ToDictionary(item => item, item =>
+                    AnalyzeSystemFormCandidate(retrieval.GetCorrelation(item), entityLogicalNames));
+                var candidateGroups = analyses.Values.Where(item =>
+                        !string.IsNullOrWhiteSpace(item.CandidateIdentity))
+                    .GroupBy(item => item.CandidateIdentity, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                foreach (var group in candidateGroups.Where(item => item.Count() > 1))
+                    foreach (var analysis in group) analysis.MarkDuplicateCandidate();
+                int validCandidates = analyses.Values.Count(item =>
+                    item.Status == SystemFormCandidateStatus.CandidateValid);
+                int duplicateCandidates = analyses.Values.Count(item =>
+                    item.Status == SystemFormCandidateStatus.DuplicateCandidate);
+                int managedCandidates = analyses.Values.Count(item =>
+                    !string.IsNullOrWhiteSpace(item.CandidateIdentity) && item.IsManaged == true);
+                int unmanagedCandidates = analyses.Values.Count(item =>
+                    !string.IsNullOrWhiteSpace(item.CandidateIdentity) && item.IsManaged == false);
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
                     var correlation = retrieval.GetCorrelation(objectId);
+                    var analysis = analyses[objectId];
                     var matches = correlation.Rows;
                     if (correlation.Status == DiagnosticCorrelationStatus.Failed)
                         evidence.Add(correlation.Failure);
@@ -1510,21 +1526,28 @@ namespace D365SolutionComparer.Services.Membership
                         var row = matches[0];
                         var uniqueName = row.GetAttributeValue<string>("uniquename");
                         if (string.IsNullOrWhiteSpace(uniqueName)) blankUniqueName++;
-                        var entityName = ResolveSystemFormEntityLogicalName(row, entityLogicalNames);
-                        if (!entityName.IsVerified) unresolvedEntityName++;
-                        else if (!string.IsNullOrWhiteSpace(uniqueName))
-                            candidateIdentities.Add(entityName.DisplayValue + "." + uniqueName);
+                        if (!analysis.EntityLogicalName.IsVerified) unresolvedEntityName++;
                     }
                     evidence.AddRange(correlation.UnassociatedRows.Select(row =>
                         "Unassociated or conflicting returned systemform row: " +
                             DescribeSystemForm(row, EntityLogicalNameDiagnostic.Unverified(
                                 "(not resolved for an unassociated row)"))));
+                    evidence.Add(DescribeSystemFormCandidateAnalysis(analysis));
                     systemFormDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
                 int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
                     item.ObjectId.Value == Guid.Empty);
-                var distinctCandidates = candidateIdentities
+                var distinctCandidates = candidateGroups.Select(group => group.First().CandidateIdentity)
+                    .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var duplicateCandidateIdentities = candidateGroups.Where(group => group.Count() > 1)
+                    .Select(group => group.First().CandidateIdentity)
+                    .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var validCandidateIdentities = analyses.Values.Where(item =>
+                        item.Status == SystemFormCandidateStatus.CandidateValid)
+                    .Select(item => item.CandidateIdentity)
                     .GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -1535,7 +1558,14 @@ namespace D365SolutionComparer.Services.Membership
                     countUnavailable ? (int?)null : blankUniqueName,
                     countUnavailable ? (int?)null : unresolvedEntityName,
                     countUnavailable ? (int?)null : nonUnique,
-                    countUnavailable ? null : distinctCandidates);
+                    countUnavailable ? (int?)null : validCandidates,
+                    countUnavailable ? (int?)null : duplicateCandidates,
+                    countUnavailable ? (int?)null : distinctCandidates.Count,
+                    countUnavailable ? (int?)null : managedCandidates,
+                    countUnavailable ? (int?)null : unmanagedCandidates,
+                    countUnavailable ? null : distinctCandidates,
+                    countUnavailable ? null : validCandidateIdentities,
+                    countUnavailable ? null : duplicateCandidateIdentities);
             }
 
             private IEnumerable<string> GetSystemFormDiagnosticEvidence(SolutionComponentRecord record)
@@ -1544,7 +1574,10 @@ namespace D365SolutionComparer.Services.Membership
                     return new string[0];
                 var result = new List<string>();
                 if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                {
                     result.Add("System Form diagnostic lookup was not attempted because objectid is unavailable.");
+                    result.Add("System Form lifecycle candidate status=CorrelationMissing; candidate=(unavailable).");
+                }
                 else
                 {
                     IReadOnlyList<string> evidence;
@@ -1555,6 +1588,44 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(systemFormSummaryEvidence))
                     result.Add(systemFormSummaryEvidence);
                 return result;
+            }
+
+            private static SystemFormCandidateAnalysis AnalyzeSystemFormCandidate(
+                DiagnosticRowCorrelation correlation,
+                IDictionary<int, EntityLogicalNameDiagnostic> entityLogicalNames)
+            {
+                if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                    return new SystemFormCandidateAnalysis(
+                        correlation.Failure != null && correlation.Failure.StartsWith(
+                            "System Form diagnostic lookup failed:", StringComparison.Ordinal)
+                            ? SystemFormCandidateStatus.Faulted : SystemFormCandidateStatus.Incomplete);
+                if (correlation.Status == DiagnosticCorrelationStatus.Missing)
+                    return new SystemFormCandidateAnalysis(SystemFormCandidateStatus.CorrelationMissing);
+                if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
+                    return new SystemFormCandidateAnalysis(SystemFormCandidateStatus.CorrelationDuplicate);
+
+                var row = correlation.Rows[0];
+                var entityName = ResolveSystemFormEntityLogicalName(row, entityLogicalNames);
+                var uniqueName = row.GetAttributeValue<string>("uniquename");
+                var candidate = entityName.IsVerified && !string.IsNullOrWhiteSpace(uniqueName)
+                    ? entityName.DisplayValue + "." + uniqueName : null;
+                var status = string.IsNullOrWhiteSpace(uniqueName)
+                    ? SystemFormCandidateStatus.BlankUniqueName
+                    : !entityName.IsVerified
+                    ? SystemFormCandidateStatus.EntityLogicalNameUnresolved
+                    : !IsCompleteSystemForm(row)
+                    ? SystemFormCandidateStatus.Incomplete
+                    : SystemFormCandidateStatus.CandidateValid;
+                return new SystemFormCandidateAnalysis(status, candidate, entityName,
+                    row.GetAttributeValue<bool?>("ismanaged"));
+            }
+
+            private static string DescribeSystemFormCandidateAnalysis(SystemFormCandidateAnalysis analysis)
+            {
+                return "System Form lifecycle candidate status=" + analysis.Status +
+                    "; candidate=" + (string.IsNullOrWhiteSpace(analysis.CandidateIdentity)
+                        ? "(unavailable)" : "'" + EscapeDiagnosticText(analysis.CandidateIdentity) + "'") +
+                    ". Diagnostic validation only; the candidate is not used for membership comparison.";
             }
 
             private static EntityLogicalNameDiagnostic ResolveSystemFormEntityLogicalName(Entity row,
@@ -1581,10 +1652,7 @@ namespace D365SolutionComparer.Services.Membership
                 var candidate = entityLogicalName.IsVerified && !string.IsNullOrWhiteSpace(uniqueName)
                     ? "'" + EscapeDiagnosticText(entityLogicalName.DisplayValue + "." + uniqueName) + "'"
                     : "(unavailable)";
-                bool complete = HasGuid(row, "formid") && HasText(row, "uniquename") &&
-                    HasText(row, "name") && HasSystemFormObjectType(row) && HasOption(row, "type") &&
-                    HasGuid(row, "formidunique") && HasOption(row, "componentstate") &&
-                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+                bool complete = IsCompleteSystemForm(row);
                 return (complete ? "System Form diagnostic lookup matched. " :
                     "System Form diagnostic lookup matched but returned incomplete data. ") +
                     "formid=" + FormatSystemFormValue(row, "formid") +
@@ -1603,7 +1671,11 @@ namespace D365SolutionComparer.Services.Membership
             private static string DescribeSystemFormSummary(int rawCount, int distinctObjectIdCount,
                 int? returnedCount, int? correlatedCount, int? missingCount, int missingObjectIdCount,
                 int? blankUniqueNameCount, int? unresolvedEntityNameCount, int? nonUniqueCount,
-                IReadOnlyList<string> candidateIdentities)
+                int? validCandidateCount, int? duplicateCandidateCount,
+                int? distinctCandidateCount, int? managedCandidateCount, int? unmanagedCandidateCount,
+                IReadOnlyList<string> candidateIdentities,
+                IReadOnlyList<string> validCandidateIdentities,
+                IReadOnlyList<string> duplicateCandidateIdentities)
             {
                 return "System Form diagnostic summary: RawType60MembershipCount=" + rawCount +
                     "; DistinctNonemptyObjectIdCount=" + distinctObjectIdCount +
@@ -1614,9 +1686,33 @@ namespace D365SolutionComparer.Services.Membership
                     "; BlankUniqueNameCount=" + FormatOptionSetCount(blankUniqueNameCount) +
                     "; UnresolvedEntityLogicalNameCount=" + FormatOptionSetCount(unresolvedEntityNameCount) +
                     "; NonUniqueObjectIdCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; MissingCorrelationCount=" + FormatOptionSetCount(missingCount) +
+                    "; DuplicateCorrelationCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; ValidCandidateCount=" + FormatOptionSetCount(validCandidateCount) +
+                    "; DuplicateCandidateCount=" + FormatOptionSetCount(duplicateCandidateCount) +
+                    "; DistinctCaseInsensitiveCandidateCount=" + FormatOptionSetCount(distinctCandidateCount) +
+                    "; ManagedCandidateCount=" + FormatOptionSetCount(managedCandidateCount) +
+                    "; UnmanagedCandidateCount=" + FormatOptionSetCount(unmanagedCandidateCount) +
                     "; DistinctCandidatePortableIdentities=" + (candidateIdentities == null ? "(unavailable)" :
                         "[" + string.Join(", ", candidateIdentities.Select(item => "'" +
-                            EscapeDiagnosticText(item) + "'")) + "]") + ".";
+                            EscapeDiagnosticText(item) + "'")) + "]") +
+                    "; CandidateList=" + (candidateIdentities == null ? "(unavailable)" :
+                        "[" + string.Join(", ", candidateIdentities.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") +
+                    "; ValidCandidateList=" + (validCandidateIdentities == null ? "(unavailable)" :
+                        "[" + string.Join(", ", validCandidateIdentities.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") +
+                    "; DuplicateCandidateIdentities=" + (duplicateCandidateIdentities == null
+                        ? "(unavailable)" : "[" + string.Join(", ", duplicateCandidateIdentities.Select(
+                            item => "'" + EscapeDiagnosticText(item) + "'")) + "]") + ".";
+            }
+
+            private static bool IsCompleteSystemForm(Entity row)
+            {
+                return HasGuid(row, "formid") && HasText(row, "uniquename") &&
+                    HasText(row, "name") && HasSystemFormObjectType(row) && HasOption(row, "type") &&
+                    HasGuid(row, "formidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
             }
 
             private static bool HasSystemFormObjectType(Entity row)
@@ -2558,6 +2654,42 @@ namespace D365SolutionComparer.Services.Membership
                     new EntityLogicalNameDiagnostic(true, logicalName);
                 public static EntityLogicalNameDiagnostic Unverified(string diagnostic) =>
                     new EntityLogicalNameDiagnostic(false, diagnostic);
+            }
+
+            private enum SystemFormCandidateStatus
+            {
+                CandidateValid,
+                BlankUniqueName,
+                EntityLogicalNameUnresolved,
+                DuplicateCandidate,
+                CorrelationMissing,
+                CorrelationDuplicate,
+                Incomplete,
+                Faulted
+            }
+
+            private sealed class SystemFormCandidateAnalysis
+            {
+                public SystemFormCandidateAnalysis(SystemFormCandidateStatus status,
+                    string candidateIdentity = null, EntityLogicalNameDiagnostic entityLogicalName = null,
+                    bool? isManaged = null)
+                {
+                    Status = status;
+                    CandidateIdentity = candidateIdentity;
+                    EntityLogicalName = entityLogicalName ??
+                        EntityLogicalNameDiagnostic.Unverified("(unavailable)");
+                    IsManaged = isManaged;
+                }
+
+                public SystemFormCandidateStatus Status { get; private set; }
+                public string CandidateIdentity { get; }
+                public EntityLogicalNameDiagnostic EntityLogicalName { get; }
+                public bool? IsManaged { get; }
+
+                public void MarkDuplicateCandidate()
+                {
+                    Status = SystemFormCandidateStatus.DuplicateCandidate;
+                }
             }
 
             private sealed class OptionSetResolutionValue
