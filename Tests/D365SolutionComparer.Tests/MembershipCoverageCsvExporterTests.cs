@@ -26,7 +26,8 @@ namespace D365SolutionComparer.Tests
         {
             var presentation = CreatePresentation(CanvasIdentity());
 
-            var rows = Parse(new MembershipCoverageCsvExporter().CreateCsv(presentation, "1.2.3.4", "1.2.3.3"));
+            var rows = Parse(new MembershipCoverageCsvExporter().CreateCsv(presentation, "1.2.3.4", "1.2.3.3",
+                "Unmanaged DEV to managed UAT deployment"));
             var row = rows.Single(item => item["RowType"] == "Component" && item["Side"] == "Source");
 
             Assert.AreEqual(ObjectId.ToString("D"), row["ObjectId"]);
@@ -38,6 +39,9 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("0 ('Published')", row["CanvasAppComponentState"]);
             Assert.AreEqual("True", row["CanvasAppIsManaged"]);
             Assert.AreEqual("CandidateValid", row["CanvasAppCandidateStatus"]);
+            Assert.AreEqual("Unmanaged DEV to managed UAT deployment", row["LifecycleOperation"]);
+            StringAssert.StartsWith(row["CanvasAppCandidateDiagnostic"],
+                "Canvas App lifecycle candidate status=CandidateValid;");
             Assert.AreEqual("CSC-ICMS-DEV", row["Environment"]);
             Assert.AreEqual(SourceEnvironmentId.ToString("D"), row["EnvironmentOrganizationId"]);
             Assert.AreEqual("EDU", row["SolutionUniqueName"]);
@@ -76,6 +80,66 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("Incomplete", coverage["CoverageStatus"]);
             Assert.AreEqual("1", coverage["CoverageTotal"]);
             StringAssert.Contains(coverage["CoverageDiagnosticGroups"], "Unsupported x1:");
+        }
+
+        [TestMethod]
+        public void LifecycleCsvSchemaIsStableAndContainsRequiredMatrixColumns()
+        {
+            var header = ParseRecords(new MembershipCoverageCsvExporter().CreateCsv(
+                CreatePresentation(CanvasIdentity()), "1.2.3.4", "1.2.3.3", "Canvas App rename"))[0];
+            CollectionAssert.AreEqual(new[]
+            {
+                "RowType", "LifecycleOperation", "Side", "Environment", "EnvironmentOrganizationId",
+                "SolutionUniqueName", "SolutionId", "SolutionVersion", "CaptureTimestampUtc", "SnapshotState",
+                "OperationDiagnostic", "RequestCount", "ElapsedMilliseconds", "RawMembershipCount",
+                "ResolvedCount", "UnsupportedCount", "UnresolvedCount", "AmbiguousCount",
+                "ComparisonPresentInBoth", "ComparisonSourceOnly", "ComparisonTargetOnly",
+                "ComparisonUnsupported", "ComparisonUnresolved", "ComparisonAmbiguous", "SolutionComponentId",
+                "ObjectId", "RawComponentType", "RootComponentBehavior", "RootSolutionComponentId", "IsMetadata",
+                "SemanticKind", "ComponentTypeKey", "ResolutionStatus", "ComparisonKey", "StableDiagnostic",
+                "DiagnosticEvidence", "CoverageDisplayName", "CoverageBucketType", "CoverageStatus", "CoverageTotal",
+                "CoverageResolved", "CoverageUnsupported", "CoverageUnresolved", "CoverageAmbiguous",
+                "CoverageDiagnosticGroups", "RegisteredDefinitionName", "RegisteredDefinitionPrimaryEntity",
+                "CanvasAppName", "CanvasAppId", "UniqueCanvasAppId", "CanvasAppDisplayName",
+                "CanvasAppComponentState", "CanvasAppIsManaged", "CanvasAppCandidateStatus",
+                "CanvasAppCandidateDiagnostic"
+            }, header);
+        }
+
+        [TestMethod]
+        public void LifecycleOperationIsTrimmedAndAppliedToEveryExportRow()
+        {
+            var rows = Parse(new MembershipCoverageCsvExporter().CreateCsv(CreatePresentation(CanvasIdentity()),
+                "1.2.3.4", "1.2.3.3", "  Managed Upgrade  "));
+
+            Assert.IsTrue(rows.Count > 0);
+            Assert.IsTrue(rows.All(item => item["LifecycleOperation"] == "Managed Upgrade"));
+        }
+
+        [TestMethod]
+        public void LifecycleExportKeepsCaseVariantsUnsupportedAndIndeterminate()
+        {
+            var source = CanvasIdentity(diagnosticEvidence: new[]
+            {
+                LookupEvidence(CanvasAppId, "new_edu_canvas"),
+                "Canvas App lifecycle candidate status=CandidateValid; candidate='new_edu_canvas'. " +
+                "Diagnostic validation only; the candidate is not used for membership comparison."
+            });
+            var target = CanvasIdentityForTarget("NEW_EDU_CANVAS");
+            var presentation = CreateTwoSidedPresentation(source, target);
+
+            var rows = Parse(new MembershipCoverageCsvExporter().CreateCsv(presentation,
+                "1.2.3.4", "1.2.3.4", "Repeated import of the same unmanaged solution"))
+                .Where(item => item["RowType"] == "Component" && item["RawComponentType"] == "300").ToList();
+
+            Assert.AreEqual(2, rows.Count);
+            Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+            Assert.AreEqual(2, presentation.Summary.Unsupported);
+            Assert.IsTrue(presentation.Rows.All(item => item.MembershipStatus == "Indeterminate - Unsupported"));
+            Assert.IsTrue(rows.All(item => item["ResolutionStatus"] == "Unsupported" &&
+                item["ComparisonKey"].Length == 0 && item["SemanticKind"] == "unsupported:componenttype:300"));
+            Assert.IsTrue(string.Equals(rows[0]["CanvasAppName"], rows[1]["CanvasAppName"],
+                StringComparison.OrdinalIgnoreCase));
         }
 
         [TestMethod]
@@ -219,6 +283,39 @@ namespace D365SolutionComparer.Tests
             return new MembershipResultPresenter().Create(source, target);
         }
 
+        private static MembershipComparisonPresentation CreateTwoSidedPresentation(ComponentIdentity sourceIdentity,
+            ComponentIdentity targetIdentity)
+        {
+            var sourceEnvironment = new EnvironmentIdentity(SourceEnvironmentId, "CSC-ICMS-DEV");
+            var targetEnvironment = new EnvironmentIdentity(TargetEnvironmentId, "CSC-ICMS-UAT");
+            var sourceSolution = new SolutionIdentity(sourceEnvironment, SolutionId, "EDU");
+            var targetSolution = new SolutionIdentity(targetEnvironment,
+                Guid.Parse("90000000-0000-0000-0000-000000000009"), "EDU");
+            return new MembershipResultPresenter().Create(
+                MembershipEnvironmentResult.FromSnapshot("CSC-ICMS-DEV",
+                    MembershipSnapshot.Complete(sourceSolution, new[] { sourceIdentity }, CapturedAt),
+                    17, TimeSpan.FromMilliseconds(1500)),
+                MembershipEnvironmentResult.FromSnapshot("CSC-ICMS-UAT",
+                    MembershipSnapshot.Complete(targetSolution, new[] { targetIdentity }, CapturedAt.AddMinutes(1)),
+                    18, TimeSpan.FromMilliseconds(1600)));
+        }
+
+        private static ComponentIdentity CanvasIdentityForTarget(string name)
+        {
+            var targetObjectId = Guid.Parse("A0000000-0000-0000-0000-00000000000A");
+            var targetCanvasId = Guid.Parse("B0000000-0000-0000-0000-00000000000B");
+            return new ComponentIdentity(new SolutionComponentRecord(
+                Guid.Parse("C0000000-0000-0000-0000-00000000000C"), 300, targetObjectId),
+                IdentityResolutionStatus.Unsupported, diagnostic: "Unsupported solution component type 300.",
+                componentTypeKey: "unsupported:componenttype:300",
+                semanticKind: "unsupported:componenttype:300", diagnosticEvidence: new[]
+                {
+                    LookupEvidence(targetCanvasId, name),
+                    "Canvas App lifecycle candidate status=CandidateValid; candidate='" + name + "'. " +
+                    "Diagnostic validation only; the candidate is not used for membership comparison."
+                });
+        }
+
         private static ComponentIdentity CanvasIdentity(string diagnostic = null,
             string additionalEvidence = null, IEnumerable<string> diagnosticEvidence = null)
         {
@@ -248,6 +345,15 @@ namespace D365SolutionComparer.Tests
 
         private static List<Dictionary<string, string>> Parse(string csv)
         {
+            var records = ParseRecords(csv);
+            var headers = records[0];
+            return records.Skip(1).Where(item => item.Count == headers.Count)
+                .Select(item => headers.Select((header, index) => new { header, value = item[index] })
+                    .ToDictionary(pair => pair.header, pair => pair.value, StringComparer.Ordinal)).ToList();
+        }
+
+        private static List<List<string>> ParseRecords(string csv)
+        {
             var records = new List<List<string>>();
             var record = new List<string>();
             var field = new StringBuilder();
@@ -272,10 +378,7 @@ namespace D365SolutionComparer.Tests
                 }
                 else field.Append(character);
             }
-            var headers = records[0];
-            return records.Skip(1).Where(item => item.Count == headers.Count)
-                .Select(item => headers.Select((header, index) => new { header, value = item[index] })
-                    .ToDictionary(pair => pair.header, pair => pair.value, StringComparer.Ordinal)).ToList();
+            return records;
         }
     }
 }
