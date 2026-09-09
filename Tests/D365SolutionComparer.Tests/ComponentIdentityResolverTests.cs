@@ -1804,12 +1804,20 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(evidence, "componentstate=0 ('Published')");
             StringAssert.Contains(evidence, "ismanaged=False");
             StringAssert.Contains(evidence, "candidateportableidentity='account.new_AccountMain'");
+            StringAssert.Contains(result.DiagnosticEvidence[1],
+                "lifecycle candidate status=CandidateValid");
             var summary = result.DiagnosticEvidence.Single(item =>
                 item.StartsWith("System Form diagnostic summary:", StringComparison.Ordinal));
             StringAssert.Contains(summary, "RawType60MembershipCount=1");
             StringAssert.Contains(summary, "UniqueObjectIdCorrelationCount=1");
+            StringAssert.Contains(summary, "ValidCandidateCount=1");
+            StringAssert.Contains(summary, "DuplicateCandidateCount=0");
+            StringAssert.Contains(summary, "DistinctCaseInsensitiveCandidateCount=1");
+            StringAssert.Contains(summary, "ManagedCandidateCount=0");
+            StringAssert.Contains(summary, "UnmanagedCandidateCount=1");
             StringAssert.Contains(summary,
                 "DistinctCandidatePortableIdentities=['account.new_AccountMain']");
+            StringAssert.Contains(summary, "ValidCandidateList=['account.new_AccountMain']");
         }
 
         [TestMethod]
@@ -1841,8 +1849,67 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(3, counter.TotalRequests);
             Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.First()
                 .Contains("entitylogicalname=account")));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("lifecycle candidate status=CandidateValid"))));
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
                 item.ComparisonKey == null));
+        }
+
+        [TestMethod]
+        public void Type60CandidateUniquenessIgnoresCaseAndAllAuditOnlyFields()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(0, 6).Select(index => Guid.NewGuid()).ToArray();
+            var rows = new[]
+            {
+                SystemForm(objectIds[0], "new_Main", "Display A", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(objectIds[1], "NEW_MAIN", "Display B", "ACCOUNT", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(objectIds[2], "new_Main", "Localized display", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(objectIds[3], "new_Main", "Display D", "account", 2,
+                    Guid.NewGuid(), true),
+                SystemForm(objectIds[4], "new_Main", "Display E", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(objectIds[5], "new_Main", "Display F", "account", 7,
+                    Guid.NewGuid(), false)
+            };
+            rows[4]["componentstate"] = new OptionSetValue(1);
+            rows[4].FormattedValues["componentstate"] = "Unpublished";
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                SystemFormService(solution, query => Rows(rows)),
+                MembershipSnapshot.Complete(solution, objectIds.Select(objectId =>
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                        IdentityResolutionStatus.Unresolved)).ToArray(), DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            Assert.AreEqual(1, counter.GetQueryCount("systemform"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(2, counter.TotalRequests);
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null &&
+                item.SemanticKind == "unsupported:componenttype:60"));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=DuplicateCandidate"))));
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("System Form diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "ValidCandidateCount=0");
+            StringAssert.Contains(summary, "DuplicateCandidateCount=6");
+            StringAssert.Contains(summary, "DistinctCaseInsensitiveCandidateCount=1");
+            StringAssert.Contains(summary, "ManagedCandidateCount=1");
+            StringAssert.Contains(summary, "UnmanagedCandidateCount=5");
+            StringAssert.Contains(summary.ToLowerInvariant(),
+                "duplicatecandidateidentities=['account.new_main']");
+            StringAssert.Contains(summary, "ValidCandidateList=[]");
+            var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:60");
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(6, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual("No identity resolver supports this known component type.",
+                bucket.DiagnosticGroups.Single().Diagnostic);
         }
 
         [TestMethod]
@@ -1879,6 +1946,8 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
             Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
             Assert.AreEqual(202, bucket.AuditEvidence.Count);
+            Assert.AreEqual("No identity resolver supports this known component type.",
+                bucket.DiagnosticGroups.Single().Diagnostic);
         }
 
         [TestMethod]
@@ -1906,12 +1975,21 @@ namespace D365SolutionComparer.Tests
                 "entity logical name is blank");
             StringAssert.Contains(result.Components[2].DiagnosticEvidence.First(),
                 "candidateportableidentity=(unavailable)");
+            Assert.IsTrue(result.Components[0].DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=CorrelationMissing")));
+            Assert.IsTrue(result.Components[1].DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=CorrelationDuplicate")));
+            Assert.IsTrue(result.Components[2].DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=BlankUniqueName")));
             var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
                 item.StartsWith("System Form diagnostic summary:", StringComparison.Ordinal));
             StringAssert.Contains(summary, "MissingRequestedObjectIdCount=1");
             StringAssert.Contains(summary, "BlankUniqueNameCount=1");
             StringAssert.Contains(summary, "UnresolvedEntityLogicalNameCount=1");
             StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
+            StringAssert.Contains(summary, "MissingCorrelationCount=1");
+            StringAssert.Contains(summary, "DuplicateCorrelationCount=1");
+            StringAssert.Contains(summary, "ValidCandidateCount=0");
             Assert.IsTrue(result.Components.All(item =>
                 item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
         }
@@ -1933,9 +2011,25 @@ namespace D365SolutionComparer.Tests
             Assert.IsNull(result.ComparisonKey);
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("name='Conflict'")));
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=Incomplete")));
             StringAssert.Contains(result.DiagnosticEvidence.Single(item =>
                 item.StartsWith("System Form diagnostic summary:", StringComparison.Ordinal)),
                 "ReturnedSystemFormRowCount=(unavailable)");
+
+            var pagedId = Guid.NewGuid();
+            var paged = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query =>
+                {
+                    var rows = Rows(SystemForm(pagedId, "new_Paged", "Paged", "account", 2,
+                        Guid.NewGuid(), false));
+                    rows.MoreRecords = true;
+                    return rows;
+                }), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 60, pagedId), CancellationToken.None);
+            Assert.IsTrue(paged.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=Incomplete")));
+            Assert.IsTrue(paged.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
         }
 
         [TestMethod]
@@ -1953,6 +2047,8 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(metadataFault.DiagnosticEvidence.First(), "Entity metadata denied");
             StringAssert.Contains(metadataFault.DiagnosticEvidence.First(),
                 "candidateportableidentity=(unavailable)");
+            Assert.IsTrue(metadataFault.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=EntityLogicalNameUnresolved")));
 
             using (var cancellation = new CancellationTokenSource())
             {
@@ -1991,6 +2087,14 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
             Assert.IsNull(source.ComparisonKey);
             Assert.IsNull(target.ComparisonKey);
+            var sourceCandidate = source.DiagnosticEvidence.Single(item =>
+                item.Contains("lifecycle candidate status=CandidateValid"));
+            var targetCandidate = target.DiagnosticEvidence.Single(item =>
+                item.Contains("lifecycle candidate status=CandidateValid"));
+            StringAssert.Contains(sourceCandidate, "candidate='account.new_Main'");
+            StringAssert.Contains(targetCandidate, "candidate='ACCOUNT.NEW_MAIN'");
+            Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(
+                "account.new_Main", "ACCOUNT.NEW_MAIN"));
 
             var faulted = resolver.Resolve(SystemFormService(sourceSolution,
                     query => throw new FaultException("System Form denied")), sourceSolution.Environment,
@@ -1998,6 +2102,8 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
             Assert.IsNull(faulted.ComparisonKey);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "System Form denied");
+            Assert.IsTrue(faulted.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=Faulted")));
         }
 
         [TestMethod]
@@ -2013,6 +2119,394 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=CorrelationMissing")));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle01ValidCandidateUsesEntityLogicalNameAndUniqueName()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = ResolveType60(solution, objectId,
+                SystemForm(objectId, "new_AccountMain", "Account main", "account", 2,
+                    Guid.NewGuid(), false));
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "CandidateValid");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate='account.new_AccountMain'")));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle02CandidateEqualityIsOrdinalIgnoreCase()
+        {
+            AssertDuplicateType60Candidates(
+                SystemForm(Guid.NewGuid(), "new_Main", "First", "account", 2, Guid.NewGuid(), false),
+                SystemForm(Guid.NewGuid(), "NEW_MAIN", "Second", "ACCOUNT", 2, Guid.NewGuid(), false));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle03DifferentFormIdsDoNotChangeCandidateEquality()
+        {
+            var formIdUnique = Guid.NewGuid();
+            var first = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                formIdUnique, false);
+            var second = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                formIdUnique, false);
+            Assert.AreNotEqual(first.Id, second.Id);
+            AssertDuplicateType60Candidates(first, second);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle04DifferentFormIdUniqueValuesDoNotChangeCandidateEquality()
+        {
+            var first = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                Guid.NewGuid(), false);
+            var second = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                Guid.NewGuid(), false);
+            Assert.AreNotEqual(first.GetAttributeValue<Guid>("formidunique"),
+                second.GetAttributeValue<Guid>("formidunique"));
+            AssertDuplicateType60Candidates(first, second);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle05DifferentDisplayNamesDoNotChangeCandidateEquality()
+        {
+            AssertDuplicateType60Candidates(
+                SystemForm(Guid.NewGuid(), "new_Main", "English display", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(Guid.NewGuid(), "new_Main", "French display", "account", 2,
+                    Guid.NewGuid(), false));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle06DifferentManagedStatesDoNotChangeCandidateEquality()
+        {
+            AssertDuplicateType60Candidates(
+                SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                    Guid.NewGuid(), true));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle07DifferentComponentStatesDoNotChangeCandidateEquality()
+        {
+            var first = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                Guid.NewGuid(), false);
+            var second = SystemForm(Guid.NewGuid(), "new_Main", "Same", "account", 2,
+                Guid.NewGuid(), false);
+            second["componentstate"] = new OptionSetValue(1);
+            second.FormattedValues["componentstate"] = "Unpublished";
+            AssertDuplicateType60Candidates(first, second);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle08BlankUniqueNameCannotCreateCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = ResolveType60(solution, objectId,
+                SystemForm(objectId, " ", "Display only", "account", 2, Guid.NewGuid(), false));
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "BlankUniqueName");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidateportableidentity=(unavailable)")));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle09UnresolvedEntityLogicalNameCannotCreateCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query => Rows(SystemForm(objectId, "new_Main", "Main", 1,
+                    2, Guid.NewGuid(), false)), request => MetadataRows()),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                CancellationToken.None);
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "EntityLogicalNameUnresolved");
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle10DistinctFormsWithSameCandidateAreDuplicateCandidates()
+        {
+            AssertDuplicateType60Candidates(
+                SystemForm(Guid.NewGuid(), "new_Main", "First", "account", 2,
+                    Guid.NewGuid(), false),
+                SystemForm(Guid.NewGuid(), "new_Main", "Second", "account", 2,
+                    Guid.NewGuid(), false));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle11RepeatedRawMembershipDoesNotCreateDuplicateCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var records = Enumerable.Range(0, 2).Select(index => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                SystemFormService(solution, query => Rows(SystemForm(objectId, "new_Main", "Main",
+                    "account", 2, Guid.NewGuid(), false))),
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+
+            Assert.AreEqual(2, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=CandidateValid"))));
+            Assert.IsFalse(result.Components.Any(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=DuplicateCandidate"))));
+            var summary = Type60Summary(result);
+            StringAssert.Contains(summary, "RawType60MembershipCount=2");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=1");
+            StringAssert.Contains(summary, "ValidCandidateCount=1");
+            StringAssert.Contains(summary, "DuplicateCandidateCount=0");
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle12DuplicateReturnedPrimaryKeyRowsRemainCorrelationDuplicate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query => Rows(
+                    SystemForm(objectId, "new_First", "First", "account", 2, Guid.NewGuid(), false),
+                    SystemForm(objectId, "new_Second", "Second", "account", 2, Guid.NewGuid(), false))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                CancellationToken.None);
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "CorrelationDuplicate");
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle13MissingSystemFormCorrelationRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query => Rows()), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 60, objectId), CancellationToken.None);
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "CorrelationMissing");
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle14IncompletePagedResultRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query =>
+                {
+                    var rows = Rows(SystemForm(objectId, "new_Main", "Main", "account", 2,
+                        Guid.NewGuid(), false));
+                    rows.MoreRecords = true;
+                    return rows;
+                }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                CancellationToken.None);
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "Incomplete");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle15DataverseRetrievalFaultRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query => throw new FaultException("System Form denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                CancellationToken.None);
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "Faulted");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("System Form denied")));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle16CancellationPropagates()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = SystemFormService(solution, query =>
+                {
+                    cancellation.Cancel();
+                    return Rows();
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 60, objectId), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle17RequestCountAndBatchingRemainUnchanged()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(1, 201)
+                .Select(index => new Guid(index, 0, 0, new byte[8])).ToArray();
+            var records = objectIds.Select(objectId => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                SystemFormService(solution, query =>
+                {
+                    AssertSystemFormQuery(query,
+                        query.Criteria.Conditions.Single().Values.Cast<Guid>().ToArray());
+                    return Rows(query.Criteria.Conditions.Single().Values.Cast<Guid>().Select(id =>
+                        SystemForm(id, "form_" + id.ToString("N"), "Form", "account", 2,
+                            Guid.NewGuid(), false)).ToArray());
+                }), MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            Assert.AreEqual(201, result.Components.Count);
+            Assert.AreEqual(2, counter.GetQueryCount("systemform"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(3, counter.TotalRequests);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle18DiagnosticGroupingRemainsStable()
+        {
+            var solution = Solution(); var firstId = Guid.NewGuid(); var secondId = Guid.NewGuid();
+            var result = ResolveType60Snapshot(solution, new[] { firstId, secondId }, Rows(
+                SystemForm(firstId, "new_First", "First", "account", 2, Guid.NewGuid(), false),
+                SystemForm(secondId, "new_Second", "Second", "contact", 2, Guid.NewGuid(), true)));
+            var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:60");
+
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(2, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual("No identity resolver supports this known component type.",
+                bucket.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(2, bucket.AuditEvidence.Count);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle19RemainsUnsupportedIndeterminateWithoutPortableKey()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = ResolveType60(solution, objectId,
+                SystemForm(objectId, "new_Main", "Main", "account", 2, Guid.NewGuid(), false));
+            var target = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), solution.UniqueName);
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(target, new ComponentIdentity[0], DateTimeOffset.UtcNow));
+
+            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(MembershipPresence.Indeterminate, compared.Single().Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.None, compared.Single().AbsenceEvidence);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle20CannotCreateAnyDefinitiveOrAmbiguousMembershipResult()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid();
+            var source = ResolveType60(sourceSolution, sourceId,
+                SystemForm(sourceId, "new_Main", "DEV", "account", 2, Guid.NewGuid(), false));
+            var target = ResolveType60(targetSolution, targetId,
+                SystemForm(targetId, "NEW_MAIN", "UAT", "ACCOUNT", 2, Guid.NewGuid(), true));
+            var comparer = new SolutionMembershipComparer();
+            var compared = comparer.Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
+
+            Assert.AreEqual(2, compared.Count);
+            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
+            Assert.IsFalse(compared.Any(item => item.Presence == MembershipPresence.PresentInBoth ||
+                item.Presence == MembershipPresence.OnlyInSource ||
+                item.Presence == MembershipPresence.OnlyInTarget));
+            Assert.IsTrue(new[] { source, target }.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.Status != IdentityResolutionStatus.Ambiguous));
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle21GlobalChoiceResolutionIsUnchanged()
+        {
+            var solution = Solution(); var metadataId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                OptionSetService(solution, request => AllOptionSetsResponse(
+                    OptionSet(metadataId, "new_Priority", true, OptionSetType.Picklist, true, true))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 9, metadataId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.SemanticKind);
+            Assert.AreEqual("new_Priority", result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle22SignedReportResolutionIsUnchanged()
+        {
+            var solution = Solution(); var reportId = Guid.NewGuid(); var signatureId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                ReportService(solution, query => Rows(Report(reportId, "Signed", "Signed.rdl", 1,
+                    signatureId, 1033, Guid.NewGuid(), false))), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, reportId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.Report, result.SemanticKind);
+            Assert.AreEqual(signatureId.ToString("D"), result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle23AppModuleResolutionIsUnchanged()
+        {
+            var solution = Solution(); var appModuleId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                BroadTypeService(solution, query => Rows(AppModule(appModuleId, "new_App", "App", false))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 80, appModuleId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.AppModule, result.SemanticKind);
+            Assert.AreEqual("new_App", result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle24TeamTemplateClassificationIsUnchanged()
+        {
+            var solution = Solution(); var teamTemplateId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows(
+                    TeamTemplate(teamTemplateId, "Account access", 1, 3, false)),
+                    request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, teamTemplateId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.TeamTemplate, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type60Lifecycle25SolutionLevelComparisonIsUnchanged()
+        {
+            var source = new D365SolutionComparer.Models.SolutionInfo
+            {
+                UniqueName = "sample", DisplayName = "Sample", Version = "1.0.0.0",
+                Publisher = "Publisher", IsManaged = true
+            };
+            var target = new D365SolutionComparer.Models.SolutionInfo
+            {
+                UniqueName = "SAMPLE", DisplayName = "Sample", Version = "2.0.0.0",
+                Publisher = "Publisher", IsManaged = true
+            };
+
+            var result = new D365SolutionComparer.Services.SolutionComparisonService().Compare(
+                new List<D365SolutionComparer.Models.SolutionInfo> { source },
+                new List<D365SolutionComparer.Models.SolutionInfo> { target }).Single();
+
+            Assert.AreEqual("sample", result.UniqueName);
+            Assert.AreEqual("Version Mismatch", result.Status);
+            Assert.AreEqual("Match", result.PackageTypeStatus);
         }
 
         [TestMethod]
@@ -3484,6 +3978,61 @@ namespace D365SolutionComparer.Tests
                 ? "Reporting Services Report" : "Other Report";
             row.FormattedValues["componentstate"] = "Published";
             return row;
+        }
+
+        private static ComponentIdentity ResolveType60(SolutionIdentity solution, Guid objectId,
+            Entity systemForm)
+        {
+            return new DataverseComponentIdentityResolver().Resolve(
+                SystemFormService(solution, query => Rows(systemForm)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 60, objectId), CancellationToken.None);
+        }
+
+        private static MembershipSnapshot ResolveType60Snapshot(SolutionIdentity solution,
+            IEnumerable<Guid> objectIds, EntityCollection rows)
+        {
+            var records = objectIds.Select(objectId => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            return new DataverseComponentIdentityResolver().ResolveSnapshot(
+                SystemFormService(solution, query => rows),
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+        }
+
+        private static void AssertDuplicateType60Candidates(Entity first, Entity second)
+        {
+            var solution = Solution();
+            var result = ResolveType60Snapshot(solution, new[] { first.Id, second.Id }, Rows(first, second));
+
+            Assert.AreEqual(2, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=DuplicateCandidate"))));
+            var summary = Type60Summary(result);
+            StringAssert.Contains(summary, "DuplicateCandidateCount=2");
+            StringAssert.Contains(summary, "DistinctCaseInsensitiveCandidateCount=1");
+        }
+
+        private static void AssertType60DiagnosticOnly(ComponentIdentity result)
+        {
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+        }
+
+        private static void AssertCandidateStatus(ComponentIdentity result, string expectedStatus)
+        {
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=" + expectedStatus)));
+        }
+
+        private static string Type60Summary(MembershipSnapshot snapshot)
+        {
+            return snapshot.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("System Form diagnostic summary:", StringComparison.Ordinal));
         }
 
         private static FakeOrganizationService SystemFormService(SolutionIdentity solution,
