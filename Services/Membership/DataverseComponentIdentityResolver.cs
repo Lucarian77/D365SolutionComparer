@@ -62,7 +62,10 @@ namespace D365SolutionComparer.Services.Membership
         private sealed class ResolutionContext
         {
             private const int OptionSetComponentType = 9;
+            private const int SavedQueryComponentType = 26;
             private const int ReportComponentType = 31;
+            private const int EmailTemplateComponentType = 36;
+            private const int SavedQueryVisualizationComponentType = 59;
             private const int SystemFormComponentType = 60;
             private const int SiteMapComponentType = 62;
             private const int AppModuleComponentType = 80;
@@ -80,6 +83,13 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> reportDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>> weakIdentityDiagnostics =
+                new Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>>();
+            private readonly HashSet<int> weakIdentityDiagnosticsLoaded = new HashSet<int>();
+            private readonly Dictionary<int, Guid?> weakIdentitySummaryComponentIds =
+                new Dictionary<int, Guid?>();
+            private readonly Dictionary<int, string> weakIdentitySummaryEvidence =
+                new Dictionary<int, string>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> systemFormDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> siteMapDiagnostics =
@@ -661,8 +671,14 @@ namespace D365SolutionComparer.Services.Membership
                 var recordList = records.ToList();
                 LoadOptionSetDiagnostics(recordList.Where(item =>
                     item.ComponentType == OptionSetComponentType).ToList(), cancellationToken);
+                LoadWeakIdentityDiagnostics(recordList.Where(item =>
+                    item.ComponentType == SavedQueryComponentType).ToList(), cancellationToken);
                 LoadReportDiagnostics(recordList.Where(item =>
                     item.ComponentType == ReportComponentType).ToList(), cancellationToken);
+                LoadWeakIdentityDiagnostics(recordList.Where(item =>
+                    item.ComponentType == EmailTemplateComponentType).ToList(), cancellationToken);
+                LoadWeakIdentityDiagnostics(recordList.Where(item =>
+                    item.ComponentType == SavedQueryVisualizationComponentType).ToList(), cancellationToken);
                 LoadSystemFormDiagnostics(recordList.Where(item =>
                     item.ComponentType == SystemFormComponentType).ToList(), cancellationToken);
                 LoadSiteMapDiagnostics(recordList.Where(item =>
@@ -803,6 +819,10 @@ namespace D365SolutionComparer.Services.Membership
             {
                 if (record.ComponentType == OptionSetComponentType)
                     return GetOptionSetDiagnosticEvidence(record);
+                if (record.ComponentType == SavedQueryComponentType ||
+                    record.ComponentType == EmailTemplateComponentType ||
+                    record.ComponentType == SavedQueryVisualizationComponentType)
+                    return GetWeakIdentityDiagnosticEvidence(record);
                 if (record.ComponentType == ReportComponentType)
                     return GetReportDiagnosticEvidence(record);
                 if (record.ComponentType == SystemFormComponentType)
@@ -884,6 +904,306 @@ namespace D365SolutionComparer.Services.Membership
                     ? ((int)value.Value).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                         " ('" + value.Value + "')"
                     : "(null)";
+
+            private void LoadWeakIdentityDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
+                CancellationToken cancellationToken)
+            {
+                if (records.Count == 0) return;
+                var componentType = records[0].ComponentType;
+                if (weakIdentityDiagnosticsLoaded.Contains(componentType)) return;
+                weakIdentityDiagnosticsLoaded.Add(componentType);
+                weakIdentitySummaryComponentIds[componentType] = records[0].SolutionComponentId;
+                var configuration = WeakIdentityConfiguration.For(componentType);
+                var diagnostics = new Dictionary<Guid, IReadOnlyList<string>>();
+                weakIdentityDiagnostics[componentType] = diagnostics;
+                var objectIds = records.Where(item => item.ObjectId.HasValue &&
+                        item.ObjectId.Value != Guid.Empty)
+                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
+                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
+                var failures = new Dictionary<Guid, string>();
+                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
+                int returnedCount = 0;
+                bool countUnavailable = false;
+
+                foreach (var batch in Batch(objectIds))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression(configuration.EntityName)
+                        {
+                            ColumnSet = new ColumnSet(configuration.Columns)
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression(configuration.PrimaryIdAttribute,
+                            ConditionOperator.In, batch.Select(item => (object)item).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        returnedCount += rows.Entities.Count;
+                        bool invalidResponse = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            Guid primaryId;
+                            if (string.Equals(row.LogicalName, configuration.EntityName,
+                                    StringComparison.OrdinalIgnoreCase) &&
+                                TryReadGuid(row, configuration.PrimaryIdAttribute, out primaryId) &&
+                                batch.Contains(primaryId) && (row.Id == Guid.Empty || row.Id == primaryId))
+                            {
+                                returnedById[primaryId].Add(row);
+                                continue;
+                            }
+
+                            invalidResponse = true;
+                            var detail = "Unassociated or conflicting returned " +
+                                configuration.EntityName + " row: " + DescribeWeakIdentityRow(configuration, row);
+                            Guid conflictingId;
+                            var affectedIds = TryReadGuid(row, configuration.PrimaryIdAttribute,
+                                out conflictingId) && batch.Contains(conflictingId)
+                                ? new[] { conflictingId } : batch;
+                            foreach (var objectId in affectedIds)
+                            {
+                                List<string> evidence;
+                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
+                                    unassociatedEvidence[objectId] = evidence = new List<string>();
+                                evidence.Add(detail);
+                            }
+                        }
+
+                        if (rows.MoreRecords)
+                        {
+                            countUnavailable = true;
+                            SetWeakIdentityFailures(batch, configuration.DisplayName +
+                                " diagnostic lookup returned an incomplete result set.", failures);
+                        }
+                        else if (invalidResponse)
+                        {
+                            countUnavailable = true;
+                            SetWeakIdentityFailures(batch, configuration.DisplayName +
+                                " diagnostic lookup returned conflicting or incomplete primary-key data.",
+                                failures);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        countUnavailable = true;
+                        SetWeakIdentityFailures(batch, configuration.DisplayName +
+                            " diagnostic lookup failed: " + ex.Message, failures);
+                    }
+                }
+
+                int correlated = 0;
+                int missing = 0;
+                int nonUnique = 0;
+                int incomplete = 0;
+                int blankName = 0;
+                var contexts = new List<string>();
+                foreach (var objectId in objectIds)
+                {
+                    var evidence = new List<string>();
+                    string failure;
+                    var matches = returnedById[objectId];
+                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
+                    else if (matches.Count == 0)
+                    {
+                        missing++;
+                        evidence.Add("No " + configuration.EntityName +
+                            " row matched this solutioncomponent objectid.");
+                    }
+                    else if (matches.Count > 1)
+                    {
+                        nonUnique++;
+                        evidence.Add("Multiple " + configuration.EntityName +
+                            " rows matched this solutioncomponent objectid.");
+                    }
+
+                    foreach (var row in matches) evidence.Add(DescribeWeakIdentityRow(configuration, row));
+                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    {
+                        correlated++;
+                        if (!IsCompleteWeakIdentityRow(configuration, matches[0])) incomplete++;
+                        if (!HasText(matches[0], configuration.NameAttribute)) blankName++;
+                        contexts.Add(DescribeWeakIdentityContext(configuration, matches[0]));
+                    }
+                    List<string> unassociated;
+                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    diagnostics[objectId] = evidence.AsReadOnly();
+                }
+
+                int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
+                    item.ObjectId.Value == Guid.Empty);
+                var distinctContexts = contexts.GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                weakIdentitySummaryEvidence[componentType] = configuration.DisplayName +
+                    " diagnostic summary: RawComponentCount=" + records.Count +
+                    "; ComponentType=" + componentType +
+                    "; DistinctObjectIdCount=" + objectIds.Count +
+                    "; ReturnedRowCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : returnedCount) +
+                    "; CorrelatedCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : correlated) +
+                    "; MissingCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : missing) +
+                    "; MissingObjectIdRecordCount=" + missingObjectIds +
+                    "; NonUniqueObjectIdCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : nonUnique) +
+                    "; IncompleteCorrelatedRowCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : incomplete) +
+                    "; BlankNameCount=" + FormatOptionSetCount(countUnavailable ? (int?)null : blankName) +
+                    "; DistinctDiagnosticContexts=" + (countUnavailable ? "(unavailable)" :
+                        "[" + string.Join(", ", distinctContexts.Select(item => "'" +
+                            EscapeDiagnosticText(item) + "'")) + "]") +
+                    ". Contexts are diagnostic evidence only and are not portable identities.";
+            }
+
+            private IEnumerable<string> GetWeakIdentityDiagnosticEvidence(SolutionComponentRecord record)
+            {
+                if (!weakIdentityDiagnosticsLoaded.Contains(record.ComponentType)) return new string[0];
+                var configuration = WeakIdentityConfiguration.For(record.ComponentType);
+                var result = new List<string>();
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    result.Add(configuration.DisplayName +
+                        " diagnostic lookup was not attempted because objectid is unavailable.");
+                else
+                {
+                    IReadOnlyList<string> evidence;
+                    Dictionary<Guid, IReadOnlyList<string>> diagnostics;
+                    result.AddRange(weakIdentityDiagnostics.TryGetValue(record.ComponentType, out diagnostics) &&
+                            diagnostics.TryGetValue(record.ObjectId.Value, out evidence)
+                        ? evidence : new[] { configuration.DisplayName +
+                            " diagnostic lookup produced no auditable result." });
+                }
+                Guid? summaryComponentId;
+                string summary;
+                if (weakIdentitySummaryComponentIds.TryGetValue(record.ComponentType, out summaryComponentId) &&
+                    record.SolutionComponentId == summaryComponentId &&
+                    weakIdentitySummaryEvidence.TryGetValue(record.ComponentType, out summary) &&
+                    !string.IsNullOrWhiteSpace(summary))
+                    result.Add(summary);
+                return result;
+            }
+
+            private static void SetWeakIdentityFailures(IEnumerable<Guid> objectIds, string diagnostic,
+                IDictionary<Guid, string> failures)
+            {
+                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
+            }
+
+            private static string DescribeWeakIdentityRow(WeakIdentityConfiguration configuration, Entity row)
+            {
+                var complete = IsCompleteWeakIdentityRow(configuration, row);
+                return (complete ? configuration.DisplayName + " diagnostic lookup matched. " :
+                    configuration.DisplayName + " diagnostic lookup matched but returned incomplete data. ") +
+                    string.Join("; ", configuration.Columns.Select(attribute => attribute + "=" +
+                        FormatWeakIdentityValue(row, attribute))) +
+                    "; diagnosticContext='" + EscapeDiagnosticText(
+                        DescribeWeakIdentityContext(configuration, row)) +
+                    "'. Diagnostic evidence only; no value is used for membership comparison.";
+            }
+
+            private static string DescribeWeakIdentityContext(WeakIdentityConfiguration configuration, Entity row)
+            {
+                if (configuration.ComponentType == SavedQueryComponentType)
+                    return "returnedtypecode=" + FormatWeakIdentityValue(row, "returnedtypecode") +
+                        ", querytype=" + FormatWeakIdentityValue(row, "querytype") +
+                        ", name=" + FormatWeakIdentityValue(row, "name");
+                if (configuration.ComponentType == EmailTemplateComponentType)
+                    return "templatetypecode=" + FormatWeakIdentityValue(row, "templatetypecode") +
+                        ", ispersonal=" + FormatWeakIdentityValue(row, "ispersonal") +
+                        ", languagecode=" + FormatWeakIdentityValue(row, "languagecode") +
+                        ", title=" + FormatWeakIdentityValue(row, "title");
+                return "primaryentitytypecode=" + FormatWeakIdentityValue(row, "primaryentitytypecode") +
+                    ", type=" + FormatWeakIdentityValue(row, "type") +
+                    ", charttype=" + FormatWeakIdentityValue(row, "charttype") +
+                    ", name=" + FormatWeakIdentityValue(row, "name");
+            }
+
+            private static bool IsCompleteWeakIdentityRow(WeakIdentityConfiguration configuration, Entity row)
+            {
+                if (!HasGuid(row, configuration.PrimaryIdAttribute) ||
+                    !HasText(row, configuration.NameAttribute) ||
+                    !HasGuid(row, configuration.UniqueIdAttribute) ||
+                    !HasOption(row, "componentstate") || !HasBoolean(row, "ismanaged")) return false;
+                if (configuration.ComponentType == SavedQueryComponentType)
+                    return HasEntityNameValue(row, "returnedtypecode") && HasInteger(row, "querytype");
+                if (configuration.ComponentType == EmailTemplateComponentType)
+                    return HasEntityNameValue(row, "templatetypecode") && HasBoolean(row, "ispersonal") &&
+                        HasInteger(row, "languagecode");
+                return HasEntityNameValue(row, "primaryentitytypecode") && HasOption(row, "type") &&
+                    HasOption(row, "charttype");
+            }
+
+            private static bool HasBoolean(Entity row, string attributeName)
+            {
+                object value;
+                return row.Attributes.TryGetValue(attributeName, out value) && value is bool;
+            }
+
+            private static bool HasEntityNameValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value) || value == null) return false;
+                var text = value as string;
+                return text != null ? !string.IsNullOrWhiteSpace(text) :
+                    value is int || value is OptionSetValue;
+            }
+
+            private static string FormatWeakIdentityValue(Entity row, string attributeName)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attributeName, out value)) return "(not supplied)";
+                if (value == null) return "(null)";
+                var option = value as OptionSetValue;
+                if (option != null)
+                    return AppendFormattedWorkflowEvidence(row, attributeName,
+                        option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                if (value is int) return ((int)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var text = value as string;
+                if (text != null) return "'" + EscapeDiagnosticText(text) + "'";
+                return "(unexpected " + value.GetType().FullName + ")";
+            }
+
+            private sealed class WeakIdentityConfiguration
+            {
+                private WeakIdentityConfiguration(int componentType, string displayName, string entityName,
+                    string primaryIdAttribute, string nameAttribute, string uniqueIdAttribute,
+                    params string[] columns)
+                {
+                    ComponentType = componentType;
+                    DisplayName = displayName;
+                    EntityName = entityName;
+                    PrimaryIdAttribute = primaryIdAttribute;
+                    NameAttribute = nameAttribute;
+                    UniqueIdAttribute = uniqueIdAttribute;
+                    Columns = columns;
+                }
+
+                internal int ComponentType { get; }
+                internal string DisplayName { get; }
+                internal string EntityName { get; }
+                internal string PrimaryIdAttribute { get; }
+                internal string NameAttribute { get; }
+                internal string UniqueIdAttribute { get; }
+                internal string[] Columns { get; }
+
+                internal static WeakIdentityConfiguration For(int componentType)
+                {
+                    if (componentType == SavedQueryComponentType)
+                        return new WeakIdentityConfiguration(componentType, "Saved Query", "savedquery",
+                            "savedqueryid", "name", "savedqueryidunique", "savedqueryid", "name",
+                            "returnedtypecode", "querytype", "savedqueryidunique", "componentstate", "ismanaged");
+                    if (componentType == EmailTemplateComponentType)
+                        return new WeakIdentityConfiguration(componentType, "Email Template", "template",
+                            "templateid", "title", "templateidunique", "templateid", "title",
+                            "templatetypecode", "templateidunique", "ispersonal", "languagecode",
+                            "componentstate", "ismanaged");
+                    if (componentType == SavedQueryVisualizationComponentType)
+                        return new WeakIdentityConfiguration(componentType, "System Chart",
+                            "savedqueryvisualization", "savedqueryvisualizationid", "name",
+                            "savedqueryvisualizationidunique", "savedqueryvisualizationid", "name",
+                            "primaryentitytypecode", "type", "charttype",
+                            "savedqueryvisualizationidunique", "componentstate", "ismanaged");
+                    throw new ArgumentOutOfRangeException(nameof(componentType));
+                }
+            }
 
             private void LoadReportDiagnostics(IReadOnlyList<SolutionComponentRecord> records,
                 CancellationToken cancellationToken)
