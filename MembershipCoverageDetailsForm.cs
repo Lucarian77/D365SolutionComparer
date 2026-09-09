@@ -5,16 +5,26 @@ using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using D365SolutionComparer.Models.Membership;
+using D365SolutionComparer.Services.Membership;
 
 namespace D365SolutionComparer
 {
     internal sealed class MembershipCoverageDetailsForm : Form
     {
+        private readonly MembershipComparisonPresentation presentation;
+        private readonly string sourceSolutionVersion;
+        private readonly string targetSolutionVersion;
+
         public MembershipCoverageDetailsForm(string sourceName, MembershipCoverageDiagnostics source,
-            string targetName, MembershipCoverageDiagnostics target)
+            string targetName, MembershipCoverageDiagnostics target,
+            MembershipComparisonPresentation presentation = null,
+            string sourceSolutionVersion = null, string targetSolutionVersion = null)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (target == null) throw new ArgumentNullException(nameof(target));
+            this.presentation = presentation;
+            this.sourceSolutionVersion = sourceSolutionVersion ?? string.Empty;
+            this.targetSolutionVersion = targetSolutionVersion ?? string.Empty;
             Text = "Membership Coverage Details";
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(800, 480);
@@ -34,6 +44,13 @@ namespace D365SolutionComparer
             tabs.TabPages.Add(CreatePage("Source", sourceName, source));
             tabs.TabPages.Add(CreatePage("Target", targetName, target));
             var close = new Button { Text = "Close", DialogResult = DialogResult.OK, Width = 90 };
+            var export = new Button
+            {
+                Text = "Export CSV...",
+                Width = 110,
+                Enabled = presentation != null
+            };
+            export.Click += Export_Click;
             var buttons = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
@@ -42,11 +59,46 @@ namespace D365SolutionComparer
                 FlowDirection = FlowDirection.RightToLeft
             };
             buttons.Controls.Add(close);
+            buttons.Controls.Add(export);
             Controls.Add(tabs);
             Controls.Add(buttons);
             Controls.Add(explanation);
             AcceptButton = close;
             CancelButton = close;
+        }
+
+        private void Export_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new SaveFileDialog
+            {
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                DefaultExt = "csv",
+                AddExtension = true,
+                FileName = SafeFileName(presentation.SolutionUniqueName) + "-membership-coverage.csv",
+                Title = "Export Membership Coverage Details"
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    new MembershipCoverageCsvExporter().WriteCsv(dialog.FileName, presentation,
+                        sourceSolutionVersion, targetSolutionVersion);
+                    MessageBox.Show(this, "Membership coverage details were exported successfully.",
+                        "Export Membership Coverage", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to export membership coverage details.\n\n" + ex.Message,
+                        "Export Membership Coverage", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private static string SafeFileName(string value)
+        {
+            var invalid = System.IO.Path.GetInvalidFileNameChars();
+            return new string((value ?? "solution").Select(character =>
+                invalid.Contains(character) ? '_' : character).ToArray());
         }
 
         private static TabPage CreatePage(string side, string environmentName,
