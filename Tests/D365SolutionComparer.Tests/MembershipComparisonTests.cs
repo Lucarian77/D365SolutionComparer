@@ -178,12 +178,13 @@ namespace D365SolutionComparer.Tests
                 Identity("new_process", 29, kind: ComponentSemanticKinds.Process),
                 Identity(Guid.NewGuid().ToString("D"), 20, kind: ComponentSemanticKinds.SecurityRole),
                 Identity("new_setting", 380, kind: ComponentSemanticKinds.EnvironmentVariableDefinition),
-                Identity("new_shared", 10027, kind: ComponentSemanticKinds.ConnectionReference));
+                Identity("new_shared", 10027, kind: ComponentSemanticKinds.ConnectionReference),
+                Identity("new_priority", 9, kind: ComponentSemanticKinds.GlobalChoice));
             var absent = MembershipSnapshot.Absent(Solution().Environment, "sample", DateTimeOffset.UtcNow);
 
             var results = new SolutionMembershipComparer().Compare(present, absent);
 
-            Assert.AreEqual(8, results.Count);
+            Assert.AreEqual(9, results.Count);
             Assert.IsTrue(results.All(result => result.Presence == MembershipPresence.OnlyInSource));
             Assert.IsTrue(results.All(result =>
                 result.AbsenceEvidence == MembershipAbsenceEvidence.OppositeSolutionAbsent));

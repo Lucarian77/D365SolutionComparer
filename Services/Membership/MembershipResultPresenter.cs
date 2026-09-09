@@ -86,6 +86,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "securityrole": return "Security Role";
                 case "environmentvariabledefinition": return "Environment Variable Definition";
                 case "connectionreference": return "Connection Reference";
+                case "globalchoice": return "Global Choice";
                 case "appmodule": return "Model-driven App / AppModule";
                 case "teamtemplate": return "Team Template";
                 default: return "Component Type " + identity.Record.ComponentType;
@@ -169,6 +170,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SecurityRole: return "Security Role";
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
+                case ComponentSemanticKinds.GlobalChoice: return "Global Choice";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
                 default: return DisplayKind(identity);

@@ -14,9 +14,15 @@ namespace D365SolutionComparer.Models.Membership
         public const string SecurityRole = "securityrole";
         public const string EnvironmentVariableDefinition = "environmentvariabledefinition";
         public const string ConnectionReference = "connectionreference";
+        public const string GlobalChoice = "globalchoice";
         public const string AppModule = "appmodule";
         public const string TeamTemplate = "teamtemplate";
+        internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
+
+        internal static bool IsGlobalChoiceCandidate(string componentTypeKey) =>
+            string.Equals(componentTypeKey, GlobalChoiceCandidateTypeKey,
+                System.StringComparison.OrdinalIgnoreCase);
 
         // Published componenttype choices assigned to built-in kinds other than Connection Reference.
         private static readonly HashSet<int> KnownBuiltInTypes = new HashSet<int>

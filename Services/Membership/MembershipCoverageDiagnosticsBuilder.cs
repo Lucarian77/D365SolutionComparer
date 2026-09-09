@@ -18,6 +18,7 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.SecurityRole,
             ComponentSemanticKinds.EnvironmentVariableDefinition,
             ComponentSemanticKinds.ConnectionReference,
+            ComponentSemanticKinds.GlobalChoice,
             ComponentSemanticKinds.AppModule,
             ComponentSemanticKinds.TeamTemplate
         };
@@ -38,6 +39,9 @@ namespace D365SolutionComparer.Services.Membership
         {
             var broadCandidates = components.Where(item => string.IsNullOrWhiteSpace(item.SemanticKind)).ToList();
             bool hasBroadBlockers = broadCandidates.Count > 0;
+            bool hasUnverifiedGlobalChoiceCandidates = components.Any(item =>
+                item.Status != IdentityResolutionStatus.Resolved &&
+                ComponentSemanticKinds.IsGlobalChoiceCandidate(item.ComponentTypeKey));
             var broad = CreateBucket(null, "Broad / Unclassifiable blockers",
                 MembershipCoverageBucketType.BroadUnclassifiable, broadCandidates, state,
                 hasBroadBlockers: false);
@@ -71,7 +75,9 @@ namespace D365SolutionComparer.Services.Membership
                     ? MembershipCoverageBucketType.DynamicallyClassifiedIsolatedFamily
                     : MembershipCoverageBucketType.SemanticKind;
                 return CreateBucket(kind, DisplayName(kind, candidates), bucketType, candidates, state,
-                    hasBroadBlockers);
+                    hasBroadBlockers || hasUnverifiedGlobalChoiceCandidates &&
+                        string.Equals(kind, ComponentSemanticKinds.GlobalChoice,
+                            StringComparison.OrdinalIgnoreCase));
             }).ToList();
 
             return new MembershipCoverageDiagnostics(state, summaries, broad, broadRawComponentTypes,
@@ -144,6 +150,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SecurityRole: return "Security Role";
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
+                case ComponentSemanticKinds.GlobalChoice: return "Global Choice";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
             }
