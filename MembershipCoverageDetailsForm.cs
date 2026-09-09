@@ -85,6 +85,12 @@ namespace D365SolutionComparer
                 Enabled = presentation != null
             };
             export.Click += Export_Click;
+            var compare = new Button
+            {
+                Text = "Compare lifecycle CSVs...",
+                Width = 165
+            };
+            compare.Click += CompareLifecycleCsvs_Click;
             var buttons = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
@@ -94,12 +100,61 @@ namespace D365SolutionComparer
             };
             buttons.Controls.Add(close);
             buttons.Controls.Add(export);
+            buttons.Controls.Add(compare);
             Controls.Add(tabs);
             Controls.Add(buttons);
             Controls.Add(lifecyclePanel);
             Controls.Add(explanation);
             AcceptButton = close;
             CancelButton = close;
+        }
+
+        private void CompareLifecycleCsvs_Click(object sender, EventArgs e)
+        {
+            string beforePath = SelectCsv("Select the Before membership coverage CSV");
+            if (beforePath == null) return;
+            string afterPath = SelectCsv("Select the After membership coverage CSV");
+            if (afterPath == null) return;
+            using (var dialog = new SaveFileDialog
+            {
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                DefaultExt = "csv",
+                AddExtension = true,
+                FileName = "canvas-app-lifecycle-comparison-" +
+                    DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff", CultureInfo.InvariantCulture) + ".csv",
+                Title = "Save Canvas App Lifecycle Comparison"
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    new CanvasAppLifecycleCsvComparer().CompareFiles(beforePath, afterPath, dialog.FileName);
+                    MessageBox.Show(this, "Canvas App lifecycle evidence was compared successfully.",
+                        "Compare Lifecycle Evidence", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (CanvasAppLifecycleChronologyException ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Compare Lifecycle Evidence",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to compare Canvas App lifecycle evidence.\n\n" + ex.Message,
+                        "Compare Lifecycle Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private string SelectCsv(string title)
+        {
+            using (var dialog = new OpenFileDialog
+            {
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = false,
+                Title = title
+            })
+                return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
         }
 
         private void Export_Click(object sender, EventArgs e)

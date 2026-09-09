@@ -105,6 +105,7 @@
     <Compile Include="Services\Membership\MembershipResultPresenter.cs" />
     <Compile Include="Services\Membership\MembershipCoverageDiagnosticsBuilder.cs" />
     <Compile Include="Services\Membership\MembershipCoverageCsvExporter.cs" />
+    <Compile Include="Services\Membership\CanvasAppLifecycleCsvComparer.cs" />
     <Compile Include="Models\Membership\MembershipPresentation.cs" />
     <Compile Include="MembershipResultsForm.cs">
       <SubType>Form</SubType>
