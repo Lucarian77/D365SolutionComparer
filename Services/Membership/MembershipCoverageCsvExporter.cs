@@ -13,7 +13,7 @@ namespace D365SolutionComparer.Services.Membership
     {
         private static readonly string[] Headers =
         {
-            "RowType", "Side", "Environment", "EnvironmentOrganizationId", "SolutionUniqueName",
+            "RowType", "LifecycleOperation", "Side", "Environment", "EnvironmentOrganizationId", "SolutionUniqueName",
             "SolutionId", "SolutionVersion", "CaptureTimestampUtc", "SnapshotState", "OperationDiagnostic",
             "RequestCount", "ElapsedMilliseconds", "RawMembershipCount", "ResolvedCount", "UnsupportedCount",
             "UnresolvedCount", "AmbiguousCount", "ComparisonPresentInBoth", "ComparisonSourceOnly",
@@ -24,16 +24,22 @@ namespace D365SolutionComparer.Services.Membership
             "CoverageBucketType", "CoverageStatus", "CoverageTotal", "CoverageResolved", "CoverageUnsupported",
             "CoverageUnresolved", "CoverageAmbiguous", "CoverageDiagnosticGroups", "RegisteredDefinitionName",
             "RegisteredDefinitionPrimaryEntity", "CanvasAppName", "CanvasAppId", "UniqueCanvasAppId",
-            "CanvasAppDisplayName", "CanvasAppComponentState", "CanvasAppIsManaged", "CanvasAppCandidateStatus"
+            "CanvasAppDisplayName", "CanvasAppComponentState", "CanvasAppIsManaged", "CanvasAppCandidateStatus",
+            "CanvasAppCandidateDiagnostic"
         };
 
         public string CreateCsv(MembershipComparisonPresentation presentation,
-            string sourceSolutionVersion = null, string targetSolutionVersion = null)
+            string sourceSolutionVersion = null, string targetSolutionVersion = null,
+            string lifecycleOperation = null)
         {
             if (presentation == null) throw new ArgumentNullException(nameof(presentation));
-            var rows = new List<IDictionary<string, string>> { CreateComparisonSummary(presentation) };
-            AppendEnvironment(rows, "Source", presentation.Source, sourceSolutionVersion);
-            AppendEnvironment(rows, "Target", presentation.Target, targetSolutionVersion);
+            lifecycleOperation = lifecycleOperation == null ? string.Empty : lifecycleOperation.Trim();
+            var rows = new List<IDictionary<string, string>>
+            {
+                CreateComparisonSummary(presentation, lifecycleOperation)
+            };
+            AppendEnvironment(rows, "Source", presentation.Source, sourceSolutionVersion, lifecycleOperation);
+            AppendEnvironment(rows, "Target", presentation.Target, targetSolutionVersion, lifecycleOperation);
 
             var text = new StringBuilder();
             AppendCsvLine(text, Headers);
@@ -43,19 +49,22 @@ namespace D365SolutionComparer.Services.Membership
         }
 
         public void WriteCsv(string path, MembershipComparisonPresentation presentation,
-            string sourceSolutionVersion = null, string targetSolutionVersion = null)
+            string sourceSolutionVersion = null, string targetSolutionVersion = null,
+            string lifecycleOperation = null)
         {
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("An export path is required.", nameof(path));
-            File.WriteAllText(path, CreateCsv(presentation, sourceSolutionVersion, targetSolutionVersion),
+            File.WriteAllText(path, CreateCsv(presentation, sourceSolutionVersion, targetSolutionVersion,
+                    lifecycleOperation),
                 new UTF8Encoding(true));
         }
 
         private static IDictionary<string, string> CreateComparisonSummary(
-            MembershipComparisonPresentation presentation)
+            MembershipComparisonPresentation presentation, string lifecycleOperation)
         {
             return Row(
                 Pair("RowType", "ComparisonSummary"),
+                Pair("LifecycleOperation", lifecycleOperation),
                 Pair("SolutionUniqueName", presentation.SolutionUniqueName),
                 Pair("ComparisonPresentInBoth", Number(presentation.Summary.PresentInBoth)),
                 Pair("ComparisonSourceOnly", Number(presentation.Summary.SourceOnly)),
@@ -66,13 +75,14 @@ namespace D365SolutionComparer.Services.Membership
         }
 
         private static void AppendEnvironment(ICollection<IDictionary<string, string>> rows, string side,
-            MembershipEnvironmentResult result, string solutionVersion)
+            MembershipEnvironmentResult result, string solutionVersion, string lifecycleOperation)
         {
             var snapshot = result.Snapshot;
             var environmentName = result.Diagnostics.EnvironmentName;
             var common = new[]
             {
-                Pair("Side", side), Pair("Environment", environmentName),
+                Pair("LifecycleOperation", lifecycleOperation), Pair("Side", side),
+                Pair("Environment", environmentName),
                 Pair("EnvironmentOrganizationId", snapshot == null ? null : snapshot.Environment.OrganizationId.ToString("D")),
                 Pair("SolutionUniqueName", result.SolutionUniqueName),
                 Pair("SolutionId", snapshot?.Solution == null ? null : snapshot.Solution.SolutionId.ToString("D")),
@@ -137,7 +147,8 @@ namespace D365SolutionComparer.Services.Membership
                     Pair("CanvasAppName", canvas.Name), Pair("CanvasAppId", canvas.CanvasAppId),
                     Pair("UniqueCanvasAppId", canvas.UniqueCanvasAppId), Pair("CanvasAppDisplayName", canvas.DisplayName),
                     Pair("CanvasAppComponentState", canvas.ComponentState), Pair("CanvasAppIsManaged", canvas.IsManaged),
-                    Pair("CanvasAppCandidateStatus", canvas.CandidateStatus)
+                    Pair("CanvasAppCandidateStatus", canvas.CandidateStatus),
+                    Pair("CanvasAppCandidateDiagnostic", canvas.CandidateDiagnostic)
                 }).ToArray()));
             }
         }
@@ -166,10 +177,14 @@ namespace D365SolutionComparer.Services.Membership
                 result.ComponentState = ReadValue(lookup[0], "componentstate=", "; ismanaged=");
                 result.IsManaged = ReadValue(lookup[0], "ismanaged=", "; candidateportableidentity=");
             }
-            var candidate = items.FirstOrDefault(item => item != null &&
-                item.StartsWith("Canvas App lifecycle candidate status=", StringComparison.Ordinal));
-            if (candidate != null)
-                result.CandidateStatus = ReadValue(candidate, "Canvas App lifecycle candidate status=", "; candidate=");
+            var candidateDiagnostics = items.Where(item => item != null &&
+                item.StartsWith("Canvas App lifecycle candidate status=", StringComparison.Ordinal)).ToList();
+            if (candidateDiagnostics.Count > 0)
+            {
+                result.CandidateStatus = ReadValue(candidateDiagnostics[0],
+                    "Canvas App lifecycle candidate status=", "; candidate=");
+                result.CandidateDiagnostic = string.Join(Environment.NewLine, candidateDiagnostics);
+            }
             return result;
         }
 
@@ -247,6 +262,7 @@ namespace D365SolutionComparer.Services.Membership
             public string ComponentState { get; set; }
             public string IsManaged { get; set; }
             public string CandidateStatus { get; set; }
+            public string CandidateDiagnostic { get; set; }
         }
     }
 }

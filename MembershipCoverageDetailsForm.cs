@@ -14,6 +14,7 @@ namespace D365SolutionComparer
         private readonly MembershipComparisonPresentation presentation;
         private readonly string sourceSolutionVersion;
         private readonly string targetSolutionVersion;
+        private readonly ComboBox lifecycleOperation;
 
         public MembershipCoverageDetailsForm(string sourceName, MembershipCoverageDiagnostics source,
             string targetName, MembershipCoverageDiagnostics target,
@@ -43,6 +44,39 @@ namespace D365SolutionComparer
             var tabs = new TabControl { Dock = DockStyle.Fill };
             tabs.TabPages.Add(CreatePage("Source", sourceName, source));
             tabs.TabPages.Add(CreatePage("Target", targetName, target));
+            lifecycleOperation = new ComboBox
+            {
+                Width = 430,
+                DropDownStyle = ComboBoxStyle.DropDown
+            };
+            lifecycleOperation.Items.AddRange(new object[]
+            {
+                "Repeated import of the same unmanaged solution",
+                "Updated Canvas App import",
+                "Unmanaged DEV to managed UAT deployment",
+                "Managed Update",
+                "Managed Upgrade",
+                "Patch followed by upgrade",
+                "Canvas App rename",
+                "Solution clone or supported equivalent",
+                "Delete and recreate",
+                "Same/similar app names under different publisher prefixes"
+            });
+            var lifecyclePanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 38,
+                Padding = new Padding(8, 5, 8, 3),
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            lifecyclePanel.Controls.Add(new Label
+            {
+                AutoSize = true,
+                Margin = new Padding(2, 5, 8, 0),
+                Text = "Lifecycle operation:"
+            });
+            lifecyclePanel.Controls.Add(lifecycleOperation);
             var close = new Button { Text = "Close", DialogResult = DialogResult.OK, Width = 90 };
             var export = new Button
             {
@@ -62,6 +96,7 @@ namespace D365SolutionComparer
             buttons.Controls.Add(export);
             Controls.Add(tabs);
             Controls.Add(buttons);
+            Controls.Add(lifecyclePanel);
             Controls.Add(explanation);
             AcceptButton = close;
             CancelButton = close;
@@ -69,12 +104,22 @@ namespace D365SolutionComparer
 
         private void Export_Click(object sender, EventArgs e)
         {
+            var operation = lifecycleOperation.Text == null ? string.Empty : lifecycleOperation.Text.Trim();
+            if (operation.Length == 0)
+            {
+                MessageBox.Show(this, "Enter or select the lifecycle operation for this evidence checkpoint.",
+                    "Export Membership Coverage", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                lifecycleOperation.Focus();
+                return;
+            }
             using (var dialog = new SaveFileDialog
             {
                 Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
                 DefaultExt = "csv",
                 AddExtension = true,
-                FileName = SafeFileName(presentation.SolutionUniqueName) + "-membership-coverage.csv",
+                FileName = SafeFileName(presentation.SolutionUniqueName) + "-" + SafeFileName(operation) +
+                    "-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff", CultureInfo.InvariantCulture) +
+                    "-membership-coverage.csv",
                 Title = "Export Membership Coverage Details"
             })
             {
@@ -82,7 +127,7 @@ namespace D365SolutionComparer
                 try
                 {
                     new MembershipCoverageCsvExporter().WriteCsv(dialog.FileName, presentation,
-                        sourceSolutionVersion, targetSolutionVersion);
+                        sourceSolutionVersion, targetSolutionVersion, operation);
                     MessageBox.Show(this, "Membership coverage details were exported successfully.",
                         "Export Membership Coverage", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
