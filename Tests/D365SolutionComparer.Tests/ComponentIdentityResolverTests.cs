@@ -2969,6 +2969,383 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void Type300Lifecycle01ValidCandidateUsesCanvasAppNameOnly()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = ResolveType300(solution, objectId,
+                CanvasApp(objectId, "new_InspectionApp", "Inspection", "local-unique", false));
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "CandidateValid");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate='new_InspectionApp'")));
+            var summary = Type300Summary(MembershipSnapshot.Complete(solution,
+                new[] { result }, DateTimeOffset.UtcNow));
+            StringAssert.Contains(summary, "CandidateList=['new_InspectionApp']");
+            StringAssert.Contains(summary, "CompleteCandidateList=['new_InspectionApp']");
+            StringAssert.Contains(summary, "ValidCandidateList=['new_InspectionApp']");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle02CandidateEqualityIsOrdinalIgnoreCase()
+        {
+            AssertDuplicateType300Candidates(
+                CanvasApp(Guid.NewGuid(), "new_App", "First", "first-local", false),
+                CanvasApp(Guid.NewGuid(), "NEW_APP", "Second", "second-local", false));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle03DifferentCanvasAppIdsDoNotChangeCandidateEquality()
+        {
+            var first = CanvasApp(Guid.NewGuid(), "new_App", "Same", "same-local", false);
+            var second = CanvasApp(Guid.NewGuid(), "new_App", "Same", "same-local", false);
+            Assert.AreNotEqual(first.Id, second.Id);
+            AssertDuplicateType300Candidates(first, second);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle04DifferentUniqueCanvasAppIdsDoNotChangeCandidateEquality()
+        {
+            AssertDuplicateType300Candidates(
+                CanvasApp(Guid.NewGuid(), "new_App", "Same", "first-local", false),
+                CanvasApp(Guid.NewGuid(), "new_App", "Same", "second-local", false));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle05DifferentDisplayNamesDoNotChangeCandidateEquality()
+        {
+            AssertDuplicateType300Candidates(
+                CanvasApp(Guid.NewGuid(), "new_App", "English display", "first-local", false),
+                CanvasApp(Guid.NewGuid(), "new_App", "French display", "second-local", false));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle06ManagedStateDoesNotChangeCandidateEqualityAndIsCounted()
+        {
+            var solution = Solution();
+            var first = CanvasApp(Guid.NewGuid(), "new_App", "First", "first-local", false);
+            var second = CanvasApp(Guid.NewGuid(), "new_App", "Second", "second-local", true);
+            var result = ResolveType300Snapshot(solution, new[] { first.Id, second.Id }, Rows(first, second));
+
+            AssertType300DuplicateCandidates(result);
+            var summary = Type300Summary(result);
+            StringAssert.Contains(summary, "ManagedCandidateCount=1");
+            StringAssert.Contains(summary, "UnmanagedCandidateCount=1");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle07ComponentStateDoesNotChangeCandidateEquality()
+        {
+            var first = CanvasApp(Guid.NewGuid(), "new_App", "First", "first-local", false);
+            var second = CanvasApp(Guid.NewGuid(), "new_App", "Second", "second-local", false);
+            second["componentstate"] = new OptionSetValue(1);
+            second.FormattedValues["componentstate"] = "Unpublished";
+            AssertDuplicateType300Candidates(first, second);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle08DistinctCanvasAppsWithSameNameAreDuplicateCandidates()
+        {
+            AssertDuplicateType300Candidates(
+                CanvasApp(Guid.NewGuid(), "new_App", "First", "first-local", false),
+                CanvasApp(Guid.NewGuid(), "new_App", "Second", "second-local", false));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle09BlankNameCannotCreateCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = ResolveType300(solution, objectId,
+                CanvasApp(objectId, " ", "Display only", "local-unique", false));
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "BlankName");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidateportableidentity=(unavailable)")));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle10MissingCorrelationRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => Rows()), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId), CancellationToken.None);
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "CorrelationMissing");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle11DuplicateCorrelationRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => Rows(
+                    CanvasApp(objectId, "new_First", "First", "first-local", false),
+                    CanvasApp(objectId, "new_Second", "Second", "second-local", true))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                CancellationToken.None);
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "CorrelationDuplicate");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle12IncompleteCorrelatedRowCannotBecomeValidCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var incomplete = CanvasApp(objectId, "new_App", "Display", "local-unique", false);
+            incomplete.Attributes.Remove("displayname");
+            var result = ResolveType300(solution, objectId, incomplete);
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "Incomplete");
+            var summary = Type300Summary(MembershipSnapshot.Complete(solution,
+                new[] { result }, DateTimeOffset.UtcNow));
+            StringAssert.Contains(summary, "CandidateList=['new_App']");
+            StringAssert.Contains(summary, "CompleteCandidateList=[]");
+            StringAssert.Contains(summary, "ValidCandidateList=[]");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle13PagedResultIsIncompleteAndCountsAreUnavailable()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query =>
+                {
+                    var rows = Rows(CanvasApp(objectId, "new_App", "App", "local-unique", false));
+                    rows.MoreRecords = true;
+                    return rows;
+                }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                CancellationToken.None);
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "Incomplete");
+            StringAssert.Contains(Type300Summary(MembershipSnapshot.Complete(solution,
+                new[] { result }, DateTimeOffset.UtcNow)), "ReturnedCanvasAppRowCount=(unavailable)");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle14FaultedRetrievalRemainsConservative()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => throw new FaultException("Canvas App denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                CancellationToken.None);
+
+            AssertType300DiagnosticOnly(result);
+            AssertType300CandidateStatus(result, "Faulted");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("Canvas App denied")));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle15CancellationPropagates()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = CanvasAppService(solution, query =>
+                {
+                    cancellation.Cancel();
+                    return Rows();
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), 300, objectId), cancellation.Token));
+            }
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle16RequestCountQueryShapeAndBatchingRemainUnchanged()
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(1, 201)
+                .Select(index => new Guid(index, 0, 0, new byte[8])).ToArray();
+            var records = objectIds.Select(objectId => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            var queriedIds = new List<Guid>();
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                CanvasAppService(solution, query =>
+                {
+                    var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToArray();
+                    AssertCanvasAppQuery(query, ids);
+                    Assert.IsTrue(ids.Length <= 200);
+                    queriedIds.AddRange(ids);
+                    return Rows(ids.Select(id => CanvasApp(id, "app_" + id.ToString("N"), "App",
+                        Guid.NewGuid().ToString("D"), false)).ToArray());
+                }), MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            CollectionAssert.AreEquivalent(objectIds, queriedIds);
+            Assert.AreEqual(201, result.Components.Count);
+            Assert.AreEqual(2, counter.GetQueryCount("canvasapp"));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(3, counter.TotalRequests);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle17DiagnosticGroupingRemainsStableAcrossCandidateEvidence()
+        {
+            var solution = Solution(); var firstId = Guid.NewGuid(); var secondId = Guid.NewGuid();
+            var result = ResolveType300Snapshot(solution, new[] { firstId, secondId }, Rows(
+                CanvasApp(firstId, "new_First", "First", "first-local", false),
+                CanvasApp(secondId, "new_Second", "Second", "second-local", true)));
+            var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:300");
+
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(2, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual("No identity resolver supports this known component type.",
+                bucket.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(2, bucket.AuditEvidence.Count);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle18RepeatedRawMembershipDoesNotCreateDuplicateCandidate()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var records = Enumerable.Range(0, 2).Select(index => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                CanvasAppService(solution, query => Rows(
+                    CanvasApp(objectId, "new_App", "App", "local-unique", false))),
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+
+            Assert.AreEqual(2, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=CandidateValid"))));
+            Assert.IsFalse(result.Components.Any(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=DuplicateCandidate"))));
+            var summary = Type300Summary(result);
+            StringAssert.Contains(summary, "RawType300MembershipCount=2");
+            StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=1");
+            StringAssert.Contains(summary, "ValidCandidateCount=1");
+            StringAssert.Contains(summary, "DuplicateCandidateCount=0");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle19RemainsUnsupportedIndeterminateWithoutPortableKey()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid();
+            var source = ResolveType300(sourceSolution, sourceId,
+                CanvasApp(sourceId, "new_App", "DEV", "dev-local", false));
+            var target = ResolveType300(targetSolution, targetId,
+                CanvasApp(targetId, "NEW_APP", "UAT", "uat-local", true));
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
+
+            AssertType300DiagnosticOnly(source);
+            AssertType300DiagnosticOnly(target);
+            Assert.AreEqual(2, compared.Count);
+            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate &&
+                item.AbsenceEvidence == MembershipAbsenceEvidence.None));
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle20GlobalChoiceResolutionIsUnchanged()
+        {
+            var solution = Solution(); var metadataId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                OptionSetService(solution, request => AllOptionSetsResponse(
+                    OptionSet(metadataId, "new_Priority", true, OptionSetType.Picklist, true, true))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 9, metadataId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.SemanticKind);
+            Assert.AreEqual("new_Priority", result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle21SignedReportResolutionIsUnchanged()
+        {
+            var solution = Solution(); var reportId = Guid.NewGuid(); var signatureId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                ReportService(solution, query => Rows(Report(reportId, "Signed", "Signed.rdl", 1,
+                    signatureId, 1033, Guid.NewGuid(), false))), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, reportId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.Report, result.SemanticKind);
+            Assert.AreEqual(signatureId.ToString("D"), result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle22AppModuleResolutionIsUnchanged()
+        {
+            var solution = Solution(); var appModuleId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                BroadTypeService(solution, query => Rows(AppModule(appModuleId, "new_App", "App", false))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 80, appModuleId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.AppModule, result.SemanticKind);
+            Assert.AreEqual("new_App", result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle23TeamTemplateClassificationIsUnchanged()
+        {
+            var solution = Solution(); var teamTemplateId = Guid.NewGuid();
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                TeamTemplateService(solution, query => Rows(
+                    TeamTemplate(teamTemplateId, "Account access", 1, 3, false)),
+                    request => MetadataRows(EntityMetadata(1, "account", "Account"))),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 511, teamTemplateId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.TeamTemplate, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle24SystemFormDiagnosticBehaviorIsUnchanged()
+        {
+            var solution = Solution(); var formId = Guid.NewGuid();
+            var result = ResolveType60(solution, formId,
+                SystemForm(formId, "new_Main", "Main", "account", 2, Guid.NewGuid(), false));
+
+            AssertType60DiagnosticOnly(result);
+            AssertCandidateStatus(result, "CandidateValid");
+        }
+
+        [TestMethod]
+        public void Type300Lifecycle25SolutionLevelComparisonIsUnchanged()
+        {
+            var source = new D365SolutionComparer.Models.SolutionInfo
+            {
+                UniqueName = "sample", DisplayName = "Sample", Version = "1.0.0.0",
+                Publisher = "Publisher", IsManaged = true
+            };
+            var target = new D365SolutionComparer.Models.SolutionInfo
+            {
+                UniqueName = "SAMPLE", DisplayName = "Sample", Version = "2.0.0.0",
+                Publisher = "Publisher", IsManaged = true
+            };
+
+            var result = new D365SolutionComparer.Services.SolutionComparisonService().Compare(
+                new List<D365SolutionComparer.Models.SolutionInfo> { source },
+                new List<D365SolutionComparer.Models.SolutionInfo> { target }).Single();
+
+            Assert.AreEqual("sample", result.UniqueName);
+            Assert.AreEqual("Version Mismatch", result.Status);
+            Assert.AreEqual("Match", result.PackageTypeStatus);
+        }
+
+        [TestMethod]
         public void Type511SingleCompleteTeamTemplateIsClassifiedWithoutPortableIdentity()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
@@ -4131,6 +4508,65 @@ namespace D365SolutionComparer.Tests
             };
             row.FormattedValues["componentstate"] = "Published";
             return row;
+        }
+
+        private static ComponentIdentity ResolveType300(SolutionIdentity solution, Guid objectId,
+            Entity canvasApp)
+        {
+            return new DataverseComponentIdentityResolver().Resolve(
+                CanvasAppService(solution, query => Rows(canvasApp)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId), CancellationToken.None);
+        }
+
+        private static MembershipSnapshot ResolveType300Snapshot(SolutionIdentity solution,
+            IEnumerable<Guid> objectIds, EntityCollection rows)
+        {
+            var records = objectIds.Select(objectId => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 300, objectId),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            return new DataverseComponentIdentityResolver().ResolveSnapshot(
+                CanvasAppService(solution, query => rows),
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+        }
+
+        private static void AssertDuplicateType300Candidates(Entity first, Entity second)
+        {
+            AssertType300DuplicateCandidates(ResolveType300Snapshot(Solution(),
+                new[] { first.Id, second.Id }, Rows(first, second)));
+        }
+
+        private static void AssertType300DuplicateCandidates(MembershipSnapshot result)
+        {
+            Assert.AreEqual(2, result.Components.Count);
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("candidate status=DuplicateCandidate"))));
+            var summary = Type300Summary(result);
+            StringAssert.Contains(summary, "DuplicateCandidateCount=2");
+            StringAssert.Contains(summary, "DistinctCaseInsensitiveCandidateCount=1");
+            StringAssert.Contains(summary, "ValidCandidateList=[]");
+        }
+
+        private static void AssertType300DiagnosticOnly(ComponentIdentity result)
+        {
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:300", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+        }
+
+        private static void AssertType300CandidateStatus(ComponentIdentity result, string expectedStatus)
+        {
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
+                item.Contains("candidate status=" + expectedStatus)));
+        }
+
+        private static string Type300Summary(MembershipSnapshot snapshot)
+        {
+            return snapshot.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
         }
 
         private static FakeOrganizationService CanvasAppService(SolutionIdentity solution,

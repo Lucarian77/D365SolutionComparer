@@ -1904,11 +1904,27 @@ namespace D365SolutionComparer.Services.Membership
                 int missing = 0;
                 int nonUnique = 0;
                 int blankName = 0;
-                var candidateNames = new List<string>();
+                var analyses = objectIds.ToDictionary(item => item,
+                    item => AnalyzeCanvasAppCandidate(retrieval.GetCorrelation(item)));
+                var candidateGroups = analyses.Values.Where(item =>
+                        !string.IsNullOrWhiteSpace(item.CandidateName))
+                    .GroupBy(item => item.CandidateName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                foreach (var group in candidateGroups.Where(item => item.Count() > 1))
+                    foreach (var analysis in group) analysis.MarkDuplicateCandidate();
+                int validCandidates = analyses.Values.Count(item =>
+                    item.Status == CanvasAppCandidateStatus.CandidateValid);
+                int duplicateCandidates = analyses.Values.Count(item =>
+                    item.Status == CanvasAppCandidateStatus.DuplicateCandidate);
+                int managedCandidates = analyses.Values.Count(item =>
+                    !string.IsNullOrWhiteSpace(item.CandidateName) && item.IsManaged == true);
+                int unmanagedCandidates = analyses.Values.Count(item =>
+                    !string.IsNullOrWhiteSpace(item.CandidateName) && item.IsManaged == false);
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
                     var correlation = retrieval.GetCorrelation(objectId);
+                    var analysis = analyses[objectId];
                     var matches = correlation.Rows;
                     if (correlation.Status == DiagnosticCorrelationStatus.Failed)
                         evidence.Add(correlation.Failure);
@@ -1929,17 +1945,31 @@ namespace D365SolutionComparer.Services.Membership
                         correlated++;
                         var name = matches[0].GetAttributeValue<string>("name");
                         if (string.IsNullOrWhiteSpace(name)) blankName++;
-                        else candidateNames.Add(name);
                     }
                     evidence.AddRange(correlation.UnassociatedRows.Select(row =>
                         "Unassociated or conflicting returned canvasapp row: " + DescribeCanvasApp(row)));
+                    evidence.Add(DescribeCanvasAppCandidateAnalysis(analysis));
                     canvasAppDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
                 int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
                     item.ObjectId.Value == Guid.Empty);
-                var distinctNames = candidateNames.GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                var distinctNames = candidateGroups.Select(group => group.First().CandidateName)
+                    .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var completeCandidateNames = analyses.Values.Where(item => item.IsComplete &&
+                        !string.IsNullOrWhiteSpace(item.CandidateName))
+                    .Select(item => item.CandidateName).GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var validCandidateNames = analyses.Values.Where(item =>
+                        item.Status == CanvasAppCandidateStatus.CandidateValid)
+                    .Select(item => item.CandidateName).GroupBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First()).OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var duplicateCandidateNames = candidateGroups.Where(group => group.Count() > 1)
+                    .Select(group => group.First().CandidateName)
+                    .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
                     .ToList();
                 canvasAppSummaryEvidence = DescribeCanvasAppSummary(records.Count, objectIds.Count,
                     countUnavailable ? (int?)null : returnedCount,
@@ -1947,7 +1977,15 @@ namespace D365SolutionComparer.Services.Membership
                     countUnavailable ? (int?)null : missing, missingObjectIds,
                     countUnavailable ? (int?)null : blankName,
                     countUnavailable ? (int?)null : nonUnique,
-                    countUnavailable ? null : distinctNames);
+                    countUnavailable ? (int?)null : validCandidates,
+                    countUnavailable ? (int?)null : duplicateCandidates,
+                    countUnavailable ? (int?)null : distinctNames.Count,
+                    countUnavailable ? (int?)null : managedCandidates,
+                    countUnavailable ? (int?)null : unmanagedCandidates,
+                    countUnavailable ? null : distinctNames,
+                    countUnavailable ? null : completeCandidateNames,
+                    countUnavailable ? null : validCandidateNames,
+                    countUnavailable ? null : duplicateCandidateNames);
             }
 
             private IEnumerable<string> GetCanvasAppDiagnosticEvidence(SolutionComponentRecord record)
@@ -1956,7 +1994,11 @@ namespace D365SolutionComparer.Services.Membership
                     return new string[0];
                 var result = new List<string>();
                 if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                {
                     result.Add("Canvas App diagnostic lookup was not attempted because objectid is unavailable.");
+                    result.Add("Canvas App lifecycle candidate status=CorrelationMissing; candidate=(unavailable). " +
+                        "Diagnostic validation only; the candidate is not used for membership comparison.");
+                }
                 else
                 {
                     IReadOnlyList<string> evidence;
@@ -1971,10 +2013,10 @@ namespace D365SolutionComparer.Services.Membership
 
             private static string DescribeCanvasApp(Entity row)
             {
-                bool complete = HasGuid(row, "canvasappid") && HasText(row, "name") &&
-                    HasText(row, "displayname") && HasText(row, "uniquecanvasappid") &&
-                    HasOption(row, "componentstate") && row.Attributes.ContainsKey("ismanaged") &&
-                    row.Attributes["ismanaged"] is bool;
+                var name = row.GetAttributeValue<string>("name");
+                var candidate = string.IsNullOrWhiteSpace(name)
+                    ? "(unavailable)" : "'" + EscapeDiagnosticText(name) + "'";
+                bool complete = IsCompleteCanvasApp(row);
                 return (complete ? "Canvas App diagnostic lookup matched. " :
                     "Canvas App diagnostic lookup matched but returned incomplete data. ") +
                     "canvasappid=" + FormatCanvasAppValue(row, "canvasappid") +
@@ -1983,12 +2025,17 @@ namespace D365SolutionComparer.Services.Membership
                     "; uniquecanvasappid=" + FormatCanvasAppValue(row, "uniquecanvasappid") +
                     "; componentstate=" + FormatCanvasAppValue(row, "componentstate") +
                     "; ismanaged=" + FormatCanvasAppValue(row, "ismanaged") +
-                    ". Diagnostic evidence only; none of these values is used as a portable comparison identity.";
+                    "; candidateportableidentity=" + candidate +
+                    ". Diagnostic evidence only; the candidate is not used for membership comparison.";
             }
 
             private static string DescribeCanvasAppSummary(int rawCount, int distinctObjectIdCount,
                 int? returnedCount, int? correlatedCount, int? missingCount, int missingObjectIdCount,
-                int? blankNameCount, int? nonUniqueCount, IReadOnlyList<string> distinctNames)
+                int? blankNameCount, int? nonUniqueCount, int? validCandidateCount,
+                int? duplicateCandidateCount, int? distinctCandidateCount,
+                int? managedCandidateCount, int? unmanagedCandidateCount,
+                IReadOnlyList<string> distinctNames, IReadOnlyList<string> completeCandidateNames,
+                IReadOnlyList<string> validCandidateNames, IReadOnlyList<string> duplicateCandidateNames)
             {
                 return "Canvas App diagnostic summary: RawType300MembershipCount=" + rawCount +
                     "; DistinctNonemptyObjectIdCount=" + distinctObjectIdCount +
@@ -1998,9 +2045,68 @@ namespace D365SolutionComparer.Services.Membership
                     "; MissingObjectIdRecordCount=" + missingObjectIdCount +
                     "; BlankNameCount=" + FormatOptionSetCount(blankNameCount) +
                     "; NonUniqueObjectIdCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; MissingCorrelationCount=" + FormatOptionSetCount(missingCount) +
+                    "; DuplicateCorrelationCount=" + FormatOptionSetCount(nonUniqueCount) +
+                    "; ValidCandidateCount=" + FormatOptionSetCount(validCandidateCount) +
+                    "; DuplicateCandidateCount=" + FormatOptionSetCount(duplicateCandidateCount) +
+                    "; DistinctCaseInsensitiveCandidateCount=" + FormatOptionSetCount(distinctCandidateCount) +
+                    "; ManagedCandidateCount=" + FormatOptionSetCount(managedCandidateCount) +
+                    "; UnmanagedCandidateCount=" + FormatOptionSetCount(unmanagedCandidateCount) +
                     "; DistinctCandidateNames=" + (distinctNames == null ? "(unavailable)" :
                         "[" + string.Join(", ", distinctNames.Select(item => "'" +
-                            EscapeDiagnosticText(item) + "'")) + "]") + ".";
+                            EscapeDiagnosticText(item) + "'")) + "]") +
+                    "; CandidateList=" + FormatCanvasAppCandidateList(distinctNames) +
+                    "; CompleteCandidateList=" + FormatCanvasAppCandidateList(completeCandidateNames) +
+                    "; ValidCandidateList=" + FormatCanvasAppCandidateList(validCandidateNames) +
+                    "; DuplicateCandidateIdentities=" +
+                        FormatCanvasAppCandidateList(duplicateCandidateNames) + ".";
+            }
+
+            private static CanvasAppCandidateAnalysis AnalyzeCanvasAppCandidate(
+                DiagnosticRowCorrelation correlation)
+            {
+                if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                    return new CanvasAppCandidateAnalysis(
+                        correlation.Failure != null && correlation.Failure.StartsWith(
+                            "Canvas App diagnostic lookup failed:", StringComparison.Ordinal)
+                            ? CanvasAppCandidateStatus.Faulted : CanvasAppCandidateStatus.Incomplete);
+                if (correlation.Status == DiagnosticCorrelationStatus.Missing)
+                    return new CanvasAppCandidateAnalysis(CanvasAppCandidateStatus.CorrelationMissing);
+                if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
+                    return new CanvasAppCandidateAnalysis(CanvasAppCandidateStatus.CorrelationDuplicate);
+
+                var row = correlation.Rows[0];
+                var candidateName = row.GetAttributeValue<string>("name");
+                var status = string.IsNullOrWhiteSpace(candidateName)
+                    ? CanvasAppCandidateStatus.BlankName
+                    : !IsCompleteCanvasApp(row)
+                    ? CanvasAppCandidateStatus.Incomplete
+                    : CanvasAppCandidateStatus.CandidateValid;
+                return new CanvasAppCandidateAnalysis(status, candidateName,
+                    IsCompleteCanvasApp(row), row.GetAttributeValue<bool?>("ismanaged"));
+            }
+
+            private static string DescribeCanvasAppCandidateAnalysis(CanvasAppCandidateAnalysis analysis)
+            {
+                return "Canvas App lifecycle candidate status=" + analysis.Status +
+                    "; candidate=" + (string.IsNullOrWhiteSpace(analysis.CandidateName)
+                        ? "(unavailable)" : "'" + EscapeDiagnosticText(analysis.CandidateName) + "'") +
+                    ". Diagnostic validation only; the candidate is not used for membership comparison.";
+            }
+
+            private static bool IsCompleteCanvasApp(Entity row)
+            {
+                return HasGuid(row, "canvasappid") && HasText(row, "name") &&
+                    HasText(row, "displayname") && HasText(row, "uniquecanvasappid") &&
+                    HasOption(row, "componentstate") && row.Attributes.ContainsKey("ismanaged") &&
+                    row.Attributes["ismanaged"] is bool;
+            }
+
+            private static string FormatCanvasAppCandidateList(IReadOnlyList<string> values)
+            {
+                return values == null ? "(unavailable)" :
+                    "[" + string.Join(", ", values.Select(item => "'" +
+                        EscapeDiagnosticText(item) + "'")) + "]";
             }
 
             private static string FormatCanvasAppValue(Entity row, string attributeName)
@@ -2689,6 +2795,39 @@ namespace D365SolutionComparer.Services.Membership
                 public void MarkDuplicateCandidate()
                 {
                     Status = SystemFormCandidateStatus.DuplicateCandidate;
+                }
+            }
+
+            private enum CanvasAppCandidateStatus
+            {
+                CandidateValid,
+                BlankName,
+                DuplicateCandidate,
+                CorrelationMissing,
+                CorrelationDuplicate,
+                Incomplete,
+                Faulted
+            }
+
+            private sealed class CanvasAppCandidateAnalysis
+            {
+                public CanvasAppCandidateAnalysis(CanvasAppCandidateStatus status,
+                    string candidateName = null, bool isComplete = false, bool? isManaged = null)
+                {
+                    Status = status;
+                    CandidateName = candidateName;
+                    IsComplete = isComplete;
+                    IsManaged = isManaged;
+                }
+
+                public CanvasAppCandidateStatus Status { get; private set; }
+                public string CandidateName { get; }
+                public bool IsComplete { get; }
+                public bool? IsManaged { get; }
+
+                public void MarkDuplicateCandidate()
+                {
+                    Status = CanvasAppCandidateStatus.DuplicateCandidate;
                 }
             }
 
