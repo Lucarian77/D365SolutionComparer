@@ -81,6 +81,8 @@ namespace D365SolutionComparer.Services.Membership
             private readonly HashSet<int> metadataDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> optionSetDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, OptionSetResolutionValue> optionSetResolutions =
+                new Dictionary<Guid, OptionSetResolutionValue>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> reportDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>> weakIdentityDiagnostics =
@@ -188,6 +190,8 @@ namespace D365SolutionComparer.Services.Membership
                 kind = null;
                 switch (record.ComponentType)
                 {
+                    case OptionSetComponentType:
+                        return ResolveOptionSet(record);
                     case 1: kind = "table"; break;
                     case 2: kind = "column"; break;
                     case 10: kind = "relationship"; break;
@@ -729,6 +733,9 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         SetOptionSetDiagnosticFailures(objectIds,
                             "RetrieveAllOptionSets diagnostic lookup returned no option-set catalog.");
+                        SetOptionSetResolutionFailures(objectIds,
+                            IdentityResolutionStatus.Unresolved,
+                            "The option-set catalog was unavailable, so Global Choice identity could not be verified.");
                         optionSetSummaryEvidence = DescribeOptionSetSummary(records.Count, objectIds.Count,
                             null, null, null, records.Count(item => !item.ObjectId.HasValue ||
                                 item.ObjectId.Value == Guid.Empty), null, null, null, null);
@@ -738,6 +745,11 @@ namespace D365SolutionComparer.Services.Membership
                     var indexed = returned.Where(item => item != null && item.MetadataId.HasValue)
                         .GroupBy(item => item.MetadataId.Value)
                         .ToDictionary(group => group.Key, group => group.ToList());
+                    var duplicateGlobalNames = new HashSet<string>(returned.Where(item => item != null &&
+                            item.IsGlobal == true && !string.IsNullOrWhiteSpace(item.Name))
+                        .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                        .Where(group => group.Count() > 1).Select(group => group.Key),
+                        StringComparer.OrdinalIgnoreCase);
                     int correlated = 0;
                     int missing = 0;
                     int nonUnique = 0;
@@ -754,6 +766,8 @@ namespace D365SolutionComparer.Services.Membership
                             {
                                 "No option-set metadata in the retrieved catalog matched this solutioncomponent objectid."
                             };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Unresolved(
+                                "No option-set metadata matched the component object ID, so Global Choice identity could not be verified.");
                             continue;
                         }
                         if (matches.Count != 1)
@@ -765,6 +779,8 @@ namespace D365SolutionComparer.Services.Membership
                             };
                             evidence.AddRange(matches.Select(item => DescribeOptionSet(item, objectId, false)));
                             optionSetDiagnostics[objectId] = evidence.AsReadOnly();
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Ambiguous(
+                                "Multiple option-set metadata definitions matched the component object ID.");
                             continue;
                         }
 
@@ -773,7 +789,56 @@ namespace D365SolutionComparer.Services.Membership
                         if (string.IsNullOrWhiteSpace(metadata.Name)) blankName++;
                         else candidateNames.Add(metadata.Name);
                         if (metadata.IsGlobal != true) nonGlobal++;
-                        optionSetDiagnostics[objectId] = new[] { DescribeOptionSet(metadata, objectId, true) };
+                        var metadataEvidence = DescribeOptionSet(metadata, objectId, true);
+                        if (metadata.IsGlobal == false)
+                        {
+                            optionSetDiagnostics[objectId] = new[] { metadataEvidence };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Unsupported(
+                                "The correlated Type-9 option-set metadata is not global.");
+                        }
+                        else if (metadata.IsGlobal != true)
+                        {
+                            optionSetDiagnostics[objectId] = new[] { metadataEvidence };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Unresolved(
+                                "The option-set metadata does not establish that this candidate is a Global Choice.");
+                        }
+                        else if (string.IsNullOrWhiteSpace(metadata.Name))
+                        {
+                            optionSetDiagnostics[objectId] = new[] { metadataEvidence };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Unresolved(
+                                "The verified Global Choice metadata has a blank Name.");
+                        }
+                        else if (duplicateGlobalNames.Contains(metadata.Name))
+                        {
+                            optionSetDiagnostics[objectId] = new[]
+                            {
+                                metadataEvidence,
+                                "The candidate Global Choice Name '" + EscapeDiagnosticText(metadata.Name) +
+                                    "' is not unique in the retrieved option-set catalog."
+                            };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Ambiguous(
+                                "The candidate Global Choice Name is not unique in the option-set catalog.");
+                        }
+                        else
+                        {
+                            optionSetDiagnostics[objectId] = new[] { metadataEvidence };
+                            optionSetResolutions[objectId] = OptionSetResolutionValue.Resolved(metadata.Name);
+                        }
+                    }
+                    var repeatedObjectIds = new HashSet<Guid>(records.Where(item => item.ObjectId.HasValue &&
+                            item.ObjectId.Value != Guid.Empty)
+                        .GroupBy(item => item.ObjectId.Value).Where(group => group.Count() > 1)
+                        .Select(group => group.Key));
+                    foreach (var objectId in repeatedObjectIds)
+                    {
+                        OptionSetResolutionValue resolution;
+                        if (!optionSetResolutions.TryGetValue(objectId, out resolution) ||
+                            resolution.Status != IdentityResolutionStatus.Resolved) continue;
+                        var evidence = optionSetDiagnostics[objectId].ToList();
+                        evidence.Add("Multiple solutioncomponent records reference this candidate Global Choice object ID.");
+                        optionSetDiagnostics[objectId] = evidence.AsReadOnly();
+                        optionSetResolutions[objectId] = OptionSetResolutionValue.Ambiguous(
+                            "Multiple membership records reference the same candidate Global Choice identity.");
                     }
                     int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
                         item.ObjectId.Value == Guid.Empty);
@@ -790,10 +855,28 @@ namespace D365SolutionComparer.Services.Membership
                     cancellationToken.ThrowIfCancellationRequested();
                     SetOptionSetDiagnosticFailures(objectIds,
                         "RetrieveAllOptionSets diagnostic lookup failed: " + ex.Message);
+                    SetOptionSetResolutionFailures(objectIds, IdentityResolutionStatus.Unresolved,
+                        "The option-set catalog lookup failed, so Global Choice identity could not be verified.");
                     optionSetSummaryEvidence = DescribeOptionSetSummary(records.Count, objectIds.Count,
                         null, null, null, records.Count(item => !item.ObjectId.HasValue ||
                             item.ObjectId.Value == Guid.Empty), null, null, null, null);
                 }
+            }
+
+            private ComponentIdentity ResolveOptionSet(SolutionComponentRecord record)
+            {
+                var evidence = GetOptionSetDiagnosticEvidence(record);
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                        diagnostic: "The Type-9 component has no usable object ID, so Global Choice identity could not be verified.",
+                        componentTypeKey: ComponentSemanticKinds.GlobalChoiceCandidateTypeKey,
+                        semanticKind: "unsupported:componenttype:9",
+                        diagnosticEvidence: evidence);
+                OptionSetResolutionValue resolution;
+                if (!optionSetResolutions.TryGetValue(record.ObjectId.Value, out resolution))
+                    resolution = OptionSetResolutionValue.Unresolved(
+                        "The option-set catalog produced no auditable Global Choice identity decision.");
+                return resolution.ToIdentity(record, evidence);
             }
 
             private IEnumerable<string> GetOptionSetDiagnosticEvidence(SolutionComponentRecord record)
@@ -840,6 +923,15 @@ namespace D365SolutionComparer.Services.Membership
                     optionSetDiagnostics[objectId] = new[] { diagnostic };
             }
 
+            private void SetOptionSetResolutionFailures(IEnumerable<Guid> objectIds,
+                IdentityResolutionStatus status, string diagnostic)
+            {
+                foreach (var objectId in objectIds)
+                    optionSetResolutions[objectId] = new OptionSetResolutionValue(status, null, diagnostic,
+                        ComponentSemanticKinds.GlobalChoiceCandidateTypeKey,
+                        "unsupported:componenttype:9");
+            }
+
             private static string DescribeOptionSet(OptionSetMetadataBase metadata, Guid requestedMetadataId,
                 bool uniqueMatch)
             {
@@ -865,7 +957,8 @@ namespace D365SolutionComparer.Services.Membership
                     "; OptionSetType=" + FormatOptionSetType(metadata.OptionSetType) +
                     "; IsManaged=" + FormatOptionSetBoolean(metadata.IsManaged) +
                     "; IsCustomOptionSet=" + FormatOptionSetBoolean(metadata.IsCustomOptionSet) +
-                    ". Diagnostic evidence only; none of these values is used as a portable comparison identity.";
+                    ". Only a verified, nonblank, uniquely usable Name is used as the portable comparison " +
+                    "identity; all other values are diagnostic evidence only.";
             }
 
             private static string DescribeOptionSetSummary(int rawCount, int distinctObjectIdCount,
@@ -2415,6 +2508,51 @@ namespace D365SolutionComparer.Services.Membership
                     new EntityLogicalNameDiagnostic(true, logicalName);
                 public static EntityLogicalNameDiagnostic Unverified(string diagnostic) =>
                     new EntityLogicalNameDiagnostic(false, diagnostic);
+            }
+
+            private sealed class OptionSetResolutionValue
+            {
+                public OptionSetResolutionValue(IdentityResolutionStatus status, string key,
+                    string diagnostic, string componentTypeKey, string semanticKind)
+                {
+                    Status = status;
+                    Key = key;
+                    Diagnostic = diagnostic;
+                    ComponentTypeKey = componentTypeKey;
+                    SemanticKind = semanticKind;
+                }
+
+                public IdentityResolutionStatus Status { get; }
+                public string Key { get; }
+                public string Diagnostic { get; }
+                public string ComponentTypeKey { get; }
+                public string SemanticKind { get; }
+
+                public ComponentIdentity ToIdentity(SolutionComponentRecord record,
+                    IEnumerable<string> evidence)
+                {
+                    return new ComponentIdentity(record, Status, Key, Diagnostic, ComponentTypeKey,
+                        SemanticKind, diagnosticEvidence: evidence);
+                }
+
+                public static OptionSetResolutionValue Resolved(string name) =>
+                    new OptionSetResolutionValue(IdentityResolutionStatus.Resolved, name,
+                        "Global Choice identity resolved from published option-set metadata Name.",
+                        ComponentSemanticKinds.GlobalChoice, ComponentSemanticKinds.GlobalChoice);
+
+                public static OptionSetResolutionValue Unresolved(string diagnostic) =>
+                    new OptionSetResolutionValue(IdentityResolutionStatus.Unresolved, null, diagnostic,
+                        ComponentSemanticKinds.GlobalChoiceCandidateTypeKey,
+                        "unsupported:componenttype:9");
+
+                public static OptionSetResolutionValue Ambiguous(string diagnostic) =>
+                    new OptionSetResolutionValue(IdentityResolutionStatus.Ambiguous, null, diagnostic,
+                        ComponentSemanticKinds.GlobalChoiceCandidateTypeKey,
+                        "unsupported:componenttype:9");
+
+                public static OptionSetResolutionValue Unsupported(string diagnostic) =>
+                    new OptionSetResolutionValue(IdentityResolutionStatus.Unsupported, null, diagnostic,
+                        null, "unsupported:componenttype:9");
             }
 
             private sealed class PendingRecord

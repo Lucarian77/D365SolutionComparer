@@ -62,6 +62,17 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void GlobalChoiceIdentityUsesGlobalChoicePresentationLabel()
+        {
+            var presentation = Present(
+                Snapshot(Identity("new_Priority", 9, kind: ComponentSemanticKinds.GlobalChoice)),
+                Snapshot(Identity("NEW_PRIORITY", 9, kind: ComponentSemanticKinds.GlobalChoice)));
+
+            Assert.AreEqual("Global Choice", presentation.Rows.Single().ComponentKind);
+            Assert.AreEqual("Present in Both", presentation.Rows.Single().MembershipStatus);
+        }
+
+        [TestMethod]
         public void UnsupportedTeamTemplateUsesTeamTemplatePresentationLabel()
         {
             var teamTemplate = Identity(null, 511, IdentityResolutionStatus.Unsupported,

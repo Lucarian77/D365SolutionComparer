@@ -889,7 +889,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type9OptionSetLookupCapturesCompleteEvidenceWithoutChangingIdentity()
+        public void Type9VerifiedGlobalChoiceUsesMetadataNameAndPreservesEvidence()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
             var service = OptionSetService(solution, request =>
@@ -902,10 +902,11 @@ namespace D365SolutionComparer.Tests
             var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                 new SolutionComponentRecord(componentId, 9, objectId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
-            Assert.IsNull(result.ComparisonKey);
-            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.ComponentTypeKey);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.SemanticKind);
+            Assert.AreEqual("new_Priority", result.ComparisonKey);
+            StringAssert.Contains(result.Diagnostic, "metadata Name");
             var evidence = result.DiagnosticEvidence.First();
             StringAssert.Contains(evidence, "matched uniquely");
             StringAssert.Contains(evidence, "MetadataId=" + objectId.ToString("D"));
@@ -928,10 +929,11 @@ namespace D365SolutionComparer.Tests
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
                 MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow));
             var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
-                "unsupported:componenttype:9");
-            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(result.Diagnostic, bucket.DiagnosticGroups.Single().Diagnostic);
+                ComponentSemanticKinds.GlobalChoice);
+            Assert.AreEqual(MembershipCoverageBucketType.SemanticKind, bucket.BucketType);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, bucket.CoverageStatus);
+            Assert.AreEqual(1, bucket.Resolved);
+            Assert.AreEqual(0, bucket.DiagnosticGroups.Count);
             Assert.AreEqual(componentId, bucket.AuditEvidence.Single().SolutionComponentId);
             Assert.AreEqual(objectId, bucket.AuditEvidence.Single().ObjectId);
             CollectionAssert.AreEqual(result.DiagnosticEvidence.ToArray(),
@@ -967,9 +969,17 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveOptionSet"));
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(2, counter.TotalRequests);
-            Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported &&
-                item.SemanticKind == "unsupported:componenttype:9" && item.ComparisonKey == null));
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[0].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[1].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Components[2].Status);
+            Assert.IsTrue(result.Components.Take(2).All(item =>
+                item.SemanticKind == "unsupported:componenttype:9" &&
+                item.ComponentTypeKey != ComponentSemanticKinds.GlobalChoice));
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.Components[2].SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice, result.Components[2].ComponentTypeKey);
+            Assert.IsNull(result.Components[0].ComparisonKey);
+            Assert.IsNull(result.Components[1].ComparisonKey);
+            Assert.AreEqual("new_Second", result.Components[2].ComparisonKey);
             Assert.AreEqual(result.Components[0].DiagnosticEvidence.First(),
                 result.Components[1].DiagnosticEvidence.First());
             Assert.AreNotEqual(result.Components[0].DiagnosticEvidence.First(),
@@ -986,12 +996,20 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "DistinctCandidateNames=['new_First', 'new_Second']");
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result);
             var bucket = coverage.SemanticKinds.Single(item => item.SemanticKind ==
+                ComponentSemanticKinds.GlobalChoice);
+            Assert.AreEqual(1, bucket.Resolved);
+            Assert.AreEqual(0, bucket.Ambiguous);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, bucket.CoverageStatus);
+            Assert.AreEqual(0, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(1, bucket.AuditEvidence.Count);
+            var isolated = coverage.SemanticKinds.Single(item => item.SemanticKind ==
                 "unsupported:componenttype:9");
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(3, bucket.DiagnosticGroups.Single().Count);
-            Assert.AreEqual(3, bucket.AuditEvidence.Count);
-            Assert.AreEqual(2, bucket.AuditEvidence.Select(item => item.ObjectId).Distinct().Count());
-            Assert.AreEqual(3, bucket.AuditEvidence.SelectMany(item => item.DiagnosticEvidence).Distinct().Count());
+            Assert.AreEqual(2, isolated.Ambiguous);
+            Assert.AreEqual(1, isolated.DiagnosticGroups.Count);
+            Assert.AreEqual(2, isolated.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(2, isolated.AuditEvidence.Count);
+            Assert.AreEqual(1, isolated.AuditEvidence.Select(item => item.ObjectId).Distinct().Count());
+            Assert.AreEqual(3, isolated.AuditEvidence.SelectMany(item => item.DiagnosticEvidence).Distinct().Count());
         }
 
         [TestMethod]
@@ -1020,8 +1038,14 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "ReturnedOptionSetCount=38");
             StringAssert.Contains(summary, "CorrelatedMetadataIdCount=38");
             StringAssert.Contains(summary, "MissingRequestedMetadataIdCount=0");
-            Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+            Assert.AreEqual(36, result.Components.Count(item =>
+                item.Status == IdentityResolutionStatus.Resolved));
+            Assert.AreEqual(4, result.Components.Count(item =>
+                item.Status == IdentityResolutionStatus.Ambiguous));
+            Assert.IsTrue(result.Components.Where(item => item.Status == IdentityResolutionStatus.Resolved)
+                .All(item => item.SemanticKind == ComponentSemanticKinds.GlobalChoice));
+            Assert.IsTrue(result.Components.Where(item => item.Status == IdentityResolutionStatus.Ambiguous)
+                .All(item => item.SemanticKind == "unsupported:componenttype:9"));
         }
 
         [TestMethod]
@@ -1058,8 +1082,18 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "BlankNameCount=1");
             StringAssert.Contains(summary, "IsGlobalNotTrueCount=1");
             StringAssert.Contains(summary, "NonUniqueMetadataIdCount=1");
-            Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+            CollectionAssert.AreEqual(new[]
+            {
+                IdentityResolutionStatus.Unresolved,
+                IdentityResolutionStatus.Unresolved,
+                IdentityResolutionStatus.Unsupported,
+                IdentityResolutionStatus.Ambiguous
+            }, result.Components.Select(item => item.Status).ToArray());
+            Assert.AreEqual("unsupported:componenttype:9", result.Components[0].SemanticKind);
+            Assert.AreEqual("unsupported:componenttype:9", result.Components[1].SemanticKind);
+            Assert.AreEqual("unsupported:componenttype:9", result.Components[2].SemanticKind);
+            Assert.AreEqual("unsupported:componenttype:9", result.Components[3].SemanticKind);
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
         }
 
         [TestMethod]
@@ -1070,7 +1104,7 @@ namespace D365SolutionComparer.Tests
                 OptionSetService(solution, request => throw new FaultException("OptionSet metadata denied")),
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, faulted.Status);
             Assert.AreEqual("unsupported:componenttype:9", faulted.SemanticKind);
             Assert.IsNull(faulted.ComparisonKey);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "OptionSet metadata denied");
@@ -1105,7 +1139,7 @@ namespace D365SolutionComparer.Tests
                 new SolutionComponentRecord(Guid.NewGuid(), 9, null), CancellationToken.None);
 
             Assert.AreEqual(1, optionSetQueries);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
             var summary = result.DiagnosticEvidence.Single(item =>
@@ -1117,6 +1151,211 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(solution, new ComponentIdentity[0], DateTimeOffset.UtcNow));
             Assert.AreEqual(MembershipPresence.Indeterminate, compared.Single().Presence);
+        }
+
+        [TestMethod]
+        public void Type9GlobalChoicesMatchAcrossEnvironmentsByCaseInsensitiveNameWithoutExtraRequests()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid();
+            var sourceCounter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var targetCounter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.ResolveSnapshot(OptionSetService(sourceSolution, request =>
+                    AllOptionSetsResponse(OptionSet(sourceId, "new_Priority", true,
+                        OptionSetType.Picklist, false, true))),
+                MembershipSnapshot.Complete(sourceSolution, new[]
+                {
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, sourceId),
+                        IdentityResolutionStatus.Unresolved)
+                }, DateTimeOffset.UtcNow), CancellationToken.None, sourceCounter);
+            var target = resolver.ResolveSnapshot(OptionSetService(targetSolution, request =>
+                    AllOptionSetsResponse(OptionSet(targetId, "NEW_PRIORITY", true,
+                        OptionSetType.Picklist, true, false))),
+                MembershipSnapshot.Complete(targetSolution, new[]
+                {
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, targetId),
+                        IdentityResolutionStatus.Unresolved)
+                }, DateTimeOffset.UtcNow), CancellationToken.None, targetCounter);
+
+            var compared = new SolutionMembershipComparer().Compare(source, target);
+
+            Assert.AreEqual(1, compared.Count);
+            Assert.AreEqual(MembershipPresence.PresentInBoth, compared.Single().Presence);
+            Assert.AreEqual("new_Priority", compared.Single().Source.ComparisonKey);
+            Assert.AreEqual("NEW_PRIORITY", compared.Single().Target.ComparisonKey);
+            Assert.AreEqual(ComponentSemanticKinds.GlobalChoice,
+                compared.Single().Source.ComponentTypeKey);
+            Assert.AreEqual(2, sourceCounter.TotalRequests);
+            Assert.AreEqual(2, targetCounter.TotalRequests);
+            Assert.AreEqual(1, sourceCounter.GetExecuteCount("RetrieveAllOptionSets"));
+            Assert.AreEqual(1, targetCounter.GetExecuteCount("RetrieveAllOptionSets"));
+            Assert.AreEqual(0, sourceCounter.GetExecuteCount("RetrieveOptionSet"));
+            Assert.AreEqual(0, targetCounter.GetExecuteCount("RetrieveOptionSet"));
+        }
+
+        [TestMethod]
+        public void Type9DuplicateGlobalNamesAreAmbiguousAndMakeGlobalChoiceCoverageIncomplete()
+        {
+            var solution = Solution(); var firstId = Guid.NewGuid(); var secondId = Guid.NewGuid();
+            var service = OptionSetService(solution, request => AllOptionSetsResponse(
+                OptionSet(firstId, "new_Duplicate", true, OptionSetType.Picklist, false, true),
+                OptionSet(secondId, "NEW_DUPLICATE", true, OptionSetType.Picklist, false, true)));
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, new[]
+                {
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, firstId),
+                        IdentityResolutionStatus.Unresolved),
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, secondId),
+                        IdentityResolutionStatus.Unresolved)
+                }, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Ambiguous &&
+                item.SemanticKind == "unsupported:componenttype:9" &&
+                item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("not unique in the retrieved option-set catalog"))));
+            var diagnostics = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            var isolated = diagnostics.SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:9");
+            Assert.AreEqual(2, isolated.Ambiguous);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, isolated.CoverageStatus);
+            var globalChoice = diagnostics.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.GlobalChoice);
+            Assert.AreEqual(0, globalChoice.TotalCandidates);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, globalChoice.CoverageStatus);
+        }
+
+        [TestMethod]
+        public void Type9UnresolvedGlobalCandidateBlocksAbsenceButVerifiedNonGlobalChoiceDoesNot()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var unresolvedId = Guid.NewGuid(); var nonGlobalId = Guid.NewGuid();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.Resolve(OptionSetService(sourceSolution, request =>
+                    AllOptionSetsResponse(OptionSet(sourceId, "new_Source", true,
+                        OptionSetType.Picklist, false, true))), sourceSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, sourceId), CancellationToken.None);
+            var unresolvedTarget = resolver.Resolve(OptionSetService(targetSolution, request =>
+                    AllOptionSetsResponse(OptionSet(unresolvedId, " ", true,
+                        OptionSetType.Picklist, false, true))), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, unresolvedId), CancellationToken.None);
+            var nonGlobalTarget = resolver.Resolve(OptionSetService(targetSolution, request =>
+                    AllOptionSetsResponse(OptionSet(nonGlobalId, "new_Local", false,
+                        OptionSetType.Picklist, false, true))), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, nonGlobalId), CancellationToken.None);
+
+            var blocked = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { unresolvedTarget }, DateTimeOffset.UtcNow));
+            var proven = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { nonGlobalTarget }, DateTimeOffset.UtcNow));
+
+            Assert.IsTrue(blocked.All(item => item.Presence == MembershipPresence.Indeterminate));
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                proven.Single(item => item.Source != null).Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.CompleteResolvedInventory,
+                proven.Single(item => item.Source != null).AbsenceEvidence);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                proven.Single(item => item.Target != null).Presence);
+            Assert.AreEqual("unsupported:componenttype:9", nonGlobalTarget.SemanticKind);
+            var unresolvedCoverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(targetSolution, new[] { unresolvedTarget }, DateTimeOffset.UtcNow));
+            var nonGlobalCoverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(targetSolution, new[] { nonGlobalTarget }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, unresolvedCoverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.GlobalChoice).CoverageStatus);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, nonGlobalCoverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.GlobalChoice).CoverageStatus);
+        }
+
+        [TestMethod]
+        public void Type9MissingAndConflictingMetadataBlockGlobalChoiceAbsenceConservatively()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var missingId = Guid.NewGuid(); var conflictingId = Guid.NewGuid();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.Resolve(OptionSetService(sourceSolution, request =>
+                    AllOptionSetsResponse(OptionSet(sourceId, "new_Source", true,
+                        OptionSetType.Picklist, false, true))), sourceSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, sourceId), CancellationToken.None);
+            var missing = resolver.Resolve(OptionSetService(targetSolution, request =>
+                    AllOptionSetsResponse()), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, missingId), CancellationToken.None);
+            var conflicting = resolver.Resolve(OptionSetService(targetSolution, request =>
+                    AllOptionSetsResponse(
+                        OptionSet(conflictingId, "new_First", true,
+                            OptionSetType.Picklist, false, true),
+                        OptionSet(conflictingId, "new_Second", true,
+                            OptionSetType.Picklist, false, true))), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 9, conflictingId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, missing.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, conflicting.Status);
+            Assert.IsTrue(new[] { missing, conflicting }.All(item =>
+                item.SemanticKind == "unsupported:componenttype:9" &&
+                item.ComponentTypeKey != ComponentSemanticKinds.GlobalChoice));
+            foreach (var blocker in new[] { missing, conflicting })
+            {
+                var compared = new SolutionMembershipComparer().Compare(
+                    MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                    MembershipSnapshot.Complete(targetSolution, new[] { blocker }, DateTimeOffset.UtcNow));
+                Assert.AreEqual(MembershipPresence.Indeterminate,
+                    compared.Single(item => item.Source != null).Presence);
+            }
+        }
+
+        [TestMethod]
+        public void Type9CatalogEntryWithoutMetadataIdCannotResolveOrProveAbsence()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var metadataWithoutId = OptionSet(Guid.NewGuid(), "new_Uncorrelated", true,
+                OptionSetType.Picklist, false, true);
+            metadataWithoutId.MetadataId = null;
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                OptionSetService(solution, request => AllOptionSetsResponse(metadataWithoutId)),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "No option-set metadata");
+            var summary = result.DiagnosticEvidence.Single(item =>
+                item.StartsWith("OptionSet metadata diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "ReturnedOptionSetCount=1");
+            StringAssert.Contains(summary, "CorrelatedMetadataIdCount=0");
+            StringAssert.Contains(summary, "MissingRequestedMetadataIdCount=1");
+        }
+
+        [TestMethod]
+        public void Type9IncompleteCatalogResponseRemainsUnresolvedWithoutAdditionalRequests()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
+                OptionSetService(solution, request => new RetrieveAllOptionSetsResponse()),
+                MembershipSnapshot.Complete(solution, new[]
+                {
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 9, objectId),
+                        IdentityResolutionStatus.Unresolved)
+                }, DateTimeOffset.UtcNow), CancellationToken.None, counter).Components.Single();
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual("unsupported:componenttype:9", result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "returned no option-set catalog");
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveAllOptionSets"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveOptionSet"));
+            Assert.AreEqual(2, counter.TotalRequests);
         }
 
         [TestMethod]
