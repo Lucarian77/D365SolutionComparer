@@ -11,11 +11,16 @@ namespace D365SolutionComparer
     internal sealed class MembershipResultsForm : Form
     {
         private readonly MembershipComparisonPresentation presentation;
+        private readonly string sourceSolutionVersion;
+        private readonly string targetSolutionVersion;
         private readonly DataGridView resultsGrid;
 
-        public MembershipResultsForm(MembershipComparisonPresentation presentation)
+        public MembershipResultsForm(MembershipComparisonPresentation presentation,
+            string sourceSolutionVersion = null, string targetSolutionVersion = null)
         {
             this.presentation = presentation ?? throw new ArgumentNullException(nameof(presentation));
+            this.sourceSolutionVersion = sourceSolutionVersion ?? string.Empty;
+            this.targetSolutionVersion = targetSolutionVersion ?? string.Empty;
             Text = "Solution Membership Compare - " + presentation.SolutionUniqueName;
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(900, 520);
@@ -109,7 +114,8 @@ namespace D365SolutionComparer
                 ? builder.BuildUnavailable() : builder.Build(presentation.Target.Snapshot);
             using (var form = new MembershipCoverageDetailsForm(
                 presentation.Source.Diagnostics.EnvironmentName, source,
-                presentation.Target.Diagnostics.EnvironmentName, target))
+                presentation.Target.Diagnostics.EnvironmentName, target, presentation,
+                sourceSolutionVersion, targetSolutionVersion))
                 form.ShowDialog(this);
         }
 

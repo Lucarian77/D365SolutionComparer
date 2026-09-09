@@ -758,7 +758,8 @@ namespace D365SolutionComparer
                         SetStatusMessage("Membership comparison did not return a result.", Color.Red);
                         return;
                     }
-                    var resultsForm = new MembershipResultsForm(presentation);
+                    var resultsForm = new MembershipResultsForm(presentation,
+                        selected.SourceVersion, selected.TargetVersion);
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
                     SetStatusMessage("Membership comparison completed for " + presentation.SolutionUniqueName + ".",
