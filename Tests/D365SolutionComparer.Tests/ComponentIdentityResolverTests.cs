@@ -2540,6 +2540,205 @@ namespace D365SolutionComparer.Tests
             Assert.AreSame(unavailable, resolver.ResolveSnapshot(null, unavailable, CancellationToken.None));
         }
 
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityLookupUsesExactRequestShapeAndRemainsUnsupported(int componentType)
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var service = WeakIdentityService(solution, componentType, query =>
+            {
+                AssertWeakIdentityQuery(query, componentType, objectId);
+                return Rows(WeakIdentityRow(componentType, objectId, "Diagnostic name"));
+            });
+
+            var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual("unsupported:componenttype:" + componentType, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
+            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            var evidence = result.DiagnosticEvidence.First();
+            foreach (var column in WeakIdentityColumns(componentType))
+                StringAssert.Contains(evidence, column + "=");
+            StringAssert.Contains(evidence, "Diagnostic evidence only; no value is used for membership comparison.");
+            Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("RawComponentCount=1") &&
+                item.Contains("CorrelatedCount=1") && item.Contains("IncompleteCorrelatedRowCount=0")));
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityLookupBatchesDeduplicatesCountsAndKeepsStableGrouping(int componentType)
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(0, 201).Select(index => Guid.NewGuid()).ToList();
+            var records = objectIds.Concat(new[] { objectIds[0] }).Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+            var queriedIds = new List<Guid>();
+            var service = WeakIdentityService(solution, componentType, query =>
+            {
+                var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
+                Assert.IsTrue(ids.Count <= 200);
+                Assert.AreEqual(ids.Count, ids.Distinct().Count());
+                queriedIds.AddRange(ids);
+                return Rows(ids.Select(id => WeakIdentityRow(componentType, id,
+                    "Different " + id.ToString("D"))).ToArray());
+            });
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            CollectionAssert.AreEquivalent(objectIds, queriedIds);
+            Assert.AreEqual(2, counter.GetQueryCount(WeakIdentityEntity(componentType)));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(3, counter.TotalRequests);
+            var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:" + componentType);
+            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
+            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(202, bucket.AuditEvidence.Count);
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityMissingDuplicateAndBlankRowsRemainDiagnosticOnly(int componentType)
+        {
+            var solution = Solution(); var missingId = Guid.NewGuid(); var duplicateId = Guid.NewGuid();
+            var blankId = Guid.NewGuid();
+            var service = WeakIdentityService(solution, componentType, query => Rows(
+                WeakIdentityRow(componentType, duplicateId, "First"),
+                WeakIdentityRow(componentType, duplicateId, "Second"),
+                WeakIdentityRow(componentType, blankId, "")));
+            var records = new[] { missingId, duplicateId, blankId }.Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToArray();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None);
+
+            Assert.IsTrue(result.Components[0].DiagnosticEvidence.Any(item => item.StartsWith("No ")));
+            Assert.IsTrue(result.Components[1].DiagnosticEvidence.Any(item => item.StartsWith("Multiple ")));
+            Assert.IsTrue(result.Components[2].DiagnosticEvidence.Any(item =>
+                item.Contains("matched but returned incomplete data")));
+            var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
+                item.Contains(" diagnostic summary:"));
+            StringAssert.Contains(summary, "MissingCount=1");
+            StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
+            StringAssert.Contains(summary, "BlankNameCount=1");
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
+                item.ComparisonKey == null));
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityConflictsAndPagingAnomaliesRemainConservative(int componentType)
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var conflicting = WeakIdentityRow(componentType, objectId, "Conflict");
+            conflicting.Id = Guid.NewGuid();
+            var conflict = new DataverseComponentIdentityResolver().Resolve(
+                WeakIdentityService(solution, componentType, query => Rows(conflicting)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId), CancellationToken.None);
+            Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
+            Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("Conflict")));
+
+            var paged = new DataverseComponentIdentityResolver().Resolve(
+                WeakIdentityService(solution, componentType, query =>
+                {
+                    var rows = Rows(WeakIdentityRow(componentType, objectId, "Partial"));
+                    rows.MoreRecords = true;
+                    return rows;
+                }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
+                CancellationToken.None);
+            Assert.IsTrue(paged.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
+            Assert.IsTrue(new[] { conflict, paged }.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
+                item.ComparisonKey == null));
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityFaultIsDiagnosticAndCancellationPropagates(int componentType)
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid();
+            var faulted = new DataverseComponentIdentityResolver().Resolve(
+                WeakIdentityService(solution, componentType, query => throw new FaultException("Denied")),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
+                CancellationToken.None);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            StringAssert.Contains(faulted.DiagnosticEvidence.First(), "Denied");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var service = WeakIdentityService(solution, componentType, query =>
+                {
+                    cancellation.Cancel();
+                    return Rows();
+                });
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
+                        new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId), cancellation.Token));
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityDiagnosticContextCannotCreateMembershipMatches(int componentType)
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.Resolve(WeakIdentityService(sourceSolution, componentType, query =>
+                    Rows(WeakIdentityRow(componentType, sourceId, "Same name"))), sourceSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), componentType, sourceId), CancellationToken.None);
+            var target = resolver.Resolve(WeakIdentityService(targetSolution, componentType, query =>
+                    Rows(WeakIdentityRow(componentType, targetId, "Same name"))), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), componentType, targetId), CancellationToken.None);
+
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
+
+            Assert.AreEqual(2, compared.Count);
+            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
+            Assert.IsNull(source.ComparisonKey);
+            Assert.IsNull(target.ComparisonKey);
+        }
+
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(36)]
+        [DataRow(59)]
+        public void WeakIdentityMissingObjectIdDoesNotQueryBackingTable(int componentType)
+        {
+            var solution = Solution(); int queryCount = 0;
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                WeakIdentityService(solution, componentType, query => { queryCount++; return Rows(); }),
+                solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, null),
+                CancellationToken.None);
+            Assert.AreEqual(0, queryCount);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
+        }
+
         private static Entity Definition(int objectTypeCode, string name, string primaryEntityName)
         {
             return new Entity("solutioncomponentdefinition", Guid.NewGuid())
@@ -2615,6 +2814,88 @@ namespace D365SolutionComparer.Tests
             };
             typeof(OptionSetMetadataBase).GetProperty("IsManaged").SetValue(metadata, isManaged);
             return metadata;
+        }
+
+        private static FakeOrganizationService WeakIdentityService(SolutionIdentity solution,
+            int componentType, Func<QueryExpression, EntityCollection> queryHandler)
+        {
+            var entityName = WeakIdentityEntity(componentType);
+            var service = Service(solution, query =>
+            {
+                if (query.EntityName == entityName) return queryHandler(query);
+                Assert.Fail("Type " + componentType + " diagnostics must not query table " + query.EntityName);
+                return Rows();
+            });
+            service.ExecuteRequest = request => request is WhoAmIRequest
+                ? (OrganizationResponse)WhoAmI(solution.Environment.OrganizationId)
+                : throw new NotSupportedException(request.RequestName);
+            return service;
+        }
+
+        private static void AssertWeakIdentityQuery(QueryExpression query, int componentType,
+            params Guid[] objectIds)
+        {
+            Assert.AreEqual(WeakIdentityEntity(componentType), query.EntityName);
+            CollectionAssert.AreEquivalent(WeakIdentityColumns(componentType),
+                query.ColumnSet.Columns.ToArray());
+            Assert.AreEqual(1, query.Criteria.Conditions.Count);
+            var condition = query.Criteria.Conditions.Single();
+            Assert.AreEqual(WeakIdentityPrimaryId(componentType), condition.AttributeName);
+            Assert.AreEqual(ConditionOperator.In, condition.Operator);
+            Assert.IsTrue(condition.Values.All(value => value != null && value.GetType() == typeof(Guid)));
+            CollectionAssert.AreEquivalent(objectIds, condition.Values.Cast<Guid>().ToArray());
+        }
+
+        private static Entity WeakIdentityRow(int componentType, Guid id, string name)
+        {
+            var entityName = WeakIdentityEntity(componentType);
+            var primaryId = WeakIdentityPrimaryId(componentType);
+            var row = new Entity(entityName, id)
+            {
+                [primaryId] = id,
+                [componentType == 36 ? "title" : "name"] = name,
+                [componentType == 26 ? "savedqueryidunique" : componentType == 36
+                    ? "templateidunique" : "savedqueryvisualizationidunique"] = Guid.NewGuid(),
+                ["componentstate"] = new OptionSetValue(0),
+                ["ismanaged"] = false
+            };
+            if (componentType == 26)
+            {
+                row["returnedtypecode"] = "account";
+                row["querytype"] = 0;
+            }
+            else if (componentType == 36)
+            {
+                row["templatetypecode"] = "account";
+                row["ispersonal"] = false;
+                row["languagecode"] = 1033;
+            }
+            else
+            {
+                row["primaryentitytypecode"] = "account";
+                row["type"] = new OptionSetValue(0);
+                row["charttype"] = new OptionSetValue(0);
+            }
+            row.FormattedValues["componentstate"] = "Published";
+            return row;
+        }
+
+        private static string WeakIdentityEntity(int componentType) => componentType == 26
+            ? "savedquery" : componentType == 36 ? "template" : "savedqueryvisualization";
+
+        private static string WeakIdentityPrimaryId(int componentType) => componentType == 26
+            ? "savedqueryid" : componentType == 36 ? "templateid" : "savedqueryvisualizationid";
+
+        private static string[] WeakIdentityColumns(int componentType)
+        {
+            if (componentType == 26)
+                return new[] { "savedqueryid", "name", "returnedtypecode", "querytype",
+                    "savedqueryidunique", "componentstate", "ismanaged" };
+            if (componentType == 36)
+                return new[] { "templateid", "title", "templatetypecode", "templateidunique",
+                    "ispersonal", "languagecode", "componentstate", "ismanaged" };
+            return new[] { "savedqueryvisualizationid", "name", "primaryentitytypecode", "type",
+                "charttype", "savedqueryvisualizationidunique", "componentstate", "ismanaged" };
         }
 
         private static FakeOrganizationService ReportService(SolutionIdentity solution,
