@@ -73,6 +73,18 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void SignedReportIdentityUsesSignedReportPresentationLabel()
+        {
+            var signatureId = Guid.NewGuid().ToString("D");
+            var presentation = Present(
+                Snapshot(Identity(signatureId, 31, kind: ComponentSemanticKinds.Report)),
+                Snapshot(Identity(signatureId, 31, kind: ComponentSemanticKinds.Report)));
+
+            Assert.AreEqual("Signed Report", presentation.Rows.Single().ComponentKind);
+            Assert.AreEqual("Present in Both", presentation.Rows.Single().MembershipStatus);
+        }
+
+        [TestMethod]
         public void UnsupportedTeamTemplateUsesTeamTemplatePresentationLabel()
         {
             var teamTemplate = Identity(null, 511, IdentityResolutionStatus.Unsupported,

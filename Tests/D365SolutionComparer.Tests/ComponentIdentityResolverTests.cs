@@ -1359,7 +1359,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type31ReportLookupCapturesSignedCandidateEvidenceWithoutCreatingIdentity()
+        public void Type31UniqueCompleteSignedReportResolvesFromCanonicalSignatureGuid()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
             var signatureId = Guid.NewGuid(); var reportIdUnique = Guid.NewGuid();
@@ -1373,10 +1373,11 @@ namespace D365SolutionComparer.Tests
             var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                 new SolutionComponentRecord(componentId, 31, objectId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:31", result.SemanticKind);
-            Assert.IsNull(result.ComparisonKey);
-            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.Report, result.ComponentTypeKey);
+            Assert.AreEqual(ComponentSemanticKinds.Report, result.SemanticKind);
+            Assert.AreEqual(signatureId.ToString("D"), result.ComparisonKey);
+            Assert.AreEqual("Signed Report identity resolved from report signatureid.", result.Diagnostic);
             var evidence = result.DiagnosticEvidence.First();
             StringAssert.Contains(evidence, "reportid=" + objectId.ToString("D"));
             StringAssert.Contains(evidence, "name='Account Summary'");
@@ -1399,6 +1400,27 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "NonblankSignatureIdCount=1");
             StringAssert.Contains(summary, "DistinctSignatureIdCount=1");
             StringAssert.Contains(summary, "DuplicateSignatureIdCount=0");
+        }
+
+        [TestMethod]
+        public void Type31SignatureMustBeAnSdkGuidAndIsNotParsedFromFormattedText()
+        {
+            var solution = Solution(); var objectId = Guid.NewGuid(); var signatureId = Guid.NewGuid();
+            var row = Report(objectId, "Formatted signature", "Formatted.rdl", 1, signatureId, 1033,
+                Guid.NewGuid(), false);
+            row["signatureid"] = signatureId.ToString("B").ToUpperInvariant();
+
+            var result = new DataverseComponentIdentityResolver().Resolve(
+                ReportService(solution, query => Rows(row)), solution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, objectId), CancellationToken.None);
+
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual("report:candidate", result.ComponentTypeKey);
+            Assert.IsNull(result.ComparisonKey);
+            StringAssert.Contains(result.DiagnosticEvidence.First(),
+                "signatureid='" + signatureId.ToString("B").ToUpperInvariant() + "'");
+            StringAssert.Contains(result.DiagnosticEvidence.First(),
+                "matched but returned incomplete data");
         }
 
         [TestMethod]
@@ -1435,8 +1457,21 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary,
                 "DistinctCandidateSignatureIds=['" + signatureId.ToString("D") + "']");
             Assert.IsFalse(summary.Contains("|lcid="));
-            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
-                item.ComparisonKey == null));
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[0].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[1].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Components[2].Status);
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.Take(2).All(item =>
+                item.ComponentTypeKey == "report:candidate"));
+            Assert.AreEqual("unsupported:componenttype:31", result.Components[2].SemanticKind);
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.Report).CoverageStatus);
+            var duplicateGroup = coverage.SemanticKinds.Single(item =>
+                    item.SemanticKind == "unsupported:componenttype:31").DiagnosticGroups
+                .Single(item => item.ResolutionStatus == IdentityResolutionStatus.Ambiguous);
+            Assert.AreEqual(2, duplicateGroup.Count);
+            Assert.IsFalse(duplicateGroup.Diagnostic.Contains(signatureId.ToString("D")));
         }
 
         [TestMethod]
@@ -1468,10 +1503,11 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(3, counter.TotalRequests);
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:31");
-            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
+                item.SemanticKind == ComponentSemanticKinds.Report);
+            Assert.AreEqual(MembershipCoverageBucketType.SemanticKind, bucket.BucketType);
+            Assert.AreEqual(202, bucket.Resolved);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, bucket.CoverageStatus);
+            Assert.AreEqual(0, bucket.DiagnosticGroups.Count);
             Assert.AreEqual(202, bucket.AuditEvidence.Count);
         }
 
@@ -1510,8 +1546,11 @@ namespace D365SolutionComparer.Tests
                 item.StartsWith("Signed Report diagnostic summary:", StringComparison.Ordinal));
             StringAssert.Contains(summary, "MissingCount=1");
             StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
-            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
-                item.ComparisonKey == null));
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Components[0].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[1].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Components[2].Status);
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null &&
+                item.ComponentTypeKey == "report:candidate"));
         }
 
         [TestMethod]
@@ -1525,7 +1564,7 @@ namespace D365SolutionComparer.Tests
                 ReportService(solution, query => Rows(conflicting)), solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 31, conflictId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, conflict.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, conflict.Status);
             Assert.IsNull(conflict.ComparisonKey);
             Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
             Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("name='Conflict'")));
@@ -1543,7 +1582,7 @@ namespace D365SolutionComparer.Tests
                     return rows;
                 }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 31, incompleteId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, incomplete.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, incomplete.Status);
             Assert.IsNull(incomplete.ComparisonKey);
             Assert.IsTrue(incomplete.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
         }
@@ -1556,8 +1595,9 @@ namespace D365SolutionComparer.Tests
                 ReportService(solution, query => throw new FaultException("Report denied")),
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 31, objectId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, faulted.Status);
             Assert.AreEqual("unsupported:componenttype:31", faulted.SemanticKind);
+            Assert.AreEqual("report:candidate", faulted.ComponentTypeKey);
             Assert.IsNull(faulted.ComparisonKey);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "Report denied");
 
@@ -1576,7 +1616,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type31MatchingSignatureIdsIgnoreLcidAndCannotCreateMembershipMatches()
+        public void Type31MatchingSignatureIdsIgnoreLcidAndCreateOneMembershipMatch()
         {
             var sourceSolution = Solution();
             var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
@@ -1596,10 +1636,12 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
 
-            Assert.AreEqual(2, compared.Count);
-            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
-            Assert.IsNull(source.ComparisonKey);
-            Assert.IsNull(target.ComparisonKey);
+            Assert.AreEqual(1, compared.Count);
+            Assert.AreEqual(MembershipPresence.PresentInBoth, compared.Single().Presence);
+            Assert.AreEqual(signatureId.ToString("D"), source.ComparisonKey);
+            Assert.AreEqual(signatureId.ToString("D"), target.ComparisonKey);
+            Assert.AreEqual(ComponentSemanticKinds.Report, source.SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.Report, target.SemanticKind);
             StringAssert.Contains(source.DiagnosticEvidence.First(),
                 "candidateSignatureId='" + signatureId.ToString("D") + "'; signatureLcid=1033");
             StringAssert.Contains(target.DiagnosticEvidence.First(),
@@ -1615,10 +1657,120 @@ namespace D365SolutionComparer.Tests
                 new SolutionComponentRecord(Guid.NewGuid(), 31, null), CancellationToken.None);
 
             Assert.AreEqual(0, queryCount);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.AreEqual("unsupported:componenttype:31", result.SemanticKind);
+            Assert.AreEqual("report:candidate", result.ComponentTypeKey);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
+        }
+
+        [TestMethod]
+        public void Type31UnsignedReportsRemainIsolatedUnsupportedWithStableDiagnosticGrouping()
+        {
+            var solution = Solution(); var firstId = Guid.NewGuid(); var secondId = Guid.NewGuid();
+            var service = ReportService(solution, query => Rows(
+                Report(firstId, "Unsigned A", "A.rdl", 1, null, null, Guid.NewGuid(), false),
+                Report(secondId, "Unsigned B", "B.rdl", 1, null, null, Guid.NewGuid(), true)));
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, new[] { firstId, secondId }.Select(objectId =>
+                    new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 31, objectId),
+                        IdentityResolutionStatus.Unresolved)).ToArray(), DateTimeOffset.UtcNow),
+                CancellationToken.None);
+
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported &&
+                item.SemanticKind == "unsupported:componenttype:31" &&
+                item.ComparisonKey == null));
+            var diagnostics = new MembershipCoverageDiagnosticsBuilder().Build(result);
+            var isolated = diagnostics.SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:31");
+            Assert.AreEqual(1, isolated.DiagnosticGroups.Count);
+            Assert.AreEqual(2, isolated.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(2, isolated.AuditEvidence.Count);
+            Assert.IsTrue(isolated.AuditEvidence.Any(item =>
+                item.DiagnosticEvidence.Any(evidence => evidence.Contains("name='Unsigned A'"))));
+            Assert.IsTrue(isolated.AuditEvidence.Any(item =>
+                item.DiagnosticEvidence.Any(evidence => evidence.Contains("name='Unsigned B'"))));
+            Assert.AreEqual(MembershipCoverageStatus.Complete, diagnostics.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.Report).CoverageStatus);
+        }
+
+        [TestMethod]
+        public void Type31UncertainSignedCandidateBlocksOnlyReportAbsenceEvidence()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceReportId = Guid.NewGuid(); var targetMissingId = Guid.NewGuid();
+            var signatureId = Guid.NewGuid(); var resolver = new DataverseComponentIdentityResolver();
+            var sourceReport = resolver.Resolve(ReportService(sourceSolution, query => Rows(
+                    Report(sourceReportId, "Signed", "Signed.rdl", 1, signatureId, 1033,
+                        Guid.NewGuid(), false))), sourceSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, sourceReportId), CancellationToken.None);
+            var targetCandidate = resolver.Resolve(ReportService(targetSolution, query => Rows()),
+                targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, targetMissingId), CancellationToken.None);
+            var sourceColumn = new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 2, Guid.NewGuid()),
+                IdentityResolutionStatus.Resolved, "account.name",
+                componentTypeKey: ComponentSemanticKinds.Column,
+                semanticKind: ComponentSemanticKinds.Column);
+
+            var comparer = new SolutionMembershipComparer();
+            var sourceSnapshot = MembershipSnapshot.Complete(sourceSolution,
+                new[] { sourceReport, sourceColumn }, DateTimeOffset.UtcNow);
+            var targetSnapshot = MembershipSnapshot.Complete(targetSolution,
+                new[] { targetCandidate }, DateTimeOffset.UtcNow);
+            var compared = comparer.Compare(sourceSnapshot, targetSnapshot);
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                compared.Single(item => item.Source == sourceReport).Presence);
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                compared.Single(item => item.Source == sourceColumn).Presence);
+            var reversed = comparer.Compare(targetSnapshot, sourceSnapshot);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                reversed.Single(item => item.Target == sourceReport).Presence);
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(
+                MembershipSnapshot.Complete(targetSolution, new[] { targetCandidate }, DateTimeOffset.UtcNow));
+            Assert.AreEqual(MembershipCoverageStatus.Incomplete, coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.Report).CoverageStatus);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, coverage.SemanticKinds.Single(item =>
+                item.SemanticKind == ComponentSemanticKinds.Column).CoverageStatus);
+        }
+
+        [TestMethod]
+        public void Type31VerifiedUnsignedReportDoesNotBlockSignedReportAbsenceEvidence()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid(); var targetId = Guid.NewGuid(); var signatureId = Guid.NewGuid();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.Resolve(ReportService(sourceSolution, query => Rows(
+                    Report(sourceId, "Signed", "Signed.rdl", 1, signatureId, 1033,
+                        Guid.NewGuid(), false))), sourceSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, sourceId), CancellationToken.None);
+            var target = resolver.Resolve(ReportService(targetSolution, query => Rows(
+                    Report(targetId, "Unsigned", "Unsigned.rdl", 1, null, null,
+                        Guid.NewGuid(), false))), targetSolution.Environment,
+                new SolutionComponentRecord(Guid.NewGuid(), 31, targetId), CancellationToken.None);
+
+            var comparer = new SolutionMembershipComparer();
+            var sourceSnapshot = MembershipSnapshot.Complete(sourceSolution,
+                new[] { source }, DateTimeOffset.UtcNow);
+            var targetSnapshot = MembershipSnapshot.Complete(targetSolution,
+                new[] { target }, DateTimeOffset.UtcNow);
+            var compared = comparer.Compare(sourceSnapshot, targetSnapshot);
+
+            Assert.AreEqual(MembershipPresence.OnlyInSource,
+                compared.Single(item => item.Source == source).Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.CompleteResolvedInventory,
+                compared.Single(item => item.Source == source).AbsenceEvidence);
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                compared.Single(item => item.Target == target).Presence);
+            var reversed = comparer.Compare(targetSnapshot, sourceSnapshot);
+            Assert.AreEqual(MembershipPresence.OnlyInTarget,
+                reversed.Single(item => item.Target == source).Presence);
         }
 
         [TestMethod]
@@ -3020,21 +3172,25 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(records.Count, result.Components.Count);
             Assert.IsTrue(result.Components.Select((item, index) => ReferenceEquals(item.Record,
                 records[index].Record)).All(item => item));
+            var expectedStatus = componentType == 31
+                ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported;
             Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+                item.Status == expectedStatus && item.ComparisonKey == null));
 
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
                 item.SemanticKind == "unsupported:componenttype:" + componentType);
             Assert.AreEqual(records.Count, coverage.TotalCandidates);
-            Assert.AreEqual(records.Count, coverage.Unsupported);
+            Assert.AreEqual(componentType == 31 ? 0 : records.Count, coverage.Unsupported);
             Assert.AreEqual(0, coverage.Resolved);
-            Assert.AreEqual(0, coverage.Unresolved);
+            Assert.AreEqual(componentType == 31 ? records.Count : 0, coverage.Unresolved);
             Assert.AreEqual(0, coverage.Ambiguous);
             Assert.AreEqual(1, coverage.DiagnosticGroups.Count);
             Assert.AreEqual(records.Count, coverage.DiagnosticGroups.Single().Count);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported,
+            Assert.AreEqual(expectedStatus,
                 coverage.DiagnosticGroups.Single().ResolutionStatus);
-            Assert.AreEqual("No identity resolver supports this known component type.",
+            Assert.AreEqual(componentType == 31
+                    ? "No report row matched the component object ID, so signed Report identity could not be verified."
+                    : "No identity resolver supports this known component type.",
                 coverage.DiagnosticGroups.Single().Diagnostic);
             Assert.AreEqual(records.Count, coverage.AuditEvidence.Count);
             CollectionAssert.AreEquivalent(records.Select(item => item.Record.SolutionComponentId).ToArray(),
