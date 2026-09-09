@@ -88,6 +88,9 @@ namespace D365SolutionComparer.Services.Membership
                     if (!IsResolved(item) &&
                         ComponentSemanticKinds.IsGlobalChoiceCandidate(item.ComponentTypeKey))
                         incomplete.Add(ComponentSemanticKinds.GlobalChoice);
+                    if (!IsResolved(item) &&
+                        ComponentSemanticKinds.IsReportCandidate(item.ComponentTypeKey))
+                        incomplete.Add(ComponentSemanticKinds.Report);
                 }
                 return new IdentityCoverage(blocksAll, incomplete);
             }

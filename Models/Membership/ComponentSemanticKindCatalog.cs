@@ -15,13 +15,19 @@ namespace D365SolutionComparer.Models.Membership
         public const string EnvironmentVariableDefinition = "environmentvariabledefinition";
         public const string ConnectionReference = "connectionreference";
         public const string GlobalChoice = "globalchoice";
+        public const string Report = "report";
         public const string AppModule = "appmodule";
         public const string TeamTemplate = "teamtemplate";
         internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
+        internal const string ReportCandidateTypeKey = "report:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
 
         internal static bool IsGlobalChoiceCandidate(string componentTypeKey) =>
             string.Equals(componentTypeKey, GlobalChoiceCandidateTypeKey,
+                System.StringComparison.OrdinalIgnoreCase);
+
+        internal static bool IsReportCandidate(string componentTypeKey) =>
+            string.Equals(componentTypeKey, ReportCandidateTypeKey,
                 System.StringComparison.OrdinalIgnoreCase);
 
         // Published componenttype choices assigned to built-in kinds other than Connection Reference.

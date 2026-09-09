@@ -85,6 +85,8 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<Guid, OptionSetResolutionValue>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> reportDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, ReportResolutionValue> reportResolutions =
+                new Dictionary<Guid, ReportResolutionValue>();
             private readonly Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>> weakIdentityDiagnostics =
                 new Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>>();
             private readonly HashSet<int> weakIdentityDiagnosticsLoaded = new HashSet<int>();
@@ -192,6 +194,8 @@ namespace D365SolutionComparer.Services.Membership
                 {
                     case OptionSetComponentType:
                         return ResolveOptionSet(record);
+                    case ReportComponentType:
+                        return ResolveReport(record);
                     case 1: kind = "table"; break;
                     case 2: kind = "column"; break;
                     case 10: kind = "relationship"; break;
@@ -1266,16 +1270,24 @@ namespace D365SolutionComparer.Services.Membership
                     var correlation = retrieval.GetCorrelation(objectId);
                     var matches = correlation.Rows;
                     if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                    {
                         evidence.Add(correlation.Failure);
+                        reportResolutions[objectId] = ReportResolutionValue.Unresolved(
+                            "Report correlation was incomplete or failed, so signed Report identity could not be verified.");
+                    }
                     else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No report row matched this solutioncomponent objectid.");
+                        reportResolutions[objectId] = ReportResolutionValue.Unresolved(
+                            "No report row matched the component object ID, so signed Report identity could not be verified.");
                     }
                     else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple report rows matched this solutioncomponent objectid.");
+                        reportResolutions[objectId] = ReportResolutionValue.Ambiguous(
+                            "Multiple report rows matched the component object ID.");
                     }
 
                     foreach (var row in matches) evidence.Add(DescribeReport(row));
@@ -1284,13 +1296,27 @@ namespace D365SolutionComparer.Services.Membership
                         correlated++;
                         var row = uniquelyCorrelated[objectId];
                         Guid signatureId;
-                        if (!TryReadGuid(row, "signatureid", out signatureId)) blankSignature++;
+                        bool hasSignature = TryReadGuid(row, "signatureid", out signatureId);
+                        if (!hasSignature) blankSignature++;
+                        if (!IsCompleteReport(row))
+                            reportResolutions[objectId] = ReportResolutionValue.Unresolved(
+                                "The correlated report row is incomplete, so signed Report identity could not be verified.");
+                        else if (!hasSignature)
+                        {
+                            reportResolutions[objectId] = ReportResolutionValue.Unsupported(
+                                "The correlated Type-31 report has no signatureid and is outside the verified signed-report subset.");
+                        }
                         else
                         {
                             int duplicateCount;
                             if (signatureGroups.TryGetValue(signatureId, out duplicateCount) && duplicateCount > 1)
+                            {
                                 evidence.Add("The report signatureid " + signatureId.ToString("D") +
                                     " occurs on " + duplicateCount + " uniquely correlated Type-31 reports.");
+                                reportResolutions[objectId] = ReportResolutionValue.Ambiguous(
+                                    "The candidate signed Report signatureid is not unique among correlated Type-31 reports.");
+                            }
+                            else reportResolutions[objectId] = ReportResolutionValue.Resolved(signatureId);
                         }
                     }
                     evidence.AddRange(correlation.UnassociatedRows.Select(row =>
@@ -1332,15 +1358,27 @@ namespace D365SolutionComparer.Services.Membership
                 return result;
             }
 
+            private ComponentIdentity ResolveReport(SolutionComponentRecord record)
+            {
+                var evidence = GetReportDiagnosticEvidence(record);
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                        diagnostic: "The Type-31 component has no usable object ID, so signed Report identity could not be verified.",
+                        componentTypeKey: ComponentSemanticKinds.ReportCandidateTypeKey,
+                        semanticKind: "unsupported:componenttype:31",
+                        diagnosticEvidence: evidence);
+                ReportResolutionValue resolution;
+                if (!reportResolutions.TryGetValue(record.ObjectId.Value, out resolution))
+                    resolution = ReportResolutionValue.Unresolved(
+                        "The report lookup produced no auditable signed Report identity decision.");
+                return resolution.ToIdentity(record, evidence);
+            }
+
             private static string DescribeReport(Entity row)
             {
                 Guid signatureId;
                 bool signed = TryReadGuid(row, "signatureid", out signatureId);
-                bool complete = HasGuid(row, "reportid") && HasText(row, "name") &&
-                    HasText(row, "filename") && HasOption(row, "reporttypecode") &&
-                    HasOptionalGuid(row, "signatureid") && (!signed || HasInteger(row, "signaturelcid")) &&
-                    HasGuid(row, "reportidunique") && HasOption(row, "componentstate") &&
-                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+                bool complete = IsCompleteReport(row);
                 return (complete ? "Signed Report diagnostic lookup matched. " :
                     "Signed Report diagnostic lookup matched but returned incomplete data. ") +
                     "reportid=" + FormatReportValue(row, "reportid") +
@@ -1355,7 +1393,19 @@ namespace D365SolutionComparer.Services.Membership
                     "; candidateSignatureId=" + (signed ? "'" + signatureId.ToString("D") + "'" :
                         "(unavailable)") +
                     "; signatureLcid=" + FormatReportValue(row, "signaturelcid") +
-                    ". Diagnostic evidence only; no report value is used for membership comparison.";
+                    ". Only a verified unique nonblank signatureid may be used as the signed Report portable identity; " +
+                    "signaturelcid and all other values are diagnostic evidence only.";
+            }
+
+            private static bool IsCompleteReport(Entity row)
+            {
+                Guid signatureId;
+                bool signed = TryReadGuid(row, "signatureid", out signatureId);
+                return HasGuid(row, "reportid") && HasText(row, "name") &&
+                    HasText(row, "filename") && HasOption(row, "reporttypecode") &&
+                    HasOptionalGuid(row, "signatureid") && (!signed || HasInteger(row, "signaturelcid")) &&
+                    HasGuid(row, "reportidunique") && HasOption(row, "componentstate") &&
+                    row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
             }
 
             private static string DescribeReportSummary(int rawCount, int distinctObjectIdCount,
@@ -2553,6 +2603,52 @@ namespace D365SolutionComparer.Services.Membership
                 public static OptionSetResolutionValue Unsupported(string diagnostic) =>
                     new OptionSetResolutionValue(IdentityResolutionStatus.Unsupported, null, diagnostic,
                         null, "unsupported:componenttype:9");
+            }
+
+            private sealed class ReportResolutionValue
+            {
+                private ReportResolutionValue(IdentityResolutionStatus status, string key,
+                    string diagnostic, string componentTypeKey, string semanticKind)
+                {
+                    Status = status;
+                    Key = key;
+                    Diagnostic = diagnostic;
+                    ComponentTypeKey = componentTypeKey;
+                    SemanticKind = semanticKind;
+                }
+
+                public IdentityResolutionStatus Status { get; }
+                public string Key { get; }
+                public string Diagnostic { get; }
+                public string ComponentTypeKey { get; }
+                public string SemanticKind { get; }
+
+                public ComponentIdentity ToIdentity(SolutionComponentRecord record,
+                    IEnumerable<string> evidence)
+                {
+                    return new ComponentIdentity(record, Status, Key, Diagnostic, ComponentTypeKey,
+                        SemanticKind, diagnosticEvidence: evidence);
+                }
+
+                public static ReportResolutionValue Resolved(Guid signatureId) =>
+                    new ReportResolutionValue(IdentityResolutionStatus.Resolved,
+                        signatureId.ToString("D"),
+                        "Signed Report identity resolved from report signatureid.",
+                        ComponentSemanticKinds.Report, ComponentSemanticKinds.Report);
+
+                public static ReportResolutionValue Unresolved(string diagnostic) =>
+                    new ReportResolutionValue(IdentityResolutionStatus.Unresolved, null, diagnostic,
+                        ComponentSemanticKinds.ReportCandidateTypeKey,
+                        "unsupported:componenttype:31");
+
+                public static ReportResolutionValue Ambiguous(string diagnostic) =>
+                    new ReportResolutionValue(IdentityResolutionStatus.Ambiguous, null, diagnostic,
+                        ComponentSemanticKinds.ReportCandidateTypeKey,
+                        "unsupported:componenttype:31");
+
+                public static ReportResolutionValue Unsupported(string diagnostic) =>
+                    new ReportResolutionValue(IdentityResolutionStatus.Unsupported, null, diagnostic,
+                        null, "unsupported:componenttype:31");
             }
 
             private sealed class PendingRecord

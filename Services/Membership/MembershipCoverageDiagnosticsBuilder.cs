@@ -19,6 +19,7 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.EnvironmentVariableDefinition,
             ComponentSemanticKinds.ConnectionReference,
             ComponentSemanticKinds.GlobalChoice,
+            ComponentSemanticKinds.Report,
             ComponentSemanticKinds.AppModule,
             ComponentSemanticKinds.TeamTemplate
         };
@@ -42,6 +43,9 @@ namespace D365SolutionComparer.Services.Membership
             bool hasUnverifiedGlobalChoiceCandidates = components.Any(item =>
                 item.Status != IdentityResolutionStatus.Resolved &&
                 ComponentSemanticKinds.IsGlobalChoiceCandidate(item.ComponentTypeKey));
+            bool hasUnverifiedReportCandidates = components.Any(item =>
+                item.Status != IdentityResolutionStatus.Resolved &&
+                ComponentSemanticKinds.IsReportCandidate(item.ComponentTypeKey));
             var broad = CreateBucket(null, "Broad / Unclassifiable blockers",
                 MembershipCoverageBucketType.BroadUnclassifiable, broadCandidates, state,
                 hasBroadBlockers: false);
@@ -75,9 +79,11 @@ namespace D365SolutionComparer.Services.Membership
                     ? MembershipCoverageBucketType.DynamicallyClassifiedIsolatedFamily
                     : MembershipCoverageBucketType.SemanticKind;
                 return CreateBucket(kind, DisplayName(kind, candidates), bucketType, candidates, state,
-                    hasBroadBlockers || hasUnverifiedGlobalChoiceCandidates &&
-                        string.Equals(kind, ComponentSemanticKinds.GlobalChoice,
-                            StringComparison.OrdinalIgnoreCase));
+                    hasBroadBlockers ||
+                    hasUnverifiedGlobalChoiceCandidates && string.Equals(kind,
+                        ComponentSemanticKinds.GlobalChoice, StringComparison.OrdinalIgnoreCase) ||
+                    hasUnverifiedReportCandidates && string.Equals(kind,
+                        ComponentSemanticKinds.Report, StringComparison.OrdinalIgnoreCase));
             }).ToList();
 
             return new MembershipCoverageDiagnostics(state, summaries, broad, broadRawComponentTypes,
@@ -151,6 +157,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.EnvironmentVariableDefinition: return "Environment Variable Definition";
                 case ComponentSemanticKinds.ConnectionReference: return "Connection Reference";
                 case ComponentSemanticKinds.GlobalChoice: return "Global Choice";
+                case ComponentSemanticKinds.Report: return "Signed Report";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
             }
