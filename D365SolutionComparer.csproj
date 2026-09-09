@@ -96,6 +96,7 @@
     <Compile Include="Infrastructure\DataverseRequestCounter.cs" />
     <Compile Include="Infrastructure\MembershipOperationProgress.cs" />
     <Compile Include="Services\Membership\DataverseReadContext.cs" />
+    <Compile Include="Services\Membership\BatchedDiagnosticQueryReader.cs" />
     <Compile Include="Services\Membership\DataverseSolutionMembershipReader.cs" />
     <Compile Include="Services\Membership\DataverseComponentIdentityResolver.cs" />
     <Compile Include="Services\Membership\SolutionMembershipComparer.cs" />

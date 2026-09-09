@@ -2250,7 +2250,8 @@ namespace D365SolutionComparer.Tests
         public void Type511TeamTemplateLookupBatchesDeduplicatesAndCountsRequests()
         {
             var solution = Solution();
-            var objectIds = Enumerable.Range(0, 201).Select(index => Guid.NewGuid()).ToList();
+            var objectIds = Enumerable.Range(1, 201)
+                .Select(index => new Guid(index, 0, 0, new byte[8])).Reverse().ToList();
             var records = objectIds.Concat(new[] { objectIds[0] }).Select(objectId =>
                 new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 511, objectId),
                     IdentityResolutionStatus.Unresolved)).ToArray();
@@ -2258,6 +2259,7 @@ namespace D365SolutionComparer.Tests
             var service = TeamTemplateService(solution, query =>
             {
                 var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
+                AssertTeamTemplateQuery(query, ids.ToArray());
                 Assert.IsTrue(ids.Count <= 200);
                 Assert.AreEqual(ids.Count, ids.Distinct().Count());
                 queriedIds.AddRange(ids);
@@ -2275,7 +2277,7 @@ namespace D365SolutionComparer.Tests
                 CancellationToken.None, counter);
 
             Assert.AreEqual(201, queriedIds.Count);
-            CollectionAssert.AreEquivalent(objectIds, queriedIds);
+            CollectionAssert.AreEqual(objectIds.OrderBy(item => item).ToArray(), queriedIds.ToArray());
             Assert.AreEqual(1, entityNameMetadataQueries);
             Assert.AreEqual(2, counter.GetQueryCount("teamtemplate"));
             Assert.AreEqual(2, counter.GetQueryCount("solutioncomponentdefinition"));
@@ -2739,6 +2741,76 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
         }
 
+        [DataTestMethod]
+        [DataRow(26)]
+        [DataRow(31)]
+        [DataRow(36)]
+        [DataRow(59)]
+        [DataRow(60)]
+        [DataRow(62)]
+        [DataRow(300)]
+        public void DiagnosticQueryRefactorPreservesDeterministicBatchesAndObservableResults(
+            int componentType)
+        {
+            var solution = Solution();
+            var objectIds = Enumerable.Range(1, 201)
+                .Select(index => new Guid(index, 0, 0, new byte[8])).Reverse().ToList();
+            var records = objectIds.Concat(new[] { objectIds[0] }).Select(objectId =>
+                new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
+                    IdentityResolutionStatus.Unresolved)).ToList();
+            var queriedIds = new List<Guid>();
+            var service = Service(solution, query =>
+            {
+                AssertDiagnosticQueryShape(query, componentType);
+                var batch = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
+                Assert.IsTrue(batch.Count <= 200);
+                Assert.AreEqual(batch.Count, batch.Distinct().Count());
+                queriedIds.AddRange(batch);
+                return Rows();
+            });
+            var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None, counter);
+
+            CollectionAssert.AreEqual(objectIds.OrderBy(item => item).ToArray(), queriedIds.ToArray());
+            Assert.AreEqual(2, counter.GetQueryCount(DiagnosticEntity(componentType)));
+            Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
+            Assert.AreEqual(3, counter.TotalRequests);
+            Assert.AreEqual(records.Count, result.Components.Count);
+            Assert.IsTrue(result.Components.Select((item, index) => ReferenceEquals(item.Record,
+                records[index].Record)).All(item => item));
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+
+            var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
+                item.SemanticKind == "unsupported:componenttype:" + componentType);
+            Assert.AreEqual(records.Count, coverage.TotalCandidates);
+            Assert.AreEqual(records.Count, coverage.Unsupported);
+            Assert.AreEqual(0, coverage.Resolved);
+            Assert.AreEqual(0, coverage.Unresolved);
+            Assert.AreEqual(0, coverage.Ambiguous);
+            Assert.AreEqual(1, coverage.DiagnosticGroups.Count);
+            Assert.AreEqual(records.Count, coverage.DiagnosticGroups.Single().Count);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported,
+                coverage.DiagnosticGroups.Single().ResolutionStatus);
+            Assert.AreEqual("No identity resolver supports this known component type.",
+                coverage.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(records.Count, coverage.AuditEvidence.Count);
+            CollectionAssert.AreEquivalent(records.Select(item => item.Record.SolutionComponentId).ToArray(),
+                coverage.AuditEvidence.Select(item => item.SolutionComponentId).ToArray());
+            Assert.IsTrue(coverage.AuditEvidence.All(item => item.DiagnosticEvidence.Count > 0));
+
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), solution.UniqueName);
+            var compared = new SolutionMembershipComparer().Compare(result,
+                MembershipSnapshot.Complete(targetSolution, new ComponentIdentity[0], DateTimeOffset.UtcNow));
+            Assert.AreEqual(records.Count, compared.Count);
+            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate &&
+                item.AbsenceEvidence == MembershipAbsenceEvidence.None));
+        }
+
         private static Entity Definition(int objectTypeCode, string name, string primaryEntityName)
         {
             return new Entity("solutioncomponentdefinition", Guid.NewGuid())
@@ -2747,6 +2819,77 @@ namespace D365SolutionComparer.Tests
                 ["name"] = name,
                 ["primaryentityname"] = primaryEntityName
             };
+        }
+
+        private static void AssertDiagnosticQueryShape(QueryExpression query, int componentType)
+        {
+            Assert.AreEqual(DiagnosticEntity(componentType), query.EntityName);
+            CollectionAssert.AreEqual(DiagnosticColumns(componentType), query.ColumnSet.Columns.ToArray());
+            Assert.AreEqual(1, query.Criteria.Conditions.Count);
+            var condition = query.Criteria.Conditions.Single();
+            Assert.AreEqual(DiagnosticPrimaryId(componentType), condition.AttributeName);
+            Assert.AreEqual(ConditionOperator.In, condition.Operator);
+            Assert.IsTrue(condition.Values.All(value => value != null && value.GetType() == typeof(Guid)));
+        }
+
+        private static string DiagnosticEntity(int componentType)
+        {
+            switch (componentType)
+            {
+                case 26: return "savedquery";
+                case 31: return "report";
+                case 36: return "template";
+                case 59: return "savedqueryvisualization";
+                case 60: return "systemform";
+                case 62: return "sitemap";
+                case 300: return "canvasapp";
+                default: throw new ArgumentOutOfRangeException(nameof(componentType));
+            }
+        }
+
+        private static string DiagnosticPrimaryId(int componentType)
+        {
+            switch (componentType)
+            {
+                case 26: return "savedqueryid";
+                case 31: return "reportid";
+                case 36: return "templateid";
+                case 59: return "savedqueryvisualizationid";
+                case 60: return "formid";
+                case 62: return "sitemapid";
+                case 300: return "canvasappid";
+                default: throw new ArgumentOutOfRangeException(nameof(componentType));
+            }
+        }
+
+        private static string[] DiagnosticColumns(int componentType)
+        {
+            switch (componentType)
+            {
+                case 26:
+                    return new[] { "savedqueryid", "name", "returnedtypecode", "querytype",
+                        "savedqueryidunique", "componentstate", "ismanaged" };
+                case 31:
+                    return new[] { "reportid", "name", "filename", "reporttypecode", "signatureid",
+                        "signaturelcid", "reportidunique", "componentstate", "ismanaged" };
+                case 36:
+                    return new[] { "templateid", "title", "templatetypecode", "templateidunique",
+                        "ispersonal", "languagecode", "componentstate", "ismanaged" };
+                case 59:
+                    return new[] { "savedqueryvisualizationid", "name", "primaryentitytypecode", "type",
+                        "charttype", "savedqueryvisualizationidunique", "componentstate", "ismanaged" };
+                case 60:
+                    return new[] { "formid", "uniquename", "name", "objecttypecode", "type",
+                        "formidunique", "componentstate", "ismanaged" };
+                case 62:
+                    return new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique",
+                        "isappaware", "componentstate", "ismanaged" };
+                case 300:
+                    return new[] { "canvasappid", "name", "displayname", "uniquecanvasappid",
+                        "componentstate", "ismanaged" };
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(componentType));
+            }
         }
 
         private static EntityMetadata EntityMetadata(int objectTypeCode, string logicalName,

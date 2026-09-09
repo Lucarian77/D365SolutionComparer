@@ -916,81 +916,16 @@ namespace D365SolutionComparer.Services.Membership
                 var configuration = WeakIdentityConfiguration.For(componentType);
                 var diagnostics = new Dictionary<Guid, IReadOnlyList<string>>();
                 weakIdentityDiagnostics[componentType] = diagnostics;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-                int returnedCount = 0;
-                bool countUnavailable = false;
-
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression(configuration.EntityName)
-                        {
-                            ColumnSet = new ColumnSet(configuration.Columns)
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression(configuration.PrimaryIdAttribute,
-                            ConditionOperator.In, batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        returnedCount += rows.Entities.Count;
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid primaryId;
-                            if (string.Equals(row.LogicalName, configuration.EntityName,
-                                    StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, configuration.PrimaryIdAttribute, out primaryId) &&
-                                batch.Contains(primaryId) && (row.Id == Guid.Empty || row.Id == primaryId))
-                            {
-                                returnedById[primaryId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned " +
-                                configuration.EntityName + " row: " + DescribeWeakIdentityRow(configuration, row);
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, configuration.PrimaryIdAttribute,
-                                out conflictingId) && batch.Contains(conflictingId)
-                                ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                        {
-                            countUnavailable = true;
-                            SetWeakIdentityFailures(batch, configuration.DisplayName +
-                                " diagnostic lookup returned an incomplete result set.", failures);
-                        }
-                        else if (invalidResponse)
-                        {
-                            countUnavailable = true;
-                            SetWeakIdentityFailures(batch, configuration.DisplayName +
-                                " diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        countUnavailable = true;
-                        SetWeakIdentityFailures(batch, configuration.DisplayName +
-                            " diagnostic lookup failed: " + ex.Message, failures);
-                    }
-                }
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records,
+                    configuration.EntityName, configuration.PrimaryIdAttribute, configuration.Columns,
+                    configuration.DisplayName + " diagnostic lookup returned an incomplete result set.",
+                    configuration.DisplayName +
+                        " diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => configuration.DisplayName + " diagnostic lookup failed: " + ex.Message,
+                    cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                int returnedCount = retrieval.ReturnedRowCount;
+                bool countUnavailable = !retrieval.CountsAvailable;
 
                 int correlated = 0;
                 int missing = 0;
@@ -1001,16 +936,17 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No " + configuration.EntityName +
                             " row matched this solutioncomponent objectid.");
                     }
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple " + configuration.EntityName +
@@ -1018,15 +954,16 @@ namespace D365SolutionComparer.Services.Membership
                     }
 
                     foreach (var row in matches) evidence.Add(DescribeWeakIdentityRow(configuration, row));
-                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    if (correlation.Status == DiagnosticCorrelationStatus.Unique)
                     {
                         correlated++;
                         if (!IsCompleteWeakIdentityRow(configuration, matches[0])) incomplete++;
                         if (!HasText(matches[0], configuration.NameAttribute)) blankName++;
                         contexts.Add(DescribeWeakIdentityContext(configuration, matches[0]));
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned " + configuration.EntityName + " row: " +
+                            DescribeWeakIdentityRow(configuration, row)));
                     diagnostics[objectId] = evidence.AsReadOnly();
                 }
 
@@ -1077,12 +1014,6 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(summary))
                     result.Add(summary);
                 return result;
-            }
-
-            private static void SetWeakIdentityFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static string DescribeWeakIdentityRow(WeakIdentityConfiguration configuration, Entity row)
@@ -1211,85 +1142,19 @@ namespace D365SolutionComparer.Services.Membership
                 if (records.Count == 0 || reportDiagnosticsLoaded) return;
                 reportDiagnosticsLoaded = true;
                 reportSummaryComponentId = records[0].SolutionComponentId;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-                int returnedCount = 0;
-                bool countUnavailable = false;
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "report", "reportid",
+                    new[] { "reportid", "name", "filename", "reporttypecode", "signatureid",
+                        "signaturelcid", "reportidunique", "componentstate", "ismanaged" },
+                    "Signed Report diagnostic lookup returned an incomplete result set.",
+                    "Signed Report diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => "Signed Report diagnostic lookup failed: " + ex.Message, cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                int returnedCount = retrieval.ReturnedRowCount;
+                bool countUnavailable = !retrieval.CountsAvailable;
 
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression("report")
-                        {
-                            ColumnSet = new ColumnSet("reportid", "name", "filename", "reporttypecode",
-                                "signatureid", "signaturelcid", "reportidunique", "componentstate", "ismanaged")
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression("reportid", ConditionOperator.In,
-                            batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        returnedCount += rows.Entities.Count;
-
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid reportId;
-                            if (string.Equals(row.LogicalName, "report", StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, "reportid", out reportId) && batch.Contains(reportId) &&
-                                (row.Id == Guid.Empty || row.Id == reportId))
-                            {
-                                returnedById[reportId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned report row: " +
-                                DescribeReport(row);
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, "reportid", out conflictingId) &&
-                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                        {
-                            countUnavailable = true;
-                            SetReportFailures(batch,
-                                "Signed Report diagnostic lookup returned an incomplete result set.", failures);
-                        }
-                        else if (invalidResponse)
-                        {
-                            countUnavailable = true;
-                            SetReportFailures(batch,
-                                "Signed Report diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        countUnavailable = true;
-                        SetReportFailures(batch, "Signed Report diagnostic lookup failed: " + ex.Message,
-                            failures);
-                    }
-                }
-
-                var uniquelyCorrelated = objectIds.Where(objectId => !failures.ContainsKey(objectId) &&
-                        returnedById[objectId].Count == 1)
-                    .ToDictionary(objectId => objectId, objectId => returnedById[objectId][0]);
+                var uniquelyCorrelated = objectIds.Select(retrieval.GetCorrelation)
+                    .Where(item => item.Status == DiagnosticCorrelationStatus.Unique)
+                    .ToDictionary(item => item.ObjectId, item => item.Rows[0]);
                 var signatureGroups = uniquelyCorrelated.Values.Select(row =>
                     {
                         Guid signatureId;
@@ -1305,15 +1170,16 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No report row matched this solutioncomponent objectid.");
                     }
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple report rows matched this solutioncomponent objectid.");
@@ -1334,8 +1200,8 @@ namespace D365SolutionComparer.Services.Membership
                                     " occurs on " + duplicateCount + " uniquely correlated Type-31 reports.");
                         }
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned report row: " + DescribeReport(row)));
                     reportDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
@@ -1371,12 +1237,6 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(reportSummaryEvidence))
                     result.Add(reportSummaryEvidence);
                 return result;
-            }
-
-            private static void SetReportFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static string DescribeReport(Entity row)
@@ -1459,84 +1319,17 @@ namespace D365SolutionComparer.Services.Membership
                 if (records.Count == 0 || systemFormDiagnosticsLoaded) return;
                 systemFormDiagnosticsLoaded = true;
                 systemFormSummaryComponentId = records[0].SolutionComponentId;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-                int returnedCount = 0;
-                bool countUnavailable = false;
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "systemform",
+                    "formid", new[] { "formid", "uniquename", "name", "objecttypecode", "type",
+                        "formidunique", "componentstate", "ismanaged" },
+                    "System Form diagnostic lookup returned an incomplete result set.",
+                    "System Form diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => "System Form diagnostic lookup failed: " + ex.Message, cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                int returnedCount = retrieval.ReturnedRowCount;
+                bool countUnavailable = !retrieval.CountsAvailable;
 
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression("systemform")
-                        {
-                            ColumnSet = new ColumnSet("formid", "uniquename", "name", "objecttypecode",
-                                "type", "formidunique", "componentstate", "ismanaged")
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression("formid", ConditionOperator.In,
-                            batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        returnedCount += rows.Entities.Count;
-
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid formId;
-                            if (string.Equals(row.LogicalName, "systemform", StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, "formid", out formId) && batch.Contains(formId) &&
-                                (row.Id == Guid.Empty || row.Id == formId))
-                            {
-                                returnedById[formId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned systemform row: " +
-                                DescribeSystemForm(row, EntityLogicalNameDiagnostic.Unverified(
-                                    "(not resolved for an unassociated row)"));
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, "formid", out conflictingId) &&
-                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                        {
-                            countUnavailable = true;
-                            SetSystemFormFailures(batch,
-                                "System Form diagnostic lookup returned an incomplete result set.", failures);
-                        }
-                        else if (invalidResponse)
-                        {
-                            countUnavailable = true;
-                            SetSystemFormFailures(batch,
-                                "System Form diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        countUnavailable = true;
-                        SetSystemFormFailures(batch, "System Form diagnostic lookup failed: " + ex.Message,
-                            failures);
-                    }
-                }
-
-                var numericObjectTypeCodes = returnedById.Values.SelectMany(item => item)
+                var numericObjectTypeCodes = retrieval.ReturnedRows
                     .Select(ReadObjectTypeCode).Where(item => item.HasValue).Select(item => item.Value)
                     .Distinct().OrderBy(item => item).ToList();
                 var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(numericObjectTypeCodes,
@@ -1550,15 +1343,16 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No systemform row matched this solutioncomponent objectid.");
                     }
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple systemform rows matched this solutioncomponent objectid.");
@@ -1567,7 +1361,7 @@ namespace D365SolutionComparer.Services.Membership
                     foreach (var row in matches)
                         evidence.Add(DescribeSystemForm(row,
                             ResolveSystemFormEntityLogicalName(row, entityLogicalNames)));
-                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    if (correlation.Status == DiagnosticCorrelationStatus.Unique)
                     {
                         correlated++;
                         var row = matches[0];
@@ -1578,8 +1372,10 @@ namespace D365SolutionComparer.Services.Membership
                         else if (!string.IsNullOrWhiteSpace(uniqueName))
                             candidateIdentities.Add(entityName.DisplayValue + "." + uniqueName);
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned systemform row: " +
+                            DescribeSystemForm(row, EntityLogicalNameDiagnostic.Unverified(
+                                "(not resolved for an unassociated row)"))));
                     systemFormDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
@@ -1616,12 +1412,6 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(systemFormSummaryEvidence))
                     result.Add(systemFormSummaryEvidence);
                 return result;
-            }
-
-            private static void SetSystemFormFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static EntityLogicalNameDiagnostic ResolveSystemFormEntityLogicalName(Entity row,
@@ -1717,81 +1507,14 @@ namespace D365SolutionComparer.Services.Membership
                 if (records.Count == 0 || siteMapDiagnosticsLoaded) return;
                 siteMapDiagnosticsLoaded = true;
                 siteMapSummaryComponentId = records[0].SolutionComponentId;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-                int returnedCount = 0;
-                bool countUnavailable = false;
-
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression("sitemap")
-                        {
-                            ColumnSet = new ColumnSet("sitemapid", "sitemapnameunique", "sitemapname",
-                                "sitemapidunique", "isappaware", "componentstate", "ismanaged")
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression("sitemapid", ConditionOperator.In,
-                            batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        returnedCount += rows.Entities.Count;
-
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid siteMapId;
-                            if (string.Equals(row.LogicalName, "sitemap", StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, "sitemapid", out siteMapId) && batch.Contains(siteMapId) &&
-                                (row.Id == Guid.Empty || row.Id == siteMapId))
-                            {
-                                returnedById[siteMapId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned sitemap row: " +
-                                DescribeSiteMap(row);
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, "sitemapid", out conflictingId) &&
-                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                        {
-                            countUnavailable = true;
-                            SetSiteMapFailures(batch,
-                                "Site Map diagnostic lookup returned an incomplete result set.", failures);
-                        }
-                        else if (invalidResponse)
-                        {
-                            countUnavailable = true;
-                            SetSiteMapFailures(batch,
-                                "Site Map diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        countUnavailable = true;
-                        SetSiteMapFailures(batch, "Site Map diagnostic lookup failed: " + ex.Message,
-                            failures);
-                    }
-                }
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "sitemap", "sitemapid",
+                    new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique", "isappaware", "componentstate", "ismanaged" },
+                    "Site Map diagnostic lookup returned an incomplete result set.",
+                    "Site Map diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => "Site Map diagnostic lookup failed: " + ex.Message, cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                int returnedCount = retrieval.ReturnedRowCount;
+                bool countUnavailable = !retrieval.CountsAvailable;
 
                 int correlated = 0;
                 int missing = 0;
@@ -1802,22 +1525,23 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No sitemap row matched this solutioncomponent objectid.");
                     }
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple sitemap rows matched this solutioncomponent objectid.");
                     }
 
                     foreach (var row in matches) evidence.Add(DescribeSiteMap(row));
-                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    if (correlation.Status == DiagnosticCorrelationStatus.Unique)
                     {
                         correlated++;
                         var row = matches[0];
@@ -1826,8 +1550,8 @@ namespace D365SolutionComparer.Services.Membership
                         else candidateNames.Add(name);
                         if (row.GetAttributeValue<bool?>("isappaware") == true) appAware++;
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned sitemap row: " + DescribeSiteMap(row)));
                     siteMapDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
@@ -1863,12 +1587,6 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(siteMapSummaryEvidence))
                     result.Add(siteMapSummaryEvidence);
                 return result;
-            }
-
-            private static void SetSiteMapFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static string DescribeSiteMap(Entity row)
@@ -1934,82 +1652,14 @@ namespace D365SolutionComparer.Services.Membership
                 if (records.Count == 0 || canvasAppDiagnosticsLoaded) return;
                 canvasAppDiagnosticsLoaded = true;
                 canvasAppSummaryComponentId = records[0].SolutionComponentId;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-                int returnedCount = 0;
-                bool countUnavailable = false;
-
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression("canvasapp")
-                        {
-                            ColumnSet = new ColumnSet("canvasappid", "name", "displayname",
-                                "uniquecanvasappid", "componentstate", "ismanaged")
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression("canvasappid", ConditionOperator.In,
-                            batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        returnedCount += rows.Entities.Count;
-
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid canvasAppId;
-                            if (string.Equals(row.LogicalName, "canvasapp", StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, "canvasappid", out canvasAppId) &&
-                                batch.Contains(canvasAppId) &&
-                                (row.Id == Guid.Empty || row.Id == canvasAppId))
-                            {
-                                returnedById[canvasAppId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned canvasapp row: " +
-                                DescribeCanvasApp(row);
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, "canvasappid", out conflictingId) &&
-                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                        {
-                            countUnavailable = true;
-                            SetCanvasAppFailures(batch,
-                                "Canvas App diagnostic lookup returned an incomplete result set.", failures);
-                        }
-                        else if (invalidResponse)
-                        {
-                            countUnavailable = true;
-                            SetCanvasAppFailures(batch,
-                                "Canvas App diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        countUnavailable = true;
-                        SetCanvasAppFailures(batch, "Canvas App diagnostic lookup failed: " + ex.Message,
-                            failures);
-                    }
-                }
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "canvasapp", "canvasappid",
+                    new[] { "canvasappid", "name", "displayname", "uniquecanvasappid", "componentstate", "ismanaged" },
+                    "Canvas App diagnostic lookup returned an incomplete result set.",
+                    "Canvas App diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => "Canvas App diagnostic lookup failed: " + ex.Message, cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                int returnedCount = retrieval.ReturnedRowCount;
+                bool countUnavailable = !retrieval.CountsAvailable;
 
                 int correlated = 0;
                 int missing = 0;
@@ -2019,30 +1669,31 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No canvasapp row matched this solutioncomponent objectid.");
                     }
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple canvasapp rows matched this solutioncomponent objectid.");
                     }
 
                     foreach (var row in matches) evidence.Add(DescribeCanvasApp(row));
-                    if (!failures.ContainsKey(objectId) && matches.Count == 1)
+                    if (correlation.Status == DiagnosticCorrelationStatus.Unique)
                     {
                         correlated++;
                         var name = matches[0].GetAttributeValue<string>("name");
                         if (string.IsNullOrWhiteSpace(name)) blankName++;
                         else candidateNames.Add(name);
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned canvasapp row: " + DescribeCanvasApp(row)));
                     canvasAppDiagnostics[objectId] = evidence.AsReadOnly();
                 }
 
@@ -2077,12 +1728,6 @@ namespace D365SolutionComparer.Services.Membership
                     !string.IsNullOrWhiteSpace(canvasAppSummaryEvidence))
                     result.Add(canvasAppSummaryEvidence);
                 return result;
-            }
-
-            private static void SetCanvasAppFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static string DescribeCanvasApp(Entity row)
@@ -2336,85 +1981,26 @@ namespace D365SolutionComparer.Services.Membership
                 CancellationToken cancellationToken)
             {
                 teamTemplateDiagnosticsLoaded = true;
-                var objectIds = records.Where(item => item.ObjectId.HasValue &&
-                        item.ObjectId.Value != Guid.Empty)
-                    .Select(item => item.ObjectId.Value).Distinct().OrderBy(item => item).ToList();
-                var returnedById = objectIds.ToDictionary(item => item, item => new List<Entity>());
-                var failures = new Dictionary<Guid, string>();
-                var unassociatedEvidence = new Dictionary<Guid, List<string>>();
-
-                foreach (var batch in Batch(objectIds))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var query = new QueryExpression("teamtemplate")
-                        {
-                            ColumnSet = new ColumnSet("teamtemplateid", "teamtemplatename", "objecttypecode",
-                                "defaultaccessrightsmask", "componentidunique", "componentstate", "ismanaged")
-                        };
-                        query.Criteria.AddCondition(new ConditionExpression("teamtemplateid", ConditionOperator.In,
-                            batch.Select(item => (object)item).ToArray()));
-                        var rows = context.Query(query);
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                        bool invalidResponse = false;
-                        foreach (var row in rows.Entities)
-                        {
-                            Guid teamTemplateId;
-                            if (string.Equals(row.LogicalName, "teamtemplate", StringComparison.OrdinalIgnoreCase) &&
-                                TryReadGuid(row, "teamtemplateid", out teamTemplateId) &&
-                                batch.Contains(teamTemplateId) &&
-                                (row.Id == Guid.Empty || row.Id == teamTemplateId))
-                            {
-                                returnedById[teamTemplateId].Add(row);
-                                continue;
-                            }
-
-                            invalidResponse = true;
-                            var detail = "Unassociated or conflicting returned row: " +
-                                DescribeTeamTemplate(row, "(not resolved for an unassociated row)");
-                            Guid conflictingId;
-                            var affectedIds = TryReadGuid(row, "teamtemplateid", out conflictingId) &&
-                                batch.Contains(conflictingId) ? new[] { conflictingId } : batch;
-                            foreach (var objectId in affectedIds)
-                            {
-                                List<string> evidence;
-                                if (!unassociatedEvidence.TryGetValue(objectId, out evidence))
-                                    unassociatedEvidence[objectId] = evidence = new List<string>();
-                                evidence.Add(detail);
-                            }
-                        }
-
-                        if (rows.MoreRecords)
-                            SetTeamTemplateFailures(batch,
-                                "TeamTemplate diagnostic lookup returned an incomplete result set.", failures);
-                        else if (invalidResponse)
-                            SetTeamTemplateFailures(batch,
-                                "TeamTemplate diagnostic lookup returned conflicting or incomplete primary-key data.",
-                                failures);
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        SetTeamTemplateFailures(batch, "TeamTemplate diagnostic lookup failed: " + ex.Message,
-                            failures);
-                    }
-                }
-
-                var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(returnedById.Values
-                    .SelectMany(item => item).Select(ReadObjectTypeCode).Where(item => item.HasValue)
+                var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "teamtemplate",
+                    "teamtemplateid", new[] { "teamtemplateid", "teamtemplatename", "objecttypecode",
+                        "defaultaccessrightsmask", "componentidunique", "componentstate", "ismanaged" },
+                    "TeamTemplate diagnostic lookup returned an incomplete result set.",
+                    "TeamTemplate diagnostic lookup returned conflicting or incomplete primary-key data.",
+                    ex => "TeamTemplate diagnostic lookup failed: " + ex.Message, cancellationToken);
+                var objectIds = retrieval.ObjectIds;
+                var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(retrieval.ReturnedRows
+                    .Select(ReadObjectTypeCode).Where(item => item.HasValue)
                     .Select(item => item.Value).Distinct().OrderBy(item => item).ToList(), cancellationToken);
                 foreach (var objectId in objectIds)
                 {
                     var evidence = new List<string>();
-                    string failure;
-                    var matches = returnedById[objectId];
-                    if (failures.TryGetValue(objectId, out failure)) evidence.Add(failure);
-                    else if (matches.Count == 0)
+                    var correlation = retrieval.GetCorrelation(objectId);
+                    var matches = correlation.Rows;
+                    if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                        evidence.Add(correlation.Failure);
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                         evidence.Add("No teamtemplate row matched this solutioncomponent objectid.");
-                    else if (matches.Count > 1)
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                         evidence.Add("Multiple teamtemplate rows matched this solutioncomponent objectid.");
 
                     foreach (var row in matches)
@@ -2426,12 +2012,13 @@ namespace D365SolutionComparer.Services.Membership
                             entityLogicalName = EntityLogicalNameDiagnostic.Unverified(
                                 "(objecttypecode unavailable)");
                         evidence.Add(DescribeTeamTemplate(row, entityLogicalName.DisplayValue));
-                        if (!failures.ContainsKey(objectId) && matches.Count == 1 &&
+                        if (correlation.Status == DiagnosticCorrelationStatus.Unique &&
                             IsCompleteTeamTemplate(row) && entityLogicalName.IsVerified)
                             verifiedTeamTemplates.Add(objectId);
                     }
-                    List<string> unassociated;
-                    if (unassociatedEvidence.TryGetValue(objectId, out unassociated)) evidence.AddRange(unassociated);
+                    evidence.AddRange(correlation.UnassociatedRows.Select(row =>
+                        "Unassociated or conflicting returned row: " +
+                            DescribeTeamTemplate(row, "(not resolved for an unassociated row)")));
                     teamTemplateDiagnostics[objectId] = evidence.AsReadOnly();
                 }
             }
@@ -2502,12 +2089,6 @@ namespace D365SolutionComparer.Services.Membership
                 IReadOnlyList<string> evidence;
                 return teamTemplateDiagnostics.TryGetValue(record.ObjectId.Value, out evidence)
                     ? evidence : new[] { "TeamTemplate diagnostic lookup produced no auditable result." };
-            }
-
-            private static void SetTeamTemplateFailures(IEnumerable<Guid> objectIds, string diagnostic,
-                IDictionary<Guid, string> failures)
-            {
-                foreach (var objectId in objectIds) failures[objectId] = diagnostic;
             }
 
             private static void SetEntityLogicalNameDiagnostics(IEnumerable<int> objectTypeCodes, string diagnostic,
