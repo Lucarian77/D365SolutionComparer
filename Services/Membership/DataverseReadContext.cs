@@ -43,9 +43,11 @@ namespace D365SolutionComparer.Services.Membership
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.cancellationToken = cancellationToken;
             this.requestCounter = requestCounter;
+            MetadataCache = new DataverseComponentMetadataCache();
         }
 
         public EnvironmentIdentity Environment { get; }
+        public DataverseComponentMetadataCache MetadataCache { get; }
         public IOrganizationService Service => requestCounter == null
             ? service : new InstrumentedOrganizationService(service, requestCounter);
 

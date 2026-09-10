@@ -51,8 +51,8 @@ namespace D365SolutionComparer.Tests
         }
 
         [DataTestMethod]
-        [DataRow(100, 36)]
-        [DataRow(500, 136)]
+        [DataRow(100, 12)]
+        [DataRow(500, 12)]
         public void MixedSupportedSnapshotsHaveBoundedRequestCounts(int count, int expectedRequests)
         {
             var solution = Solution(); const int connectionType = 10027;
@@ -78,9 +78,9 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Resolved));
             Assert.AreEqual(expectedRequests, counter.TotalRequests);
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
-            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
-            Assert.AreEqual((count + 6) / 8, counter.GetExecuteCount("RetrieveAttribute"));
-            Assert.AreEqual((count + 5) / 8, counter.GetExecuteCount("RetrieveRelationship"));
+            Assert.AreEqual(3, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));
             Assert.AreEqual(1, counter.GetQueryCount("solutioncomponentdefinition"));
         }
 
@@ -271,15 +271,54 @@ namespace D365SolutionComparer.Tests
             if (request is RetrieveMetadataChangesRequest)
             {
                 var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                var ids = metadataRequest.Query.Criteria.Conditions.Select(condition =>
-                    (Guid)condition.Value).ToArray();
                 var response = new RetrieveMetadataChangesResponse();
                 var metadata = new EntityMetadataCollection();
-                metadata.AddRange(ids.Select(id => new EntityMetadata
+                if (metadataRequest.Query.AttributeQuery != null)
                 {
-                    MetadataId = id,
-                    LogicalName = "table_" + id.ToString("N")
-                }));
+                    var ids = metadataRequest.Query.AttributeQuery.Criteria.Conditions
+                        .Select(condition => (Guid)condition.Value).ToArray();
+                    var entity = new EntityMetadata { LogicalName = "table" };
+                    var attributes = ids.Select(id =>
+                    {
+                        var attribute = new StringAttributeMetadata
+                        {
+                            MetadataId = id,
+                            LogicalName = "column",
+                            SchemaName = "Column",
+                            MaxLength = 100
+                        };
+                        typeof(AttributeMetadata).GetProperty("EntityLogicalName")
+                            .SetValue(attribute, "table");
+                        return (AttributeMetadata)attribute;
+                    }).ToArray();
+                    typeof(EntityMetadata).GetProperty("Attributes")
+                        .SetValue(entity, attributes, null);
+                    metadata.Add(entity);
+                }
+                else if (metadataRequest.Query.RelationshipQuery != null)
+                {
+                    var ids = metadataRequest.Query.RelationshipQuery.Criteria.Conditions
+                        .Select(condition => (Guid)condition.Value).ToArray();
+                    var entity = new EntityMetadata { LogicalName = "table" };
+                    var relationships = ids.Select(id => new OneToManyRelationshipMetadata
+                    {
+                        MetadataId = id,
+                        SchemaName = "relationship_" + id.ToString("N")
+                    }).ToArray();
+                    typeof(EntityMetadata).GetProperty("OneToManyRelationships")
+                        .SetValue(entity, relationships, null);
+                    metadata.Add(entity);
+                }
+                else
+                {
+                    var ids = metadataRequest.Query.Criteria.Conditions.Select(condition =>
+                        (Guid)condition.Value).ToArray();
+                    metadata.AddRange(ids.Select(id => new EntityMetadata
+                    {
+                        MetadataId = id,
+                        LogicalName = "table_" + id.ToString("N")
+                    }));
+                }
                 response.Results["EntityMetadata"] = metadata;
                 return response;
             }
