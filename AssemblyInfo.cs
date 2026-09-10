@@ -15,5 +15,7 @@ using System.Runtime.InteropServices;
 
 [assembly: Guid("DBCA8070-FA96-465C-BAC4-A3AE6B3A7D9F")]
 
+[assembly: InternalsVisibleTo("D365SolutionComparer.Tests")]
+
 [assembly: AssemblyVersion("1.2026.1.3")]
 [assembly: AssemblyFileVersion("1.2026.1.3")]

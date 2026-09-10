@@ -5,6 +5,7 @@ using System.ServiceModel;
 using System.Threading;
 using D365SolutionComparer.Infrastructure;
 using D365SolutionComparer.Models.Identity;
+using D365SolutionComparer.Models.ComponentDetails;
 using D365SolutionComparer.Models.Membership;
 using D365SolutionComparer.Services.Contracts;
 using Microsoft.Xrm.Sdk;
@@ -175,6 +176,8 @@ namespace D365SolutionComparer.Services.Membership
                         ResolveAppModuleBatches(keys, cancellationToken);
                     else if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
                     else if (group.Key == "table") ResolveTableBatches(keys, cancellationToken);
+                    else if (group.Key == "column") ResolveColumnBatches(keys, cancellationToken);
+                    else if (group.Key == "relationship") ResolveRelationshipBatches(keys, cancellationToken);
                     else foreach (var key in keys) identityCache[key] = ResolveOne(key, cancellationToken);
                 }
 
@@ -274,6 +277,7 @@ namespace D365SolutionComparer.Services.Membership
                             EntityFilters = EntityFilters.Entity,
                             RetrieveAsIfPublished = false
                         }) as RetrieveEntityResponse;
+                        context.MetadataCache.Store(response?.EntityMetadata);
                         value = response?.EntityMetadata?.LogicalName;
                     }
                     else if (key.Kind == "column")
@@ -284,6 +288,7 @@ namespace D365SolutionComparer.Services.Membership
                             RetrieveAsIfPublished = false
                         }) as RetrieveAttributeResponse;
                         var metadata = response?.AttributeMetadata;
+                        context.MetadataCache.Store(metadata);
                         value = metadata == null || string.IsNullOrWhiteSpace(metadata.EntityLogicalName) ||
                             string.IsNullOrWhiteSpace(metadata.LogicalName)
                             ? null : metadata.EntityLogicalName + "." + metadata.LogicalName;
@@ -295,6 +300,7 @@ namespace D365SolutionComparer.Services.Membership
                             MetadataId = key.ObjectId,
                             RetrieveAsIfPublished = false
                         }) as RetrieveRelationshipResponse;
+                        context.MetadataCache.Store(response?.RelationshipMetadata);
                         value = response?.RelationshipMetadata?.SchemaName;
                     }
                     else return ResolveEntityOne(key, cancellationToken);
@@ -339,7 +345,10 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         var query = new EntityQueryExpression
                         {
-                            Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
+                            Properties = new MetadataPropertiesExpression(new[] { "MetadataId", "LogicalName" }
+                                .Concat(ComponentDefinitionContractCatalog.For(
+                                    ComponentSemanticKinds.Table).ComparableProperties).Distinct(
+                                        StringComparer.OrdinalIgnoreCase).ToArray()),
                             Criteria = new MetadataFilterExpression(LogicalOperator.Or)
                         };
                         foreach (var key in batch)
@@ -348,6 +357,7 @@ namespace D365SolutionComparer.Services.Membership
                         var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
                             as RetrieveMetadataChangesResponse;
                         var metadata = response?.EntityMetadata ?? new EntityMetadataCollection();
+                        foreach (var item in metadata) context.MetadataCache.Store(item, true);
                         var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
                         var grouped = metadata.Where(item => item.MetadataId.HasValue)
                             .GroupBy(item => item.MetadataId.Value).ToDictionary(item => item.Key, item => item.ToList());
@@ -383,6 +393,177 @@ namespace D365SolutionComparer.Services.Membership
                         identityCache[result.Key] = result.Value;
             }
 
+            private void ResolveColumnBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                foreach (var batch in Batch(keys))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var attributeQuery = new AttributeQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression(new[]
+                                { "MetadataId", "LogicalName" }
+                                .Concat(ComponentDefinitionContractCatalog.For(
+                                    ComponentSemanticKinds.Column).ComparableProperties)
+                                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
+                            Criteria = MetadataIdFilter(batch)
+                        };
+                        var query = new EntityQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
+                            AttributeQuery = attributeQuery
+                        };
+                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
+                            as RetrieveMetadataChangesResponse;
+                        var entities = response?.EntityMetadata;
+                        if (entities == null)
+                        {
+                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                                "Column identity metadata retrieval returned no metadata collection.");
+                            continue;
+                        }
+                        var returned = entities.Where(entity => entity?.Attributes != null)
+                            .SelectMany(entity => entity.Attributes.Select(attribute =>
+                                new ColumnMetadataResult(entity.LogicalName, attribute)))
+                            .Where(item => item.Metadata != null).ToList();
+                        foreach (var item in returned) context.MetadataCache.Store(item.Metadata);
+                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
+                        if (returned.Any(item => !item.Metadata.MetadataId.HasValue ||
+                            !requested.Contains(item.Metadata.MetadataId.Value)))
+                        {
+                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                                "Column identity metadata retrieval returned conflicting identifiers.");
+                            continue;
+                        }
+                        var indexed = returned.GroupBy(item => item.Metadata.MetadataId.Value)
+                            .ToDictionary(group => group.Key, group => group.ToList());
+                        foreach (var key in batch)
+                        {
+                            List<ColumnMetadataResult> matches;
+                            if (!indexed.TryGetValue(key.ObjectId, out matches))
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "No column metadata matched the component object ID.");
+                            else if (matches.Count != 1)
+                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
+                                    "Multiple column metadata records matched the component object ID.");
+                            else
+                            {
+                                var entityName = matches[0].ParentEntityLogicalName;
+                                var value = string.IsNullOrWhiteSpace(entityName) ||
+                                    string.IsNullOrWhiteSpace(matches[0].Metadata.LogicalName) ? null :
+                                    entityName + "." + matches[0].Metadata.LogicalName;
+                                identityCache[key] = ResolutionValue.FromKey(key.Kind, value);
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                            "Column identity metadata retrieval failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private void ResolveRelationshipBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                foreach (var batch in Batch(keys))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var relationshipQuery = new RelationshipQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression(new[]
+                                { "MetadataId", "SchemaName" }
+                                .Concat(ComponentDefinitionContractCatalog.For(
+                                    ComponentSemanticKinds.Relationship).ComparableProperties)
+                                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
+                            Criteria = MetadataIdFilter(batch)
+                        };
+                        var query = new EntityQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
+                            RelationshipQuery = relationshipQuery
+                        };
+                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
+                            as RetrieveMetadataChangesResponse;
+                        var entities = response?.EntityMetadata;
+                        if (entities == null)
+                        {
+                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                                "Relationship identity metadata retrieval returned no metadata collection.");
+                            continue;
+                        }
+                        var returned = entities.SelectMany(Relationships).Where(item => item != null).ToList();
+                        foreach (var item in returned) context.MetadataCache.Store(item);
+                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
+                        if (returned.Any(item => !item.MetadataId.HasValue ||
+                            !requested.Contains(item.MetadataId.Value)))
+                        {
+                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                                "Relationship identity metadata retrieval returned conflicting identifiers.");
+                            continue;
+                        }
+                        var indexed = returned.GroupBy(item => item.MetadataId.Value)
+                            .ToDictionary(group => group.Key, group => group
+                                .GroupBy(item => item.SchemaName ?? string.Empty,
+                                    StringComparer.Ordinal).Select(items => items.First()).ToList());
+                        foreach (var key in batch)
+                        {
+                            List<RelationshipMetadataBase> matches;
+                            if (!indexed.TryGetValue(key.ObjectId, out matches))
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "No relationship metadata matched the component object ID.");
+                            else if (matches.Count != 1)
+                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
+                                    "Multiple conflicting relationship metadata records matched the component object ID.");
+                            else identityCache[key] = ResolutionValue.FromKey(key.Kind, matches[0].SchemaName);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
+                            "Relationship identity metadata retrieval failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private static MetadataFilterExpression MetadataIdFilter(IEnumerable<LookupKey> keys)
+            {
+                var filter = new MetadataFilterExpression(LogicalOperator.Or);
+                foreach (var key in keys)
+                    filter.Conditions.Add(new MetadataConditionExpression("MetadataId",
+                        MetadataConditionOperator.Equals, key.ObjectId));
+                return filter;
+            }
+
+            private static IEnumerable<RelationshipMetadataBase> Relationships(EntityMetadata entity)
+            {
+                if (entity == null) return Enumerable.Empty<RelationshipMetadataBase>();
+                return (entity.OneToManyRelationships ?? new OneToManyRelationshipMetadata[0])
+                    .Cast<RelationshipMetadataBase>()
+                    .Concat((entity.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0])
+                        .Cast<RelationshipMetadataBase>())
+                    .Concat((entity.ManyToManyRelationships ?? new ManyToManyRelationshipMetadata[0])
+                        .Cast<RelationshipMetadataBase>());
+            }
+
+            private void SetMetadataResults(IEnumerable<LookupKey> keys,
+                IdentityResolutionStatus status, string diagnostic)
+            {
+                foreach (var key in keys)
+                    identityCache[key] = status == IdentityResolutionStatus.Ambiguous
+                        ? ResolutionValue.Ambiguous(key.Kind, diagnostic)
+                        : ResolutionValue.Unresolved(key.Kind, diagnostic);
+            }
+
             private IDictionary<LookupKey, ResolutionValue> ResolveEntityBatch(string kind,
                 IReadOnlyList<LookupKey> keys, CancellationToken cancellationToken)
             {
@@ -391,7 +572,12 @@ namespace D365SolutionComparer.Services.Membership
                 GetEntityConfiguration(kind, out table, out primaryId, out identityAttribute);
                 try
                 {
-                    var query = new QueryExpression(table) { ColumnSet = new ColumnSet(primaryId, identityAttribute) };
+                    var definitionColumns = DefinitionComparableColumns(kind);
+                    var query = new QueryExpression(table)
+                    {
+                        ColumnSet = new ColumnSet(new[] { primaryId, identityAttribute }
+                            .Concat(definitionColumns).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
+                    };
                     query.Criteria.AddCondition(new ConditionExpression(primaryId, ConditionOperator.In,
                         keys.Select(item => (object)item.ObjectId).ToArray()));
                     var rows = context.Query(query);
@@ -411,8 +597,13 @@ namespace D365SolutionComparer.Services.Membership
                         else if (matches.Count != 1)
                             results[key] = ResolutionValue.Ambiguous(kind,
                                 "An object ID lookup returned multiple records.");
-                        else results[key] = ResolutionValue.FromKey(kind,
-                            ReadEntityIdentity(matches[0], kind, identityAttribute));
+                        else
+                        {
+                            if (definitionColumns.Count > 0)
+                                context.MetadataCache.StoreEntityRow(matches[0], key.ObjectId);
+                            results[key] = ResolutionValue.FromKey(kind,
+                                ReadEntityIdentity(matches[0], kind, identityAttribute));
+                        }
                     }
                 }
                 catch (OperationCanceledException) { throw; }
@@ -667,6 +858,12 @@ namespace D365SolutionComparer.Services.Membership
             private static bool IsEntityBacked(string kind) => kind == "webresource" || kind == "process" ||
                 kind == "securityrole" || kind == "environmentvariabledefinition" || kind == "connectionreference";
 
+            private static IReadOnlyList<string> DefinitionComparableColumns(string kind)
+            {
+                var contract = ComponentDefinitionContractCatalog.For(kind);
+                return contract == null ? new string[0] : contract.ComparableProperties;
+            }
+
             private static IEnumerable<IReadOnlyList<T>> Batch<T>(IReadOnlyList<T> items)
             {
                 for (int offset = 0; offset < items.Count; offset += BatchSize)
@@ -733,6 +930,8 @@ namespace D365SolutionComparer.Services.Membership
                     cancellationToken.ThrowIfCancellationRequested();
                     var returned = response != null && response.Results.Contains("OptionSetMetadata")
                         ? response.Results["OptionSetMetadata"] as OptionSetMetadataBase[] : null;
+                    context.MetadataCache.StoreOptionSetCatalog(returned,
+                        returned == null ? "RetrieveAllOptionSets returned no option-set catalog." : null);
                     if (returned == null)
                     {
                         SetOptionSetDiagnosticFailures(objectIds,
@@ -857,6 +1056,7 @@ namespace D365SolutionComparer.Services.Membership
                 catch (FaultException ex)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    context.MetadataCache.StoreOptionSetCatalog(null, ex.Message);
                     SetOptionSetDiagnosticFailures(objectIds,
                         "RetrieveAllOptionSets diagnostic lookup failed: " + ex.Message);
                     SetOptionSetResolutionFailures(objectIds, IdentityResolutionStatus.Unresolved,
@@ -2502,7 +2702,8 @@ namespace D365SolutionComparer.Services.Membership
                         var query = new QueryExpression("appmodule")
                         {
                             ColumnSet = new ColumnSet("appmoduleid", "uniquename", "name",
-                                "appmoduleidunique", "componentstate", "ismanaged")
+                                "appmoduleidunique", "componentstate", "ismanaged", "description",
+                                "clienttype", "formfactor", "navigationtype")
                         };
                         query.Criteria.AddCondition(new ConditionExpression("appmoduleid", ConditionOperator.In,
                             batch.Select(item => (object)item.ObjectId).ToArray()));
@@ -2552,6 +2753,7 @@ namespace D365SolutionComparer.Services.Membership
                             else
                             {
                                 var row = matches[0];
+                                context.MetadataCache.StoreEntityRow(row, key.ObjectId);
                                 var evidence = new[] { DescribeAppModule(row) };
                                 var uniqueName = row.GetAttributeValue<string>("uniquename");
                                 identityCache[key] = string.IsNullOrWhiteSpace(uniqueName)
@@ -2933,6 +3135,19 @@ namespace D365SolutionComparer.Services.Membership
                 public int Index { get; }
                 public SolutionComponentRecord Record { get; }
                 public LookupKey Key { get; }
+            }
+
+            private sealed class ColumnMetadataResult
+            {
+                public ColumnMetadataResult(string parentEntityLogicalName,
+                    AttributeMetadata metadata)
+                {
+                    ParentEntityLogicalName = parentEntityLogicalName;
+                    Metadata = metadata;
+                }
+
+                public string ParentEntityLogicalName { get; }
+                public AttributeMetadata Metadata { get; }
             }
 
             private sealed class ResolutionValue

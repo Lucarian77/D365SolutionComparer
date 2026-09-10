@@ -142,7 +142,9 @@ namespace D365SolutionComparer.Tests
                         return Rows(new Entity("solutioncomponentdefinition", Guid.NewGuid()) { ["objecttypecode"] = localTypeCode });
                     }
                     Assert.AreEqual("connectionreference", query.EntityName);
-                    CollectionAssert.AreEquivalent(new[] { "connectionreferenceid", "connectionreferencelogicalname" }, query.ColumnSet.Columns.ToArray());
+                    CollectionAssert.AreEquivalent(new[] { "connectionreferenceid", "connectionreferencelogicalname",
+                        "connectionreferencedisplayname", "connectorid", "description" },
+                        query.ColumnSet.Columns.ToArray());
                     return Rows(new Entity("connectionreference", (Guid)query.Criteria.Conditions.Single().Values.Single())
                     {
                         ["connectionreferencelogicalname"] = "new_shared"
@@ -3800,8 +3802,8 @@ namespace D365SolutionComparer.Tests
             var solution = Solution(); var resolver = new DataverseComponentIdentityResolver();
             var absent = MembershipSnapshot.Absent(solution.Environment, solution.UniqueName, DateTimeOffset.UtcNow);
             var unavailable = MembershipSnapshot.Unavailable(solution.Environment, solution.UniqueName, DateTimeOffset.UtcNow, "Disconnected");
-            Assert.AreSame(absent, resolver.ResolveSnapshot(null, absent, CancellationToken.None));
-            Assert.AreSame(unavailable, resolver.ResolveSnapshot(null, unavailable, CancellationToken.None));
+            Assert.AreSame(absent, resolver.ResolveSnapshot((IOrganizationService)null, absent, CancellationToken.None));
+            Assert.AreSame(unavailable, resolver.ResolveSnapshot((IOrganizationService)null, unavailable, CancellationToken.None));
         }
 
         [DataTestMethod]
@@ -4701,7 +4703,8 @@ namespace D365SolutionComparer.Tests
         {
             Assert.AreEqual("appmodule", query.EntityName);
             CollectionAssert.AreEquivalent(new[] { "appmoduleid", "uniquename", "name",
-                "appmoduleidunique", "componentstate", "ismanaged" }, query.ColumnSet.Columns.ToArray());
+                "appmoduleidunique", "componentstate", "ismanaged", "description", "clienttype",
+                "formfactor", "navigationtype" }, query.ColumnSet.Columns.ToArray());
             Assert.AreEqual(1, query.Criteria.Conditions.Count);
             var condition = query.Criteria.Conditions.Single();
             Assert.AreEqual("appmoduleid", condition.AttributeName);
