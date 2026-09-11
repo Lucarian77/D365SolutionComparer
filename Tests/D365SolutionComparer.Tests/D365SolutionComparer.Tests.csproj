@@ -58,6 +58,8 @@
     <Compile Include="CanvasAppLifecycleCsvComparerTests.cs" />
     <Compile Include="ComponentDetailComparisonTests.cs" />
     <Compile Include="ComponentDefinitionReaderTests.cs" />
+    <Compile Include="ParentMetadataRetrievalTests.cs" />
+    <Compile Include="ComponentDefinitionPresentationTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

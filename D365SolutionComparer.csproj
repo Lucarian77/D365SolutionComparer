@@ -97,6 +97,7 @@
     <Compile Include="Infrastructure\MembershipOperationProgress.cs" />
     <Compile Include="Services\Membership\DataverseReadContext.cs" />
     <Compile Include="Services\Membership\DataverseComponentMetadataCache.cs" />
+    <Compile Include="Services\Membership\ParentEntityMetadataReader.cs" />
     <Compile Include="Services\Membership\BatchedDiagnosticQueryReader.cs" />
     <Compile Include="Services\Membership\DataverseSolutionMembershipReader.cs" />
     <Compile Include="Services\Membership\DataverseComponentIdentityResolver.cs" />
@@ -112,15 +113,20 @@
     <Compile Include="Models\ComponentDetails\ComponentDefinitionContractCatalog.cs" />
     <Compile Include="Models\ComponentDetails\ComponentDefinitionSnapshot.cs" />
     <Compile Include="Models\ComponentDetails\ComponentDetailCompareResult.cs" />
+    <Compile Include="Models\ComponentDetails\ComponentDefinitionPresentation.cs" />
     <Compile Include="Services\Contracts\IComponentDefinitionReader.cs" />
     <Compile Include="Services\Contracts\IComponentDetailComparer.cs" />
     <Compile Include="Services\ComponentDetails\DataverseComponentDefinitionReader.cs" />
     <Compile Include="Services\ComponentDetails\DataverseComponentDefinitionOperation.cs" />
     <Compile Include="Services\ComponentDetails\ComponentDetailComparer.cs" />
+    <Compile Include="Services\ComponentDetails\ComponentDefinitionResultPresenter.cs" />
     <Compile Include="MembershipResultsForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="MembershipCoverageDetailsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="ComponentDefinitionDetailsForm.cs">
       <SubType>Form</SubType>
     </Compile>
   </ItemGroup>

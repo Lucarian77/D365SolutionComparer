@@ -51,8 +51,8 @@ namespace D365SolutionComparer.Tests
         }
 
         [DataTestMethod]
-        [DataRow(100, 12)]
-        [DataRow(500, 12)]
+        [DataRow(100, 10)]
+        [DataRow(500, 10)]
         public void MixedSupportedSnapshotsHaveBoundedRequestCounts(int count, int expectedRequests)
         {
             var solution = Solution(); const int connectionType = 10027;
@@ -70,7 +70,10 @@ namespace D365SolutionComparer.Tests
                     return Rows(new Entity("solutioncomponentdefinition", Guid.NewGuid()) { ["objecttypecode"] = connectionType });
                 return IdentityRows(query);
             });
-            service.ExecuteRequest = request => MetadataResponse(solution, request);
+            service.ExecuteRequest = request => MetadataResponse(solution, request,
+                components.Select(row => new SolutionComponentRecord(row.Id,
+                    row.GetAttributeValue<OptionSetValue>("componenttype").Value,
+                    row.GetAttributeValue<Guid>("objectid"))).ToArray());
             var counter = new DataverseRequestCounter();
             var result = new DataverseSolutionMembershipOperation().ReadAndResolve(service, solution,
                 CancellationToken.None, requestCounter: counter);
@@ -78,7 +81,7 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Resolved));
             Assert.AreEqual(expectedRequests, counter.TotalRequests);
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
-            Assert.AreEqual(3, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));
             Assert.AreEqual(1, counter.GetQueryCount("solutioncomponentdefinition"));
@@ -100,14 +103,14 @@ namespace D365SolutionComparer.Tests
                     return Rows(new Entity("solutioncomponentdefinition", Guid.NewGuid()) { ["objecttypecode"] = connectionType });
                 return IdentityRows(query);
             });
-            service.ExecuteRequest = request => MetadataResponse(solution, request);
+            service.ExecuteRequest = request => MetadataResponse(solution, request, identities.Select(item => item.Record).ToArray());
             var counter = new DataverseRequestCounter();
             var result = new DataverseComponentIdentityResolver().ResolveSnapshot(
                 service, MembershipSnapshot.Complete(solution, identities, DateTimeOffset.UtcNow),
                 CancellationToken.None, counter);
             Assert.AreEqual(16, result.Components.Count);
             Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Resolved));
-            Assert.AreEqual(4, counter.ExecuteRequests); // WhoAmI plus one request for each metadata family.
+            Assert.AreEqual(2, counter.ExecuteRequests); // WhoAmI plus one shared parent metadata batch.
             Assert.AreEqual(6, counter.QueryRequests);   // Five entity families plus connection-type discovery.
             foreach (var pair in result.Components.Select((item, index) => new { item, index }).GroupBy(x => x.index / 2))
             {
@@ -265,84 +268,19 @@ namespace D365SolutionComparer.Tests
         }
 
         private static OrganizationResponse MetadataResponse(Models.Identity.SolutionIdentity solution,
-            OrganizationRequest request)
+            OrganizationRequest request, SolutionComponentRecord[] records)
         {
             if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
-            if (request is RetrieveMetadataChangesRequest)
-            {
-                var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                var response = new RetrieveMetadataChangesResponse();
-                var metadata = new EntityMetadataCollection();
-                if (metadataRequest.Query.AttributeQuery != null)
-                {
-                    var ids = metadataRequest.Query.AttributeQuery.Criteria.Conditions
-                        .Select(condition => (Guid)condition.Value).ToArray();
-                    var entity = new EntityMetadata { LogicalName = "table" };
-                    var attributes = ids.Select(id =>
-                    {
-                        var attribute = new StringAttributeMetadata
-                        {
-                            MetadataId = id,
-                            LogicalName = "column",
-                            SchemaName = "Column",
-                            MaxLength = 100
-                        };
-                        typeof(AttributeMetadata).GetProperty("EntityLogicalName")
-                            .SetValue(attribute, "table");
-                        return (AttributeMetadata)attribute;
-                    }).ToArray();
-                    typeof(EntityMetadata).GetProperty("Attributes")
-                        .SetValue(entity, attributes, null);
-                    metadata.Add(entity);
-                }
-                else if (metadataRequest.Query.RelationshipQuery != null)
-                {
-                    var ids = metadataRequest.Query.RelationshipQuery.Criteria.Conditions
-                        .Select(condition => (Guid)condition.Value).ToArray();
-                    var entity = new EntityMetadata { LogicalName = "table" };
-                    var relationships = ids.Select(id => new OneToManyRelationshipMetadata
-                    {
-                        MetadataId = id,
-                        SchemaName = "relationship_" + id.ToString("N")
-                    }).ToArray();
-                    typeof(EntityMetadata).GetProperty("OneToManyRelationships")
-                        .SetValue(entity, relationships, null);
-                    metadata.Add(entity);
-                }
-                else
-                {
-                    var ids = metadataRequest.Query.Criteria.Conditions.Select(condition =>
-                        (Guid)condition.Value).ToArray();
-                    metadata.AddRange(ids.Select(id => new EntityMetadata
-                    {
-                        MetadataId = id,
-                        LogicalName = "table_" + id.ToString("N")
-                    }));
-                }
-                response.Results["EntityMetadata"] = metadata;
-                return response;
-            }
-            if (request is RetrieveAttributeRequest)
-            {
-                var response = new RetrieveAttributeResponse();
-                var metadata = new StringAttributeMetadata
-                {
-                    MetadataId = ((RetrieveAttributeRequest)request).MetadataId,
-                    LogicalName = "column"
-                };
-                typeof(AttributeMetadata).GetProperty("EntityLogicalName").SetValue(metadata, "table");
-                response.Results["AttributeMetadata"] = metadata;
-                return response;
-            }
-            var relationship = (RetrieveRelationshipRequest)request;
-            var relationshipResponse = new RetrieveRelationshipResponse();
-            relationshipResponse.Results["RelationshipMetadata"] = new OneToManyRelationshipMetadata
-            {
-                MetadataId = relationship.MetadataId,
-                SchemaName = "relationship_" + relationship.MetadataId.ToString("N")
-            };
-            return relationshipResponse;
+            var metadataRequest = (RetrieveMetadataChangesRequest)request;
+            ParentMetadataTestData.AssertQuery(metadataRequest);
+            var ids = metadataRequest.Query.Criteria.Conditions.Select(item => (Guid)item.Value).ToArray();
+            var columns = records.Where(item => item.ComponentType == 2).Select(item => item.ObjectId.Value)
+                .Distinct().Select(id => ParentMetadataTestData.Column(id, "column_" + id.ToString("N"))).ToArray();
+            var relationships = records.Where(item => item.ComponentType == 10).Select(item => item.ObjectId.Value)
+                .Distinct().Select(id => ParentMetadataTestData.Relationship(id, "relationship_" + id.ToString("N"))).ToArray();
+            return ParentMetadataTestData.Response(ids.Select((id, index) => ParentMetadataTestData.Root(
+                id, "table_" + id.ToString("N"), index == 0 ? columns : null,
+                index == 0 ? relationships : null)).ToArray());
         }
-
     }
 }

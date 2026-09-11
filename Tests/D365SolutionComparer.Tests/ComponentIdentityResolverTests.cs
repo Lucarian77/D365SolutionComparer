@@ -1853,8 +1853,8 @@ namespace D365SolutionComparer.Tests
                 .Contains("entitylogicalname=account")));
             Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
                 evidence.Contains("lifecycle candidate status=CandidateValid"))));
-            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
-                item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
         }
 
         [TestMethod]
@@ -2511,8 +2511,104 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("Match", result.PackageTypeStatus);
         }
 
-        [TestMethod]
-        public void Type62SiteMapLookupCapturesCandidateEvidenceWithoutCreatingIdentity()
+        [TestMethod, TestCategory("Phase2G3")]
+        public void BulkColumnIdentityQueryRequestsAttributesAndScalesByBatch()
+        {
+            var solution = Solution(); var parentId = Guid.NewGuid();
+            var ids = Enumerable.Range(0, 438).Select(i => Guid.NewGuid()).ToArray();
+            var records = ids.Select(id => ParentMetadataTestData.Raw(2, id))
+                .Concat(new[] { ParentMetadataTestData.Raw(1, parentId) }).ToArray();
+            var service = Service(solution); var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                var metadata = (RetrieveMetadataChangesRequest)request;
+                ParentMetadataTestData.AssertQuery(metadata);
+                Assert.AreEqual(parentId, metadata.Query.Criteria.Conditions.Single().Value);
+                return ParentMetadataTestData.Response(ParentMetadataTestData.Root(parentId, "account",
+                    ids.Select((id, i) => ParentMetadataTestData.Column(id, "new_column" + i)).ToArray()));
+            };
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None, counter);
+            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Resolved));
+            Assert.AreEqual(438, result.Components.Count(item => item.Record.ComponentType == 2));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
+        }
+
+        [TestMethod, TestCategory("Phase2G3")]
+        public void BulkRelationshipIdentityQueryRequestsEveryRelationshipCollection()
+        {
+            var solution = Solution(); var parentId = Guid.NewGuid();
+            var ids = Enumerable.Range(0, 3).Select(i => Guid.NewGuid()).ToArray();
+            var records = ids.Select(id => ParentMetadataTestData.Raw(10, id))
+                .Concat(new[] { ParentMetadataTestData.Raw(1, parentId) }).ToArray();
+            var service = Service(solution); var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
+            service.ExecuteRequest = request =>
+            {
+                if (request is WhoAmIRequest) return WhoAmI(solution.Environment.OrganizationId);
+                ParentMetadataTestData.AssertQuery((RetrieveMetadataChangesRequest)request);
+                return ParentMetadataTestData.Response(ParentMetadataTestData.Root(parentId, "account", null,
+                    new[] { ParentMetadataTestData.Relationship(ids[0], "one") },
+                    new[] { ParentMetadataTestData.Relationship(ids[1], "many") },
+                    new[] { new ManyToManyRelationshipMetadata { MetadataId = ids[2], SchemaName = "multiple" } }));
+            };
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow), CancellationToken.None, counter);
+            CollectionAssert.AreEquivalent(new[] { "one", "many", "multiple" }, result.Components
+                .Where(item => item.Record.ComponentType == 10).Select(item => item.ComparisonKey).ToArray());
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));
+        }
+
+        [TestMethod, TestCategory("Phase2G3")]
+        public void ThreeSiteMapsMatchAndOneSidedSiteMapsRemainDeterministic()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var names = new[] { "ava_CaseManagementSystem", "ava_ICMSSystemHelpdesk", "msdyn_FSMobile" };
+            var sourceIds = names.Select(item => Guid.NewGuid()).ToArray();
+            var targetIds = names.Select(item => Guid.NewGuid()).ToArray();
+            var sourceRecords = sourceIds.Select(id => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 62, id), IdentityResolutionStatus.Unresolved)).ToArray();
+            var targetRecords = targetIds.Select(id => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 62, id), IdentityResolutionStatus.Unresolved)).ToArray();
+            var sourceNames = sourceIds.Select((id, index) => new { id, name = names[index] })
+                .ToDictionary(item => item.id, item => item.name);
+            var targetNames = targetIds.Select((id, index) => new { id, name = names[index].ToUpperInvariant() })
+                .ToDictionary(item => item.id, item => item.name);
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.ResolveSnapshot(SiteMapService(sourceSolution, query => Rows(
+                    query.Criteria.Conditions.Single().Values.Cast<Guid>().Select(id =>
+                        SiteMap(id, sourceNames[id], "Source", Guid.NewGuid(), true, false)).ToArray())),
+                MembershipSnapshot.Complete(sourceSolution, sourceRecords, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+            var target = resolver.ResolveSnapshot(SiteMapService(targetSolution, query => Rows(
+                    query.Criteria.Conditions.Single().Values.Cast<Guid>().Select(id =>
+                        SiteMap(id, targetNames[id], "Target", Guid.NewGuid(), true, true)).ToArray())),
+                MembershipSnapshot.Complete(targetSolution, targetRecords, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+            var comparer = new SolutionMembershipComparer();
+
+            var matched = comparer.Compare(source, target);
+            Assert.AreEqual(3, matched.Count);
+            Assert.IsTrue(matched.All(item => item.Presence == MembershipPresence.PresentInBoth));
+            CollectionAssert.AreEqual(names.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray(),
+                matched.Select(item => item.Source.ComparisonKey).ToArray());
+
+            var emptyTarget = MembershipSnapshot.Complete(targetSolution, new ComponentIdentity[0],
+                DateTimeOffset.UtcNow);
+            Assert.IsTrue(comparer.Compare(source, emptyTarget).All(item =>
+                item.Presence == MembershipPresence.OnlyInSource));
+            var emptySource = MembershipSnapshot.Complete(sourceSolution, new ComponentIdentity[0],
+                DateTimeOffset.UtcNow);
+            Assert.IsTrue(comparer.Compare(emptySource, target).All(item =>
+                item.Presence == MembershipPresence.OnlyInTarget));
+        }
+
+        [TestMethod, TestCategory("Phase2G3")]
+        public void Type62SiteMapLookupCreatesVerifiedPortableIdentityAndPreservesEvidence()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
             var siteMapIdUnique = Guid.NewGuid();
@@ -2526,10 +2622,9 @@ namespace D365SolutionComparer.Tests
             var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                 new SolutionComponentRecord(componentId, 62, objectId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:62", result.SemanticKind);
-            Assert.IsNull(result.ComparisonKey);
-            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SiteMap, result.SemanticKind);
+            Assert.AreEqual("new_EduNavigation", result.ComparisonKey);
             var evidence = result.DiagnosticEvidence.First();
             StringAssert.Contains(evidence, "sitemapid=" + objectId.ToString("D"));
             StringAssert.Contains(evidence, "sitemapnameunique='new_EduNavigation'");
@@ -2549,7 +2644,7 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "DistinctCandidateSiteMapNames=['new_EduNavigation']");
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
         public void Type62SiteMapLookupBatchesDeduplicatesAndKeepsStableGrouping()
         {
             var solution = Solution();
@@ -2558,14 +2653,16 @@ namespace D365SolutionComparer.Tests
                 new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 62, objectId),
                     IdentityResolutionStatus.Unresolved)).ToArray();
             var queriedIds = new List<Guid>();
+            var indexById = objectIds.Select((id, index) => new { id, index })
+                .ToDictionary(item => item.id, item => item.index);
             var service = SiteMapService(solution, query =>
             {
                 var ids = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToList();
                 Assert.IsTrue(ids.Count <= 200);
                 Assert.AreEqual(ids.Count, ids.Distinct().Count());
                 queriedIds.AddRange(ids);
-                return Rows(ids.Select((id, index) => SiteMap(id, "new_SiteMap" + index,
-                    "Site map " + index, Guid.NewGuid(), true, false)).ToArray());
+                return Rows(ids.Select(id => SiteMap(id, "new_SiteMap" + indexById[id],
+                    "Site map " + indexById[id], Guid.NewGuid(), true, false)).ToArray());
             });
             var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
 
@@ -2578,14 +2675,14 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(3, counter.TotalRequests);
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:62");
-            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
+                item.SemanticKind == ComponentSemanticKinds.SiteMap);
+            Assert.AreEqual(MembershipCoverageBucketType.SemanticKind, bucket.BucketType);
+            Assert.AreEqual("Site Map", bucket.DisplayName);
+            Assert.AreEqual(202, bucket.Resolved);
             Assert.AreEqual(202, bucket.AuditEvidence.Count);
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
         public void Type62MissingDuplicateAndBlankCandidatesRemainDiagnosticOnly()
         {
             var solution = Solution(); var missingId = Guid.NewGuid(); var duplicateId = Guid.NewGuid();
@@ -2613,11 +2710,38 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "MissingRequestedObjectIdCount=1");
             StringAssert.Contains(summary, "BlankSiteMapNameUniqueCount=1");
             StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
-            Assert.IsTrue(result.Components.All(item => item.Status == IdentityResolutionStatus.Unsupported &&
-                item.ComparisonKey == null));
+            CollectionAssert.AreEqual(new[] { IdentityResolutionStatus.Unresolved,
+                IdentityResolutionStatus.Ambiguous, IdentityResolutionStatus.Unresolved },
+                result.Components.Select(item => item.Status).ToArray());
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
+        public void DuplicateCaseInsensitiveSiteMapCandidatesAreAmbiguous()
+        {
+            var solution = Solution();
+            var firstId = Guid.NewGuid();
+            var secondId = Guid.NewGuid();
+            var records = new[] { firstId, secondId }.Select(id => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 62, id),
+                IdentityResolutionStatus.Unresolved)).ToArray();
+            var service = SiteMapService(solution, query => Rows(
+                SiteMap(firstId, "new_EDU", "First", Guid.NewGuid(), true, false),
+                SiteMap(secondId, "NEW_edu", "Second", Guid.NewGuid(), true, false)));
+
+            var result = new DataverseComponentIdentityResolver().ResolveSnapshot(service,
+                MembershipSnapshot.Complete(solution, records, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+
+            Assert.IsTrue(result.Components.All(item =>
+                item.Status == IdentityResolutionStatus.Ambiguous));
+            Assert.IsTrue(result.Components.All(item => item.ComparisonKey == null));
+            Assert.IsTrue(result.Components.All(item => item.SemanticKind == ComponentSemanticKinds.SiteMap));
+            Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
+                evidence.Contains("not unique among correlated Type-62 records"))));
+        }
+
+        [TestMethod, TestCategory("Phase2G3")]
         public void Type62ConflictingAndIncompleteResponsesRemainConservative()
         {
             var solution = Solution(); var conflictId = Guid.NewGuid();
@@ -2627,7 +2751,7 @@ namespace D365SolutionComparer.Tests
                 SiteMapService(solution, query => Rows(conflicting)), solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 62, conflictId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, conflict.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, conflict.Status);
             Assert.IsNull(conflict.ComparisonKey);
             Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
             Assert.IsTrue(conflict.DiagnosticEvidence.Any(item => item.Contains("sitemapname='Conflict'")));
@@ -2645,13 +2769,13 @@ namespace D365SolutionComparer.Tests
                     return rows;
                 }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 62, incompleteId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, incomplete.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, incomplete.Status);
             Assert.IsNull(incomplete.ComparisonKey);
             Assert.IsTrue(incomplete.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
         }
 
-        [TestMethod]
-        public void Type62IncompleteRowPreservesEveryAvailableFieldWithoutCreatingIdentity()
+        [TestMethod, TestCategory("Phase2G3")]
+        public void Type62IncompleteRowPreservesEveryAvailableFieldAndRemainsUnresolved()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
             var row = new Entity("sitemap", objectId)
@@ -2665,7 +2789,7 @@ namespace D365SolutionComparer.Tests
                 SiteMapService(solution, query => Rows(row)), solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 62, objectId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.IsNull(result.ComparisonKey);
             var evidence = result.DiagnosticEvidence.First();
             StringAssert.Contains(evidence, "matched but returned incomplete data");
@@ -2676,7 +2800,7 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(evidence, "ismanaged=(not supplied)");
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
         public void Type62FaultIsDiagnosticAndCancellationPropagates()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
@@ -2684,8 +2808,8 @@ namespace D365SolutionComparer.Tests
                 SiteMapService(solution, query => throw new FaultException("Site Map denied")),
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 62, objectId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
-            Assert.AreEqual("unsupported:componenttype:62", faulted.SemanticKind);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, faulted.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SiteMap, faulted.SemanticKind);
             Assert.IsNull(faulted.ComparisonKey);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "Site Map denied");
 
@@ -2702,8 +2826,8 @@ namespace D365SolutionComparer.Tests
             }
         }
 
-        [TestMethod]
-        public void Type62CandidateNamesCannotCreateMembershipMatches()
+        [TestMethod, TestCategory("Phase2G3")]
+        public void Type62PortableNamesCreateCaseInsensitiveMembershipMatch()
         {
             var sourceSolution = Solution();
             var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
@@ -2723,13 +2847,42 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
 
-            Assert.AreEqual(2, compared.Count);
-            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
-            Assert.IsNull(source.ComparisonKey);
-            Assert.IsNull(target.ComparisonKey);
+            Assert.AreEqual(1, compared.Count);
+            Assert.AreEqual(MembershipPresence.PresentInBoth, compared.Single().Presence);
+            Assert.AreEqual("new_EduNavigation", source.ComparisonKey);
+            Assert.AreEqual("NEW_EDUNAVIGATION", target.ComparisonKey);
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
+        public void UnresolvedOppositeSiteMapCoverageCannotProveAbsence()
+        {
+            var sourceSolution = Solution();
+            var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
+                Guid.NewGuid(), sourceSolution.UniqueName);
+            var sourceId = Guid.NewGuid();
+            var targetId = Guid.NewGuid();
+            var resolver = new DataverseComponentIdentityResolver();
+            var source = resolver.Resolve(SiteMapService(sourceSolution, query => Rows(
+                    SiteMap(sourceId, "new_SourceOnlyCandidate", "Source", Guid.NewGuid(), true, false))),
+                sourceSolution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 62, sourceId),
+                CancellationToken.None);
+            var target = resolver.Resolve(SiteMapService(targetSolution, query => Rows(
+                    SiteMap(targetId, " ", "Unresolved", Guid.NewGuid(), true, true))),
+                targetSolution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 62, targetId),
+                CancellationToken.None);
+
+            var compared = new SolutionMembershipComparer().Compare(
+                MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
+                MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
+
+            Assert.AreEqual(MembershipPresence.Indeterminate,
+                compared.Single(item => item.Source == source).Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.None,
+                compared.Single(item => item.Source == source).AbsenceEvidence);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, target.Status);
+        }
+
+        [TestMethod, TestCategory("Phase2G3")]
         public void Type62MissingObjectIdDoesNotQuerySiteMap()
         {
             var solution = Solution(); int queryCount = 0;
@@ -2738,8 +2891,8 @@ namespace D365SolutionComparer.Tests
                 new SolutionComponentRecord(Guid.NewGuid(), 62, null), CancellationToken.None);
 
             Assert.AreEqual(0, queryCount);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:62", result.SemanticKind);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SiteMap, result.SemanticKind);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
         }
@@ -4045,17 +4198,21 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(records.Count, result.Components.Count);
             Assert.IsTrue(result.Components.Select((item, index) => ReferenceEquals(item.Record,
                 records[index].Record)).All(item => item));
-            var expectedStatus = componentType == 31
+            var expectedStatus = componentType == 31 || componentType == 62
                 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported;
             Assert.IsTrue(result.Components.All(item =>
                 item.Status == expectedStatus && item.ComparisonKey == null));
 
+            var expectedSemanticKind = componentType == 62 ? ComponentSemanticKinds.SiteMap :
+                "unsupported:componenttype:" + componentType;
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:" + componentType);
+                item.SemanticKind == expectedSemanticKind);
             Assert.AreEqual(records.Count, coverage.TotalCandidates);
-            Assert.AreEqual(componentType == 31 ? 0 : records.Count, coverage.Unsupported);
+            Assert.AreEqual(componentType == 31 || componentType == 62 ? 0 : records.Count,
+                coverage.Unsupported);
             Assert.AreEqual(0, coverage.Resolved);
-            Assert.AreEqual(componentType == 31 ? records.Count : 0, coverage.Unresolved);
+            Assert.AreEqual(componentType == 31 || componentType == 62 ? records.Count : 0,
+                coverage.Unresolved);
             Assert.AreEqual(0, coverage.Ambiguous);
             Assert.AreEqual(1, coverage.DiagnosticGroups.Count);
             Assert.AreEqual(records.Count, coverage.DiagnosticGroups.Single().Count);
@@ -4063,7 +4220,9 @@ namespace D365SolutionComparer.Tests
                 coverage.DiagnosticGroups.Single().ResolutionStatus);
             Assert.AreEqual(componentType == 31
                     ? "No report row matched the component object ID, so signed Report identity could not be verified."
-                    : "No identity resolver supports this known component type.",
+                    : componentType == 62
+                        ? "No Site Map row matched the component object ID."
+                        : "No identity resolver supports this known component type.",
                 coverage.DiagnosticGroups.Single().Diagnostic);
             Assert.AreEqual(records.Count, coverage.AuditEvidence.Count);
             CollectionAssert.AreEquivalent(records.Select(item => item.Record.SolutionComponentId).ToArray(),
@@ -4151,7 +4310,7 @@ namespace D365SolutionComparer.Tests
                         "formidunique", "componentstate", "ismanaged" };
                 case 62:
                     return new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique",
-                        "isappaware", "componentstate", "ismanaged" };
+                        "isappaware", "sitemapxml", "componentstate", "ismanaged" };
                 case 300:
                     return new[] { "canvasappid", "name", "displayname", "uniquecanvasappid",
                         "componentstate", "ismanaged" };
@@ -4485,7 +4644,7 @@ namespace D365SolutionComparer.Tests
         {
             Assert.AreEqual("sitemap", query.EntityName);
             CollectionAssert.AreEquivalent(new[] { "sitemapid", "sitemapnameunique", "sitemapname",
-                "sitemapidunique", "isappaware", "componentstate", "ismanaged" },
+                "sitemapidunique", "isappaware", "sitemapxml", "componentstate", "ismanaged" },
                 query.ColumnSet.Columns.ToArray());
             Assert.AreEqual(1, query.Criteria.Conditions.Count);
             var condition = query.Criteria.Conditions.Single();
@@ -4505,6 +4664,7 @@ namespace D365SolutionComparer.Tests
                 ["sitemapname"] = name,
                 ["sitemapidunique"] = siteMapIdUnique,
                 ["isappaware"] = isAppAware,
+                ["sitemapxml"] = "<SiteMap><Area Id='area' /></SiteMap>",
                 ["componentstate"] = new OptionSetValue(0),
                 ["ismanaged"] = isManaged
             };

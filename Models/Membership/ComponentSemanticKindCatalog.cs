@@ -18,6 +18,7 @@ namespace D365SolutionComparer.Models.Membership
         public const string Report = "report";
         public const string AppModule = "appmodule";
         public const string TeamTemplate = "teamtemplate";
+        public const string SiteMap = "sitemap";
         internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
         internal const string ReportCandidateTypeKey = "report:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
@@ -65,6 +66,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 20: return SecurityRole;
                 case 29: return Process;
                 case 61: return WebResource;
+                case 62: return SiteMap;
                 case 80: return AppModule;
                 case 380: return EnvironmentVariableDefinition;
                 default:

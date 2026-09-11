@@ -71,7 +71,7 @@ namespace D365SolutionComparer.Services.Membership
                 DisplayPresence(true, item, source), DisplayPresence(false, item, target),
                 DisplayMembershipStatus(item, source, target),
                 DisplayResolution(item.Source, source), DisplayResolution(item.Target, target),
-                BuildDiagnostic(item, source, target));
+                BuildDiagnostic(item, source, target), item);
         }
 
         private static string DisplayKind(ComponentIdentity identity)
@@ -90,6 +90,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "report": return "Signed Report";
                 case "appmodule": return "Model-driven App / AppModule";
                 case "teamtemplate": return "Team Template";
+                case "sitemap": return "Site Map";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -175,6 +176,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.Report: return "Signed Report";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
+                case ComponentSemanticKinds.SiteMap: return "Site Map";
                 default: return DisplayKind(identity);
             }
         }

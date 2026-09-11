@@ -16,6 +16,8 @@ namespace D365SolutionComparer.Services.Membership
         private readonly Dictionary<string, Entity> entityRows =
             new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
 
+        internal ParentEntityMetadataInventory ParentMetadata { get; set; }
+
         public bool OptionSetCatalogAttempted { get; private set; }
         public OptionSetMetadataBase[] OptionSetCatalog { get; private set; }
         public string OptionSetCatalogFailure { get; private set; }

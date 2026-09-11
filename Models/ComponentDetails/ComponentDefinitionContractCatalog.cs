@@ -40,7 +40,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                     ComponentSemanticKinds.ConnectionReference, "connectionreferencedisplayname",
                     "connectorid", "description"),
                 [ComponentSemanticKinds.AppModule] = Contract(ComponentSemanticKinds.AppModule,
-                    "name", "description", "clienttype", "formfactor", "navigationtype")
+                    "name", "description", "clienttype", "formfactor", "navigationtype"),
+                [ComponentSemanticKinds.SiteMap] = Contract(ComponentSemanticKinds.SiteMap,
+                    "sitemapname", "isappaware", "sitemapxml")
             };
 
         public static ComponentDefinitionContract For(string semanticKind)
@@ -74,6 +76,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 return new[] { "connectionreferenceid", "connectionreferencelogicalname", "componentstate", "ismanaged" };
             if (string.Equals(kind, ComponentSemanticKinds.AppModule, StringComparison.OrdinalIgnoreCase))
                 return new[] { "appmoduleid", "appmoduleidunique", "uniquename", "componentstate", "ismanaged" };
+            if (string.Equals(kind, ComponentSemanticKinds.SiteMap, StringComparison.OrdinalIgnoreCase))
+                return new[] { "sitemapid", "sitemapidunique", "sitemapnameunique",
+                    "componentstate", "ismanaged" };
             return Enumerable.Empty<string>();
         }
     }

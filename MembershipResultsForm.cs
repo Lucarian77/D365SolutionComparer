@@ -93,16 +93,28 @@ namespace D365SolutionComparer
             AddColumn("SourcePresence", "Source Presence", 95);
             AddColumn("TargetPresence", "Target Presence", 95);
             AddColumn("MembershipStatus", "Membership Status", 145);
+            AddColumn("DefinitionStatus", "Definition Status", 110);
+            AddColumn("ChangedProperties", "Changed Properties", 180);
             AddColumn("SourceResolutionStatus", "Source Resolution Status", 120);
             AddColumn("TargetResolutionStatus", "Target Resolution Status", 120);
             AddColumn("Diagnostic", "Diagnostic / Reason", 260);
             AddColumn("SourceRawComponentType", "Source Raw Component Type", 90);
             AddColumn("TargetRawComponentType", "Target Raw Component Type", 90);
             resultsGrid.CellFormatting += ResultsGrid_CellFormatting;
+            resultsGrid.CellDoubleClick += ResultsGrid_CellDoubleClick;
             resultsGrid.DataSource = presentation.Rows.ToList();
 
             Controls.Add(resultsGrid);
             Controls.Add(header);
+        }
+
+        private void ResultsGrid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            var row = resultsGrid.Rows[e.RowIndex].DataBoundItem as MembershipResultRow;
+            if (row?.DefinitionDetail == null) return;
+            using (var form = new ComponentDefinitionDetailsForm(row.DefinitionDetail))
+                form.ShowDialog(this);
         }
 
         private void CoverageDetails_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)

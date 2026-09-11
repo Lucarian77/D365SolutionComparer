@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using D365SolutionComparer.Models.ComponentDetails;
 
 namespace D365SolutionComparer.Models.Membership
 {
@@ -110,7 +111,9 @@ namespace D365SolutionComparer.Models.Membership
         internal MembershipResultRow(MembershipPresence presence, ComponentIdentity source, ComponentIdentity target,
             string componentKind, string portableKey, string sourcePresence, string targetPresence,
             string membershipStatus, string sourceResolutionStatus, string targetResolutionStatus,
-            string diagnostic)
+            string diagnostic, MembershipCompareResult comparison = null,
+            string definitionStatus = "", string changedProperties = "",
+            ComponentDefinitionDetailPresentation definitionDetail = null)
         {
             Presence = presence;
             SourceIdentity = source;
@@ -123,6 +126,10 @@ namespace D365SolutionComparer.Models.Membership
             SourceResolutionStatus = sourceResolutionStatus;
             TargetResolutionStatus = targetResolutionStatus;
             Diagnostic = diagnostic;
+            Comparison = comparison;
+            DefinitionStatus = definitionStatus ?? string.Empty;
+            ChangedProperties = changedProperties ?? string.Empty;
+            DefinitionDetail = definitionDetail;
             SourceRawComponentType = source?.Record.ComponentType;
             TargetRawComponentType = target?.Record.ComponentType;
         }
@@ -130,6 +137,8 @@ namespace D365SolutionComparer.Models.Membership
         internal ComponentIdentity SourceIdentity { get; }
         internal ComponentIdentity TargetIdentity { get; }
         internal MembershipPresence Presence { get; }
+        internal MembershipCompareResult Comparison { get; }
+        internal ComponentDefinitionDetailPresentation DefinitionDetail { get; }
         public string ComponentKind { get; }
         public string PortableKey { get; }
         public string SourcePresence { get; }
@@ -138,11 +147,20 @@ namespace D365SolutionComparer.Models.Membership
         public string SourceResolutionStatus { get; }
         public string TargetResolutionStatus { get; }
         public string Diagnostic { get; }
+        public string DefinitionStatus { get; }
+        public string ChangedProperties { get; }
         public int? SourceRawComponentType { get; }
         public int? TargetRawComponentType { get; }
 
         internal bool HasResolutionStatus(IdentityResolutionStatus status) =>
             SourceIdentity?.Status == status || TargetIdentity?.Status == status;
+
+        internal MembershipResultRow WithDefinition(string definitionStatus,
+            string changedProperties, ComponentDefinitionDetailPresentation definitionDetail) =>
+            new MembershipResultRow(Presence, SourceIdentity, TargetIdentity, ComponentKind,
+                PortableKey, SourcePresence, TargetPresence, MembershipStatus,
+                SourceResolutionStatus, TargetResolutionStatus, Diagnostic, Comparison,
+                definitionStatus, changedProperties, definitionDetail);
     }
 
     public sealed class MembershipComparisonPresentation

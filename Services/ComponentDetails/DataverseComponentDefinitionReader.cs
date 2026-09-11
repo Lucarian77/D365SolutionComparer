@@ -34,7 +34,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.GlobalChoice,
                 ComponentSemanticKinds.EnvironmentVariableDefinition,
                 ComponentSemanticKinds.ConnectionReference,
-                ComponentSemanticKinds.AppModule
+                ComponentSemanticKinds.AppModule,
+                ComponentSemanticKinds.SiteMap
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -82,6 +83,11 @@ namespace D365SolutionComparer.Services.ComponentDetails
                         diagnostic: "The resolved membership record has no usable object ID."));
             }
 
+            if (membership.Components.Any(item => item.Status == IdentityResolutionStatus.Resolved &&
+                (item.SemanticKind == ComponentSemanticKinds.Column ||
+                 item.SemanticKind == ComponentSemanticKinds.Relationship)))
+                ParentEntityMetadataReader.Ensure(context, membership.Components, cancellationToken);
+
             ReadTables(context, Pending(membership, results, ComponentSemanticKinds.Table),
                 results, cancellationToken);
             ReadAttributes(context, Pending(membership, results, ComponentSemanticKinds.Column),
@@ -100,6 +106,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 EntityDefinitionConfiguration.ConnectionReference, results, cancellationToken);
             ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.AppModule),
                 EntityDefinitionConfiguration.AppModule, results, cancellationToken);
+            ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.SiteMap),
+                EntityDefinitionConfiguration.SiteMap, results, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
             var ordered = membership.Components.Select(identity =>
@@ -184,111 +192,36 @@ namespace D365SolutionComparer.Services.ComponentDetails
 
         private static void ReadAttributes(DataverseReadContext context,
             IReadOnlyList<ComponentIdentity> identities,
-            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken)
-        {
-            var representatives = DistinctRepresentatives(identities);
-            var remaining = new List<ComponentIdentity>();
-            foreach (var identity in representatives)
-            {
-                AttributeMetadata cached;
-                if (context.MetadataCache.TryGetAttribute(identity.Record.ObjectId.Value, out cached))
-                    Set(results, Available(identity, AttributeProperties(cached)));
-                else remaining.Add(identity);
-            }
-            foreach (var batch in Batch(remaining))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
-                {
-                    var attributeQuery = new AttributeQueryExpression
-                    {
-                        Properties = MetadataProperties(ComponentSemanticKinds.Column,
-                            "MetadataId", "LogicalName"),
-                        Criteria = MetadataIdFilter(batch)
-                    };
-                    var query = new EntityQueryExpression
-                    {
-                        Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
-                        AttributeQuery = attributeQuery
-                    };
-                    var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
-                        as RetrieveMetadataChangesResponse;
-                    var entities = response?.EntityMetadata;
-                    if (entities == null)
-                    {
-                        SetUnresolved(batch, results,
-                            "Column metadata retrieval returned no metadata collection.");
-                        continue;
-                    }
-                    var metadata = entities.Where(item => item?.Attributes != null)
-                        .SelectMany(item => item.Attributes).Where(item => item != null).ToList();
-                    foreach (var item in metadata) context.MetadataCache.Store(item);
-                    CorrelateMetadata(batch, metadata, item => item.MetadataId,
-                        item => AttributeProperties(item), "column", results);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (FaultException ex)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    SetUnresolved(batch, results, "Column metadata retrieval failed: " + ex.Message);
-                }
-            }
-            CopyRepeatedObjectResults(identities, representatives, results);
-        }
+            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken) =>
+            ReadChildren(context, identities, results, cancellationToken);
 
         private static void ReadRelationships(DataverseReadContext context,
             IReadOnlyList<ComponentIdentity> identities,
+            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken) =>
+            ReadChildren(context, identities, results, cancellationToken);
+
+        private static void ReadChildren(DataverseReadContext context,
+            IReadOnlyList<ComponentIdentity> identities,
             IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken)
         {
-            var representatives = DistinctRepresentatives(identities);
-            var remaining = new List<ComponentIdentity>();
-            foreach (var identity in representatives)
-            {
-                RelationshipMetadataBase cached;
-                if (context.MetadataCache.TryGetRelationship(identity.Record.ObjectId.Value, out cached))
-                    Set(results, Available(identity, RelationshipProperties(cached)));
-                else remaining.Add(identity);
-            }
-            foreach (var batch in Batch(remaining))
+            foreach (var identity in identities)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                try
-                {
-                    var relationshipQuery = new RelationshipQueryExpression
-                    {
-                        Properties = MetadataProperties(ComponentSemanticKinds.Relationship,
-                            "MetadataId", "SchemaName"),
-                        Criteria = MetadataIdFilter(batch)
-                    };
-                    var query = new EntityQueryExpression
-                    {
-                        Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
-                        RelationshipQuery = relationshipQuery
-                    };
-                    var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
-                        as RetrieveMetadataChangesResponse;
-                    var entities = response?.EntityMetadata;
-                    if (entities == null)
-                    {
-                        SetUnresolved(batch, results,
-                            "Relationship metadata retrieval returned no metadata collection.");
-                        continue;
-                    }
-                    var metadata = entities.SelectMany(Relationships).Where(item => item != null).ToList();
-                    foreach (var item in metadata) context.MetadataCache.Store(item);
-                    CorrelateMetadata(batch, metadata, item => item.MetadataId,
-                        item => RelationshipProperties(item), "relationship", results,
-                        collapseEquivalentDuplicates: true);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (FaultException ex)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    SetUnresolved(batch, results,
-                        "Relationship metadata retrieval failed: " + ex.Message);
-                }
+                var correlation = context.MetadataCache.ParentMetadata.Correlate(
+                    identity.SemanticKind, identity.Record.ObjectId.Value);
+                if (correlation.Status == IdentityResolutionStatus.Ambiguous)
+                    Set(results, new ComponentDefinition(identity, ComponentDefinitionReadStatus.Ambiguous,
+                        diagnostic: correlation.Diagnostic, diagnosticEvidence: correlation.Evidence));
+                else if (correlation.Status != IdentityResolutionStatus.Resolved ||
+                    !StringComparer.OrdinalIgnoreCase.Equals(identity.ComparisonKey, correlation.PortableKey))
+                    Set(results, new ComponentDefinition(identity, ComponentDefinitionReadStatus.Unresolved,
+                        diagnostic: string.IsNullOrEmpty(correlation.Diagnostic)
+                            ? "The correlated metadata no longer agrees with the captured portable identity."
+                            : correlation.Diagnostic, diagnosticEvidence: correlation.Evidence));
+                else Set(results, Available(identity, correlation.Attribute != null
+                    ? AttributeProperties(correlation.Attribute)
+                    : RelationshipProperties(correlation.Relationship)));
             }
-            CopyRepeatedObjectResults(identities, representatives, results);
         }
 
         private static void ReadGlobalChoices(DataverseReadContext context,
@@ -424,7 +357,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
             IEnumerable<KeyValuePair<string, string>> properties, string evidence = null) =>
             new ComponentDefinition(identity, ComponentDefinitionReadStatus.Available,
                 CompleteProperties(identity.SemanticKind, properties),
-                diagnosticEvidence: evidence == null ? null : new[] { evidence });
+                diagnosticEvidence: identity.DiagnosticEvidence.Concat(evidence == null
+                    ? Enumerable.Empty<string>() : new[] { evidence }));
 
         private static IEnumerable<KeyValuePair<string, string>> CompleteProperties(string semanticKind,
             IEnumerable<KeyValuePair<string, string>> properties)
@@ -465,80 +399,6 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 yield return identities.Skip(offset).Take(Math.Min(BatchSize,
                     identities.Count - offset)).ToList();
         }
-
-        private static MetadataPropertiesExpression MetadataProperties(string semanticKind,
-            params string[] correlationProperties)
-        {
-            var contract = ComponentDefinitionContractCatalog.For(semanticKind);
-            return new MetadataPropertiesExpression(correlationProperties
-                .Concat(contract.ComparableProperties)
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
-        }
-
-        private static MetadataFilterExpression MetadataIdFilter(
-            IEnumerable<ComponentIdentity> identities)
-        {
-            var filter = new MetadataFilterExpression(LogicalOperator.Or);
-            foreach (var identity in identities)
-                filter.Conditions.Add(new MetadataConditionExpression("MetadataId",
-                    MetadataConditionOperator.Equals, identity.Record.ObjectId.Value));
-            return filter;
-        }
-
-        private static IEnumerable<RelationshipMetadataBase> Relationships(EntityMetadata entity)
-        {
-            if (entity == null) return Enumerable.Empty<RelationshipMetadataBase>();
-            return (entity.OneToManyRelationships ?? new OneToManyRelationshipMetadata[0])
-                .Cast<RelationshipMetadataBase>()
-                .Concat((entity.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0])
-                    .Cast<RelationshipMetadataBase>())
-                .Concat((entity.ManyToManyRelationships ?? new ManyToManyRelationshipMetadata[0])
-                    .Cast<RelationshipMetadataBase>());
-        }
-
-        private static void CorrelateMetadata<T>(IReadOnlyList<ComponentIdentity> identities,
-            IEnumerable<T> returned, Func<T, Guid?> metadataId,
-            Func<T, IEnumerable<KeyValuePair<string, string>>> properties, string family,
-            IDictionary<Guid, ComponentDefinition> results,
-            bool collapseEquivalentDuplicates = false)
-        {
-            var requested = new HashSet<Guid>(identities.Select(item => item.Record.ObjectId.Value));
-            var rows = returned.ToList();
-            if (rows.Any(item => !metadataId(item).HasValue ||
-                !requested.Contains(metadataId(item).Value)))
-            {
-                SetUnresolved(identities, results, family +
-                    " metadata retrieval returned conflicting or incomplete identifiers.");
-                return;
-            }
-            var indexed = rows.GroupBy(item => metadataId(item).Value)
-                .ToDictionary(group => group.Key, group => group.ToList());
-            foreach (var identity in identities)
-            {
-                List<T> matches;
-                if (!indexed.TryGetValue(identity.Record.ObjectId.Value, out matches))
-                {
-                    Set(results, Unresolved(identity, "No " + family +
-                        " metadata matched the component object ID."));
-                    continue;
-                }
-                if (collapseEquivalentDuplicates && matches.Count > 1)
-                    matches = matches.GroupBy(item => PropertySignature(
-                        CompleteProperties(identity.SemanticKind, properties(item))),
-                        StringComparer.Ordinal).Select(group => group.First()).ToList();
-                if (matches.Count != 1)
-                    Set(results, Ambiguous(identity, "Multiple conflicting " + family +
-                        " metadata records matched the component object ID."));
-                else Set(results, Available(identity, properties(matches[0])));
-            }
-        }
-
-        private static string PropertySignature(IEnumerable<KeyValuePair<string, string>> properties) =>
-            string.Join("\u001f", properties.OrderBy(item => item.Key,
-                StringComparer.OrdinalIgnoreCase).Select(item => item.Key.Length.ToString(
-                    CultureInfo.InvariantCulture) + ":" + item.Key + "=" +
-                    (item.Value == null ? "<null>" : item.Value.Length.ToString(
-                        CultureInfo.InvariantCulture) + ":" + item.Value)));
 
         private static IReadOnlyList<ComponentIdentity> DistinctRepresentatives(
             IEnumerable<ComponentIdentity> identities) => identities
@@ -742,6 +602,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
             public static readonly EntityDefinitionConfiguration AppModule = Create("appmodule",
                 "appmoduleid", "uniquename", "name", "description", "clienttype", "formfactor",
                 "navigationtype");
+            public static readonly EntityDefinitionConfiguration SiteMap = Create("sitemap",
+                "sitemapid", "sitemapnameunique", "sitemapname", "isappaware", "sitemapxml");
 
             private static EntityDefinitionConfiguration Create(string entityName, string primaryId,
                 string identityColumn, params string[] comparableColumns)
