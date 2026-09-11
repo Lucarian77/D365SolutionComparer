@@ -16,6 +16,9 @@ namespace D365SolutionComparer.Services.Membership
         private readonly Dictionary<string, Entity> entityRows =
             new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
 
+        // Raw membership ID -> uniquely correlated definition (possibly an activation's parent).
+        internal readonly Dictionary<Guid, Entity> WorkflowDefinitions = new Dictionary<Guid, Entity>();
+
         internal ParentEntityMetadataInventory ParentMetadata { get; set; }
 
         public bool OptionSetCatalogAttempted { get; private set; }

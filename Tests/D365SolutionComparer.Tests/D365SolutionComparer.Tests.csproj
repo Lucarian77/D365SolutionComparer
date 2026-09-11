@@ -50,6 +50,8 @@
     <Compile Include="MembershipReaderTests.cs" />
     <Compile Include="ComponentIdentityResolverTests.cs" />
     <Compile Include="ProcessWorkflowIdentityResolverTests.cs" />
+    <Compile Include="WorkflowComponentComparisonTests.cs" />
+    <Compile Include="MembershipComparisonPhase2G5Tests.cs" />
     <Compile Include="MembershipComparisonTests.cs" />
     <Compile Include="MembershipPerformanceTests.cs" />
     <Compile Include="MembershipPresentationTests.cs" />

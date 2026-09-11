@@ -75,6 +75,7 @@ namespace D365SolutionComparer.Services.Membership
             private readonly DataverseReadContext context;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
+            private bool workflowLookupIncomplete;
             private readonly Dictionary<Guid, ResolutionValue> parentWorkflowCache =
                 new Dictionary<Guid, ResolutionValue>();
             private readonly Dictionary<int, DefinitionMapping> definitionMappings =
@@ -143,13 +144,28 @@ namespace D365SolutionComparer.Services.Membership
                     value = ResolveOne(cacheKey, cancellationToken);
                     identityCache[cacheKey] = value;
                 }
-                return value.ToIdentity(record);
+                return ToIdentity(value, record);
+            }
+
+            private ComponentIdentity ToIdentity(ResolutionValue value, SolutionComponentRecord record)
+            {
+                Entity row;
+                string reason;
+                return value.Kind == ComponentSemanticKinds.Process && record.ObjectId.HasValue &&
+                    context.MetadataCache.WorkflowDefinitions.TryGetValue(record.ObjectId.Value, out row)
+                    ? new ComponentIdentity(record, value.Status, value.Key, value.Diagnostic, value.Kind,
+                        diagnosticEvidence: value.DiagnosticEvidence,
+                        workflowCandidateKey: WorkflowSemanticPolicy.Candidate(row, out reason),
+                        blockerPortableIdentity: value.BlockerPortableIdentity)
+                    : value.ToIdentity(record);
             }
 
             public IReadOnlyList<ComponentIdentity> ResolveAll(IReadOnlyList<ComponentIdentity> components,
                 CancellationToken cancellationToken)
             {
                 PrepareClassifications(components.Select(item => item.Record), cancellationToken);
+                workflowLookupIncomplete = components.Any(item => item.Record.ComponentType == 29 &&
+                    (!item.Record.ObjectId.HasValue || item.Record.ObjectId.Value == Guid.Empty));
                 ParentEntityMetadataReader.Ensure(context, components, cancellationToken);
                 var results = new ComponentIdentity[components.Count];
                 var pending = new List<PendingRecord>();
@@ -187,7 +203,7 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var item in pending)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    results[item.Index] = identityCache[item.Key].ToIdentity(item.Record);
+                    results[item.Index] = ToIdentity(identityCache[item.Key], item.Record);
                 }
                 return Array.AsReadOnly(results);
             }
@@ -489,17 +505,14 @@ namespace D365SolutionComparer.Services.Membership
                 CancellationToken cancellationToken)
             {
                 var activations = new List<PendingWorkflowActivation>();
-                foreach (var batch in Batch(keys))
+                foreach (var batch in Batch(keys.OrderBy(key => key.ObjectId).ToList()))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
                         var query = new QueryExpression("workflow")
                         {
-                            ColumnSet = new ColumnSet("workflowid", "uniquename", "name", "type", "category",
-                                "primaryentity", "mode", "parentworkflowid", "workflowidunique", "statecode",
-                                "statuscode", "componentstate", "ismanaged", "subprocess", "businessprocesstype",
-                                "modernflowtype", "uiflowtype")
+                            ColumnSet = new ColumnSet(WorkflowSemanticPolicy.Columns)
                         };
                         query.Criteria.AddCondition(new ConditionExpression("workflowid", ConditionOperator.In,
                             batch.Select(item => (object)item.ObjectId).ToArray()));
@@ -512,12 +525,14 @@ namespace D365SolutionComparer.Services.Membership
                             List<Entity> matches;
                             if (!grouped.TryGetValue(key.ObjectId, out matches))
                             {
+                                workflowLookupIncomplete = true;
                                 identityCache[key] = ResolutionValue.Unresolved(key.Kind,
                                     "Raw workflow row was not found.");
                                 continue;
                             }
                             if (matches.Count != 1)
                             {
+                                workflowLookupIncomplete = true;
                                 identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
                                     "A raw workflow lookup returned multiple records.");
                                 continue;
@@ -526,34 +541,44 @@ namespace D365SolutionComparer.Services.Membership
                             var uniqueName = row.GetAttributeValue<string>("uniquename");
                             if (!string.IsNullOrWhiteSpace(uniqueName))
                             {
-                                identityCache[key] = ResolutionValue.FromKey(key.Kind, uniqueName);
+                                context.MetadataCache.WorkflowDefinitions[key.ObjectId] = row;
+                                identityCache[key] = ResolveWorkflowDefinition(row);
                                 continue;
                             }
                             var workflowType = ReadOptionValue(row, "type");
                             if (workflowType == 1)
-                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
-                                    BuildBlankWorkflowDefinitionDiagnostic(row));
+                            {
+                                context.MetadataCache.WorkflowDefinitions[key.ObjectId] = row;
+                                identityCache[key] = ResolveWorkflowDefinition(row);
+                            }
                             else if (workflowType == 2)
                             {
                                 var parent = row.GetAttributeValue<EntityReference>("parentworkflowid");
-                                if (parent == null || parent.Id == Guid.Empty)
+                                if (parent == null || parent.Id == Guid.Empty || parent.LogicalName != "workflow")
+                                {
+                                    workflowLookupIncomplete = true;
                                     identityCache[key] = ResolutionValue.Unresolved(key.Kind,
-                                        "Workflow activation has no parent workflow definition.");
+                                        "Workflow activation has no parent workflow definition.", WorkflowEvidence(row));
+                                }
                                 else activations.Add(new PendingWorkflowActivation(key, parent.Id));
                             }
                             else
+                            {
+                                if (!workflowType.HasValue) workflowLookupIncomplete = true;
                                 identityCache[key] = ResolutionValue.Unresolved(key.Kind,
                                     "Unsupported workflow record type " +
                                     (workflowType.HasValue
                                         ? workflowType.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
                                         : "(missing)") +
-                                    "; parent identity inheritance is limited to documented activation records (type 2).");
+                                    "; parent identity inheritance is limited to documented activation records (type 2).", WorkflowEvidence(row));
+                            }
                         }
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (FaultException ex)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+                        workflowLookupIncomplete = true;
                         foreach (var key in batch)
                             identityCache[key] = ResolutionValue.Unresolved(key.Kind,
                                 "Workflow identity read failed: " + ex.Message);
@@ -566,13 +591,73 @@ namespace D365SolutionComparer.Services.Membership
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     identityCache[activation.Key] = parentWorkflowCache[activation.ParentWorkflowId];
+                    Entity definition;
+                    if (context.MetadataCache.WorkflowDefinitions.TryGetValue(activation.ParentWorkflowId, out definition))
+                        context.MetadataCache.WorkflowDefinitions[activation.Key.ObjectId] = definition;
+                }
+                if (activations.Any(item => identityCache[item.Key].Status != IdentityResolutionStatus.Resolved))
+                    workflowLookupIncomplete = true;
+                ValidateWorkflowCandidates(keys);
+            }
+
+            private ResolutionValue ResolveWorkflowDefinition(Entity row, bool parent = false)
+            {
+                var evidence = WorkflowEvidence(row);
+                var uniqueName = WorkflowSemanticPolicy.Text(row, "uniquename");
+                if (!string.IsNullOrWhiteSpace(uniqueName))
+                    return uniqueName.StartsWith(WorkflowSemanticPolicy.Prefix, StringComparison.OrdinalIgnoreCase)
+                        ? ResolutionValue.Unresolved("process", "Unique name collides with the reserved semantic-candidate namespace.", evidence)
+                        : ResolutionValue.FromKey("process", uniqueName,
+                            parent ? "Portable identity inherited from the parent workflow definition's uniquename." : null, evidence);
+                string reason;
+                var candidate = WorkflowSemanticPolicy.Candidate(row, out reason);
+                return candidate == null
+                    ? ResolutionValue.Unresolved("process", (parent ? "Parent workflow" : "Workflow") +
+                        " definition has a blank uniquename. " + reason, evidence)
+                    : ResolutionValue.FromKey("process", candidate,
+                        "Semantic fallback candidate: name, definition type, category, entity scope and applicable subtype. Not a Microsoft alternate key.", evidence);
+            }
+
+            private void ValidateWorkflowCandidates(IReadOnlyList<LookupKey> keys)
+            {
+                var definitions = context.MetadataCache.WorkflowDefinitions.Values.GroupBy(row => row.Id)
+                    .Select(group => group.First()).ToList();
+                foreach (var key in keys)
+                {
+                    var value = identityCache[key];
+                    if (value.Status != IdentityResolutionStatus.Resolved ||
+                        !value.Key.StartsWith(WorkflowSemanticPolicy.Prefix, StringComparison.Ordinal)) continue;
+                    Entity row = context.MetadataCache.WorkflowDefinitions[key.ObjectId];
+                    var sameName = definitions.Where(other => StringComparer.OrdinalIgnoreCase.Equals(
+                        WorkflowSemanticPolicy.Text(row, "name"), WorkflowSemanticPolicy.Text(other, "name"))).ToList();
+                    string reason;
+                    if (workflowLookupIncomplete || sameName.Any(other => WorkflowSemanticPolicy.Candidate(other, out reason) == null))
+                        identityCache[key] = ResolutionValue.Unresolved("process",
+                            "Incomplete workflow evidence prevents validation of semantic fallback uniqueness.", value.DiagnosticEvidence);
+                    else if (sameName.Count(other => StringComparer.OrdinalIgnoreCase.Equals(value.Key,
+                        WorkflowSemanticPolicy.Candidate(other, out reason))) > 1)
+                        identityCache[key] = ResolutionValue.Ambiguous("process",
+                            "Duplicate fallback candidates; deployment state and local IDs cannot disambiguate them.",
+                            value.DiagnosticEvidence, value.Key);
                 }
             }
 
             private void ResolveParentWorkflowDefinitions(IReadOnlyList<Guid> parentIds,
                 CancellationToken cancellationToken)
             {
-                var missing = parentIds.Where(id => !parentWorkflowCache.ContainsKey(id)).ToList();
+                foreach (var id in parentIds)
+                {
+                    Entity cached;
+                    if (!parentWorkflowCache.ContainsKey(id) && context.MetadataCache.WorkflowDefinitions.TryGetValue(id, out cached))
+                        parentWorkflowCache[id] = ReadOptionValue(cached, "type") == 1
+                            ? ResolveWorkflowDefinition(cached, true)
+                            : ResolutionValue.Unresolved("process", "Parent workflow record is not a confirmed definition (type 1).", WorkflowEvidence(cached));
+                    ResolutionValue prior;
+                    if (!parentWorkflowCache.ContainsKey(id) && identityCache.TryGetValue(new LookupKey("process", id), out prior))
+                        parentWorkflowCache[id] = prior.Status == IdentityResolutionStatus.Resolved
+                            ? ResolutionValue.Unresolved("process", "No verified parent definition evidence is cached.") : prior;
+                }
+                var missing = parentIds.Where(id => !parentWorkflowCache.ContainsKey(id)).OrderBy(id => id).ToList();
                 foreach (var batch in Batch(missing))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -580,7 +665,7 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         var query = new QueryExpression("workflow")
                         {
-                            ColumnSet = new ColumnSet("workflowid", "uniquename", "type")
+                            ColumnSet = new ColumnSet(WorkflowSemanticPolicy.Columns)
                         };
                         query.Criteria.AddCondition(new ConditionExpression("workflowid", ConditionOperator.In,
                             batch.Select(id => (object)id).ToArray()));
@@ -602,12 +687,8 @@ namespace D365SolutionComparer.Services.Membership
                                     "Parent workflow record is not a confirmed definition (type 1).");
                             else
                             {
-                                var uniqueName = matches[0].GetAttributeValue<string>("uniquename");
-                                parentWorkflowCache[parentId] = string.IsNullOrWhiteSpace(uniqueName)
-                                    ? ResolutionValue.Unresolved("process",
-                                        "Parent workflow definition has a blank uniquename.")
-                                    : ResolutionValue.FromKey("process", uniqueName,
-                                        "Portable identity inherited from the parent workflow definition's uniquename.");
+                                context.MetadataCache.WorkflowDefinitions[parentId] = matches[0];
+                                parentWorkflowCache[parentId] = ResolveWorkflowDefinition(matches[0], true);
                             }
                         }
                     }
@@ -628,6 +709,9 @@ namespace D365SolutionComparer.Services.Membership
                 if (rows.MoreRecords)
                     throw new InvalidOperationException("A bounded workflow identity query unexpectedly returned more records.");
                 var requested = new HashSet<Guid>(requestedIds);
+                if (rows.Entities.Any(row => row == null || row.LogicalName != "workflow" ||
+                    (row.Contains("workflowid") && (!(row["workflowid"] is Guid) || (Guid)row["workflowid"] != row.Id))))
+                    throw new InvalidOperationException("Workflow lookup returned conflicting entity or primary-key evidence.");
                 var grouped = rows.Entities.GroupBy(item => item.Id)
                     .ToDictionary(item => item.Key, item => item.ToList());
                 if (grouped.Keys.Any(id => id == Guid.Empty || !requested.Contains(id)))
@@ -641,7 +725,7 @@ namespace D365SolutionComparer.Services.Membership
                 return option == null ? (int?)null : option.Value;
             }
 
-            private static string BuildBlankWorkflowDefinitionDiagnostic(Entity row)
+            private static IEnumerable<string> WorkflowEvidence(Entity row)
             {
                 var evidence = new[]
                 {
@@ -663,9 +747,8 @@ namespace D365SolutionComparer.Services.Membership
                     "modernflowtype=" + FormatWorkflowEvidence(row, "modernflowtype"),
                     "uiflowtype=" + FormatWorkflowEvidence(row, "uiflowtype")
                 };
-                return "Workflow definition has a blank uniquename. Diagnostic evidence: " +
-                    string.Join("; ", evidence) +
-                    ". Diagnostic evidence only; no field listed above is used as a comparison identity.";
+                return evidence.Concat(new[] { WorkflowSemanticPolicy.Coverage,
+                    "Local identifiers and state/deployment fields are audit evidence only." });
             }
 
             private static string FormatWorkflowEvidence(Entity row, string attributeName)
@@ -3089,22 +3172,25 @@ namespace D365SolutionComparer.Services.Membership
             private sealed class ResolutionValue
             {
                 private ResolutionValue(string kind, IdentityResolutionStatus status, string key, string diagnostic,
-                    IEnumerable<string> diagnosticEvidence)
+                    IEnumerable<string> diagnosticEvidence, string blockerPortableIdentity = null)
                 {
                     Kind = kind;
                     Status = status;
                     Key = key;
                     Diagnostic = diagnostic;
                     DiagnosticEvidence = new List<string>(diagnosticEvidence ?? new string[0]).AsReadOnly();
+                    BlockerPortableIdentity = blockerPortableIdentity;
                 }
                 public string Kind { get; }
                 public IdentityResolutionStatus Status { get; }
                 public string Key { get; }
                 public string Diagnostic { get; }
                 public IReadOnlyList<string> DiagnosticEvidence { get; }
+                public string BlockerPortableIdentity { get; }
                 public ComponentIdentity ToIdentity(SolutionComponentRecord record) =>
                     new ComponentIdentity(record, Status, Key, Diagnostic, Kind,
-                        diagnosticEvidence: DiagnosticEvidence);
+                        diagnosticEvidence: DiagnosticEvidence,
+                        blockerPortableIdentity: BlockerPortableIdentity);
                 public static ResolutionValue FromKey(string kind, string key, string diagnostic = null,
                     IEnumerable<string> diagnosticEvidence = null) =>
                     string.IsNullOrWhiteSpace(key)
@@ -3112,13 +3198,13 @@ namespace D365SolutionComparer.Services.Membership
                     : new ResolutionValue(kind, IdentityResolutionStatus.Resolved, key, diagnostic,
                         diagnosticEvidence);
                 public static ResolutionValue Unresolved(string kind, string diagnostic,
-                    IEnumerable<string> diagnosticEvidence = null) =>
+                    IEnumerable<string> diagnosticEvidence = null, string blockerPortableIdentity = null) =>
                     new ResolutionValue(kind, IdentityResolutionStatus.Unresolved, null, diagnostic,
-                        diagnosticEvidence);
+                        diagnosticEvidence, blockerPortableIdentity);
                 public static ResolutionValue Ambiguous(string kind, string diagnostic,
-                    IEnumerable<string> diagnosticEvidence = null) =>
+                    IEnumerable<string> diagnosticEvidence = null, string blockerPortableIdentity = null) =>
                     new ResolutionValue(kind, IdentityResolutionStatus.Ambiguous, null, diagnostic,
-                        diagnosticEvidence);
+                        diagnosticEvidence, blockerPortableIdentity);
             }
 
             private sealed class PendingWorkflowActivation

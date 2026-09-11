@@ -41,6 +41,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                     "connectorid", "description"),
                 [ComponentSemanticKinds.AppModule] = Contract(ComponentSemanticKinds.AppModule,
                     "name", "description", "clienttype", "formfactor", "navigationtype"),
+                [ComponentSemanticKinds.Process] = Contract(ComponentSemanticKinds.Process,
+                    "type", "category", "primaryentity", "mode", "subprocess",
+                    "businessprocesstype", "modernflowtype", "uiflowtype"),
                 [ComponentSemanticKinds.SiteMap] = Contract(ComponentSemanticKinds.SiteMap,
                     "sitemapname", "isappaware", "sitemapxml")
             };
@@ -76,6 +79,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 return new[] { "connectionreferenceid", "connectionreferencelogicalname", "componentstate", "ismanaged" };
             if (string.Equals(kind, ComponentSemanticKinds.AppModule, StringComparison.OrdinalIgnoreCase))
                 return new[] { "appmoduleid", "appmoduleidunique", "uniquename", "componentstate", "ismanaged" };
+            if (string.Equals(kind, ComponentSemanticKinds.Process, StringComparison.OrdinalIgnoreCase))
+                return new[] { "workflowid", "workflowidunique", "uniquename", "name", "parentworkflowid",
+                    "ownerid", "componentstate", "ismanaged", "statecode", "statuscode" };
             if (string.Equals(kind, ComponentSemanticKinds.SiteMap, StringComparison.OrdinalIgnoreCase))
                 return new[] { "sitemapid", "sitemapidunique", "sitemapnameunique",
                     "componentstate", "ismanaged" };
