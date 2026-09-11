@@ -35,7 +35,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.EnvironmentVariableDefinition,
                 ComponentSemanticKinds.ConnectionReference,
                 ComponentSemanticKinds.AppModule,
-                ComponentSemanticKinds.SiteMap
+                ComponentSemanticKinds.SiteMap,
+                ComponentSemanticKinds.Process
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -94,6 +95,7 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 results, cancellationToken);
             ReadRelationships(context, Pending(membership, results, ComponentSemanticKinds.Relationship),
                 results, cancellationToken);
+            ReadWorkflows(context, Pending(membership, results, ComponentSemanticKinds.Process), results, cancellationToken);
             ReadGlobalChoices(context, Pending(membership, results, ComponentSemanticKinds.GlobalChoice),
                 results, cancellationToken);
             ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.WebResource),
@@ -221,6 +223,25 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 else Set(results, Available(identity, correlation.Attribute != null
                     ? AttributeProperties(correlation.Attribute)
                     : RelationshipProperties(correlation.Relationship)));
+            }
+        }
+
+        private static void ReadWorkflows(DataverseReadContext context,
+            IReadOnlyList<ComponentIdentity> identities, IDictionary<Guid, ComponentDefinition> results,
+            CancellationToken cancellationToken)
+        {
+            foreach (var identity in identities)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Entity row;
+                Dictionary<string, string> properties;
+                string reason;
+                if (!context.MetadataCache.WorkflowDefinitions.TryGetValue(identity.Record.ObjectId.Value, out row))
+                    Set(results, Unresolved(identity, "No verified workflow definition is available in the shared operation cache."));
+                else if (!WorkflowSemanticPolicy.Configuration(row, out properties, out reason))
+                    Set(results, Unresolved(identity, reason));
+                else Set(results, new ComponentDefinition(identity, ComponentDefinitionReadStatus.Available,
+                    properties, WorkflowSemanticPolicy.Coverage, identity.DiagnosticEvidence));
             }
         }
 

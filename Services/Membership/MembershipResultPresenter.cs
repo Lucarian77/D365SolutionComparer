@@ -54,8 +54,15 @@ namespace D365SolutionComparer.Services.Membership
             return items.Select(item => item.Status == IdentityResolutionStatus.Resolved &&
                 duplicateKeys.Contains(IdentityKey(item))
                 ? new ComponentIdentity(item.Record, IdentityResolutionStatus.Ambiguous,
-                    diagnostic: "Multiple membership records resolve to the same identity key: " + item.ComparisonKey,
-                    componentTypeKey: item.ComponentTypeKey, semanticKind: item.SemanticKind)
+                    diagnostic: item.SemanticKind == ComponentSemanticKinds.Process
+                        ? "Duplicate Process / Workflow fallback candidates share this portable semantic identity. Only this identity is ambiguous; unrelated workflow identities remain eligible for definitive absence checks."
+                        : "Multiple membership records resolve to the same identity key: " + item.ComparisonKey,
+                    componentTypeKey: item.ComponentTypeKey, semanticKind: item.SemanticKind,
+                    diagnosticEvidence: item.DiagnosticEvidence,
+                    workflowCandidateKey: item.WorkflowCandidateKey,
+                    blockerPortableIdentity: item.SemanticKind == ComponentSemanticKinds.Process ? item.ComparisonKey : null,
+                    blockerScope: item.SemanticKind == ComponentSemanticKinds.Process
+                        ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind)
                 : item);
         }
 
@@ -150,8 +157,10 @@ namespace D365SolutionComparer.Services.Membership
             if (item.AbsenceEvidence == MembershipAbsenceEvidence.OppositeSolutionAbsent)
                 Add(messages, "Missing is established because the opposite solution is absent.");
             else if (item.AbsenceEvidence == MembershipAbsenceEvidence.CompleteResolvedInventory)
-                Add(messages, "Missing is established from complete identity coverage for the opposite " +
-                    DisplaySemanticKind(item.Source ?? item.Target) + " component kind.");
+                Add(messages, (item.Source ?? item.Target).SemanticKind == ComponentSemanticKinds.Process
+                    ? "Missing is established from complete identity coverage applicable to this Process / Workflow portable identity. Unrelated ambiguous workflow identities do not block this result."
+                    : "Missing is established from complete identity coverage for the opposite " +
+                        DisplaySemanticKind(item.Source ?? item.Target) + " component kind.");
             else if (item.Presence == MembershipPresence.Indeterminate &&
                 (item.Source ?? item.Target).Status == IdentityResolutionStatus.Resolved &&
                 source.State != MembershipSnapshotState.Unavailable && target.State != MembershipSnapshotState.Unavailable)

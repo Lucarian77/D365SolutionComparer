@@ -395,7 +395,7 @@ namespace D365SolutionComparer.Tests
         [TestMethod]
         public void UnsupportedResolvedKindDoesNotIssueDefinitionRequest()
         {
-            var fixture = Fixture(Identity("process", 29, "new_process"));
+            var fixture = Fixture(Identity("securityrole", 20, "new_role"));
             var counter = new DataverseRequestCounter();
             var definition = new DataverseComponentDefinitionReader().Read(fixture.Service,
                 fixture.Snapshot, CancellationToken.None, counter).Definitions.Single();

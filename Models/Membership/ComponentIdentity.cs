@@ -4,6 +4,7 @@ using System.Collections.Generic;
 namespace D365SolutionComparer.Models.Membership
 {
     public enum IdentityResolutionStatus { Unresolved, Resolved, Unsupported, Ambiguous }
+    public enum ResolutionBlockerScope { None, PortableIdentity, SemanticKind }
 
     /// <summary>A type-specific key plus the original record. Display names alone are not identity keys.</summary>
     public sealed class ComponentIdentity
@@ -11,7 +12,8 @@ namespace D365SolutionComparer.Models.Membership
         public ComponentIdentity(SolutionComponentRecord record, IdentityResolutionStatus status,
             string comparisonKey = null, string diagnostic = null, string componentTypeKey = null,
             string semanticKind = null, SolutionComponentDefinitionIdentity registeredDefinition = null,
-            IEnumerable<string> diagnosticEvidence = null)
+            IEnumerable<string> diagnosticEvidence = null, string workflowCandidateKey = null,
+            string blockerPortableIdentity = null, ResolutionBlockerScope blockerScope = ResolutionBlockerScope.None)
         {
             Record = record ?? throw new ArgumentNullException(nameof(record));
             if (!Enum.IsDefined(typeof(IdentityResolutionStatus), status)) throw new ArgumentOutOfRangeException(nameof(status));
@@ -35,6 +37,17 @@ namespace D365SolutionComparer.Models.Membership
             SemanticKind = semanticKind ?? registeredDefinition?.SemanticKind ??
                 ComponentSemanticKinds.FromCanonicalTypeKey(componentTypeKey) ??
                 ComponentSemanticKinds.FromRawComponentType(record.ComponentType);
+            WorkflowCandidateKey = workflowCandidateKey;
+            BlockerPortableIdentity = blockerPortableIdentity;
+            BlockerScope = blockerScope == ResolutionBlockerScope.None && status != IdentityResolutionStatus.Resolved
+                ? (string.IsNullOrWhiteSpace(blockerPortableIdentity)
+                    ? ResolutionBlockerScope.SemanticKind : ResolutionBlockerScope.PortableIdentity)
+                : blockerScope;
+            if (BlockerScope == ResolutionBlockerScope.PortableIdentity &&
+                string.IsNullOrWhiteSpace(BlockerPortableIdentity))
+                throw new ArgumentException("A portable-identity blocker requires its identity.", nameof(blockerPortableIdentity));
+            if (status == IdentityResolutionStatus.Resolved && BlockerScope != ResolutionBlockerScope.None)
+                throw new ArgumentException("Resolved identities cannot carry a resolution blocker.", nameof(blockerScope));
             ComparisonKey = comparisonKey;
             Diagnostic = diagnostic ?? string.Empty;
             RegisteredDefinition = registeredDefinition;
@@ -48,6 +61,10 @@ namespace D365SolutionComparer.Models.Membership
         public string SemanticKind { get; }
         public IdentityResolutionStatus Status { get; }
         public string ComparisonKey { get; }
+        /// <summary>Process-only semantic candidate evidence; never overrides an established uniquename.</summary>
+        public string WorkflowCandidateKey { get; }
+        public string BlockerPortableIdentity { get; }
+        public ResolutionBlockerScope BlockerScope { get; }
         public string Diagnostic { get; }
         public SolutionComponentDefinitionIdentity RegisteredDefinition { get; }
         /// <summary>Per-record audit data that is never used as an identity or diagnostic grouping key.</summary>

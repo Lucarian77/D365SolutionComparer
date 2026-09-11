@@ -134,23 +134,23 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.StartsWith(result.Diagnostic, "Workflow definition has a blank uniquename.");
-            StringAssert.Contains(result.Diagnostic, "workflowid=" + definitionId.ToString("D"));
-            StringAssert.Contains(result.Diagnostic, "name='Diagnostic display name'");
-            StringAssert.Contains(result.Diagnostic, "type=1");
-            StringAssert.Contains(result.Diagnostic, "category=5 ('Modern Flow')");
-            StringAssert.Contains(result.Diagnostic, "primaryentity='account'");
-            StringAssert.Contains(result.Diagnostic, "mode=0");
-            StringAssert.Contains(result.Diagnostic, "parentworkflowid=" + unexpectedParentId.ToString("D"));
-            StringAssert.Contains(result.Diagnostic, "workflowidunique=" + uniqueRowId.ToString("D"));
-            StringAssert.Contains(result.Diagnostic, "statecode=0");
-            StringAssert.Contains(result.Diagnostic, "statuscode=1");
-            StringAssert.Contains(result.Diagnostic, "componentstate=0");
-            StringAssert.Contains(result.Diagnostic, "ismanaged=True");
-            StringAssert.Contains(result.Diagnostic, "subprocess=False");
-            StringAssert.Contains(result.Diagnostic, "businessprocesstype=0");
-            StringAssert.Contains(result.Diagnostic, "modernflowtype=2");
-            StringAssert.Contains(result.Diagnostic, "uiflowtype=3");
-            StringAssert.Contains(result.Diagnostic, "Diagnostic evidence only; no field listed above is used as a comparison identity.");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "workflowid=" + definitionId.ToString("D"));
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "name='Diagnostic display name'");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "type=1");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "category=5 ('Modern Flow')");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "primaryentity='account'");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "mode=0");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "parentworkflowid=" + unexpectedParentId.ToString("D"));
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "workflowidunique=" + uniqueRowId.ToString("D"));
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "statecode=0");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "statuscode=1");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "componentstate=0");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "ismanaged=True");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "subprocess=False");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "businessprocesstype=0");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "modernflowtype=2");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "uiflowtype=3");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "Local identifiers and state/deployment fields are audit evidence only.");
             Assert.AreEqual(1, service.Calls);
         }
 
@@ -164,11 +164,11 @@ namespace D365SolutionComparer.Tests
 
             Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.IsNull(result.ComparisonKey);
-            StringAssert.Contains(result.Diagnostic, "name=(not supplied)");
-            StringAssert.Contains(result.Diagnostic, "parentworkflowid=(not supplied)");
-            StringAssert.Contains(result.Diagnostic, "workflowidunique=(not supplied)");
-            StringAssert.Contains(result.Diagnostic, "modernflowtype=(not supplied)");
-            StringAssert.Contains(result.Diagnostic, "uiflowtype=(not supplied)");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "name=(not supplied)");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "parentworkflowid=(not supplied)");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "workflowidunique=(not supplied)");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "modernflowtype=(not supplied)");
+            StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "uiflowtype=(not supplied)");
         }
 
         [TestMethod]
@@ -217,7 +217,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, process.DiagnosticGroups.Count);
             Assert.AreEqual(snapshot.Components.Single().Diagnostic,
                 process.DiagnosticGroups.Single().Diagnostic);
-            StringAssert.Contains(process.DiagnosticGroups.Single().Diagnostic,
+            StringAssert.Contains(string.Join("; ", snapshot.Components.Single().DiagnosticEvidence),
                 "name='Coverage evidence'; uniquename=(not supplied); type=1; category=3");
         }
 
@@ -472,7 +472,7 @@ namespace D365SolutionComparer.Tests
                 var ids = QueryIds(query).ToArray();
                 var isRawQuery = ids.All(rawIds.Contains);
                 if (isRawQuery) AssertRawWorkflowColumns(query);
-                else AssertWorkflowColumns(query, "workflowid", "uniquename", "type");
+                else AssertRawWorkflowColumns(query);
                 var source = isRawQuery ? rawRows : parentRows;
                 return Rows(source.Where(item => ids.Contains(item.Id)).ToArray());
             });
