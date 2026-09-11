@@ -139,6 +139,7 @@ namespace D365SolutionComparer.Tests
         [DataRow("environmentvariabledefinition", "defaultvalue", "one", "two")]
         [DataRow("connectionreference", "connectorid", "/providers/a", "/providers/b")]
         [DataRow("appmodule", "navigationtype", "0", "1")]
+        [DataRow("sitemap", "sitemapxml", "<SiteMap><Area Id='before' /></SiteMap>", "<SiteMap><Area Id='after' /></SiteMap>")]
         public void EverySupportedFamilyDetectsOneComparablePropertyDifference(string kind,
             string property, string before, string after)
         {
@@ -159,6 +160,7 @@ namespace D365SolutionComparer.Tests
         [DataRow("environmentvariabledefinition")]
         [DataRow("connectionreference")]
         [DataRow("appmodule")]
+        [DataRow("sitemap")]
         public void EverySupportedFamilyUsesItsEstablishedCaseInsensitivePortableKeyRule(string kind)
         {
             var fixture = Fixture(kind, "Publisher_Component", "publisher_component");
@@ -236,7 +238,7 @@ namespace D365SolutionComparer.Tests
         {
             int type = kind == "table" ? 1 : kind == "column" ? 2 :
                 kind == "relationship" ? 10 : kind == "globalchoice" ? 9 :
-                kind == "appmodule" ? 80 : 61;
+                kind == "appmodule" ? 80 : kind == "sitemap" ? 62 : 61;
             return new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), type, Guid.NewGuid()),
                 IdentityResolutionStatus.Resolved, key, componentTypeKey: kind, semanticKind: kind);
         }

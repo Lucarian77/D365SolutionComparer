@@ -17,8 +17,10 @@ using Xs = DocumentFormat.OpenXml.Spreadsheet;
 using XrmToolBox.Extensibility;
 using McTools.Xrm.Connection;
 using D365SolutionComparer.Infrastructure;
+using D365SolutionComparer.Models.ComponentDetails;
 using D365SolutionComparer.Models.Membership;
 using D365SolutionComparer.Services;
+using D365SolutionComparer.Services.ComponentDetails;
 using D365SolutionComparer.Services.Membership;
 using ModelSolutionInfo = D365SolutionComparer.Models.SolutionInfo;
 using OrgService = Microsoft.Xrm.Sdk.IOrganizationService;
@@ -693,7 +695,7 @@ namespace D365SolutionComparer
 
             WorkAsync(new WorkAsyncInfo
             {
-                Message = "Loading and resolving solution membership...",
+                Message = "Loading membership and component definitions...",
                 IsCancelable = true,
                 MessageWidth = 430,
                 MessageHeight = 150,
@@ -714,14 +716,17 @@ namespace D365SolutionComparer
                     {
                         try
                         {
-                            var operation = new DataverseSolutionMembershipOperation();
-                            var source = ReadMembershipEnvironment(operation, sourceService, sourceName,
+                            var operation = new DataverseComponentDefinitionOperation();
+                            var source = ReadDefinitionEnvironment(operation, sourceService, sourceName,
                                 solutionUniqueName, worker, cancellation, 2, 46);
                             ThrowIfMembershipCancelled(worker, cancellation);
-                            var target = ReadMembershipEnvironment(operation, destinationService, destinationName,
+                            var target = ReadDefinitionEnvironment(operation, destinationService, destinationName,
                                 solutionUniqueName, worker, cancellation, 51, 47);
                             ThrowIfMembershipCancelled(worker, cancellation);
-                            args.Result = new MembershipResultPresenter().Create(source, target);
+                            var membership = new MembershipResultPresenter().Create(
+                                source.Membership, target.Membership);
+                            args.Result = new ComponentDefinitionResultPresenter().Apply(
+                                membership, source.Definitions, target.Definitions);
                         }
                         catch (OperationCanceledException)
                         {
@@ -768,8 +773,8 @@ namespace D365SolutionComparer
             });
         }
 
-        private static MembershipEnvironmentResult ReadMembershipEnvironment(
-            DataverseSolutionMembershipOperation operation, OrgService service, string environmentName,
+        private static DefinitionEnvironmentReadResult ReadDefinitionEnvironment(
+            DataverseComponentDefinitionOperation operation, OrgService service, string environmentName,
             string solutionUniqueName, BackgroundWorker worker, CancellationTokenSource cancellation,
             int basePercent, int span)
         {
@@ -787,8 +792,9 @@ namespace D365SolutionComparer
                             new MembershipUiProgress(environmentName + ": " + progress.Message));
                     }, requestCounter);
                 stopwatch.Stop();
-                return MembershipEnvironmentResult.FromSnapshot(environmentName, snapshot,
-                    requestCounter.TotalRequests, stopwatch.Elapsed);
+                return new DefinitionEnvironmentReadResult(
+                    MembershipEnvironmentResult.FromSnapshot(environmentName, snapshot.Membership,
+                        requestCounter.TotalRequests, stopwatch.Elapsed), snapshot);
             }
             catch (OperationCanceledException)
             {
@@ -801,8 +807,10 @@ namespace D365SolutionComparer
                 ThrowIfMembershipCancelled(worker, cancellation);
                 worker.ReportProgress(Math.Min(99, basePercent + span),
                     new MembershipUiProgress(environmentName + ": membership retrieval is unavailable; continuing with the other environment..."));
-                return MembershipEnvironmentResult.Unavailable(environmentName, solutionUniqueName,
-                    requestCounter.TotalRequests, stopwatch.Elapsed, ex.GetType().Name + ": " + ex.Message);
+                return new DefinitionEnvironmentReadResult(
+                    MembershipEnvironmentResult.Unavailable(environmentName, solutionUniqueName,
+                        requestCounter.TotalRequests, stopwatch.Elapsed,
+                        ex.GetType().Name + ": " + ex.Message), null);
             }
         }
 
@@ -821,6 +829,7 @@ namespace D365SolutionComparer
                 case MembershipOperationStage.ReadingMembership:
                     return Math.Min(span - 12, 7 + Math.Min(12, recordsRetrieved / 250));
                 case MembershipOperationStage.ResolvingIdentities: return span - 10;
+                case MembershipOperationStage.ReadingDefinitions: return span - 5;
                 case MembershipOperationStage.Completed: return span;
                 default: return 0;
             }
@@ -843,6 +852,19 @@ namespace D365SolutionComparer
         {
             public MembershipUiProgress(string message) { Message = message ?? string.Empty; }
             public string Message { get; }
+        }
+
+        private sealed class DefinitionEnvironmentReadResult
+        {
+            public DefinitionEnvironmentReadResult(MembershipEnvironmentResult membership,
+                ComponentDefinitionSnapshot definitions)
+            {
+                Membership = membership ?? throw new ArgumentNullException(nameof(membership));
+                Definitions = definitions;
+            }
+
+            public MembershipEnvironmentResult Membership { get; }
+            public ComponentDefinitionSnapshot Definitions { get; }
         }
 
         private void BtnFilter_Click(object sender, EventArgs e)

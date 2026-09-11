@@ -5,6 +5,7 @@ namespace D365SolutionComparer.Infrastructure
         ValidatingEnvironment,
         ReadingMembership,
         ResolvingIdentities,
+        ReadingDefinitions,
         Completed
     }
 

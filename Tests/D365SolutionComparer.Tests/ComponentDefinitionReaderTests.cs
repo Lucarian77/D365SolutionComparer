@@ -26,6 +26,7 @@ namespace D365SolutionComparer.Tests
         [DataRow("environmentvariabledefinition", 380, "environmentvariabledefinition", "environmentvariabledefinitionid", "schemaname")]
         [DataRow("connectionreference", 10003, "connectionreference", "connectionreferenceid", "connectionreferencelogicalname")]
         [DataRow("appmodule", 80, "appmodule", "appmoduleid", "uniquename")]
+        [DataRow("sitemap", 62, "sitemap", "sitemapid", "sitemapnameunique")]
         public void EntityBackedSupportedKindsUseOneReadOnlyBatchedQuery(string kind, int type,
             string entityName, string primaryId, string identityAttribute)
         {
@@ -142,65 +143,30 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
         }
 
-        [TestMethod]
+        [TestMethod, TestCategory("Phase2G3")]
         public void ColumnAndRelationshipDefinitionsUseReadOnlyMetadataRequests()
         {
             var column = Identity("column", 2, "account.new_code");
             var relationship = Identity("relationship", 10, "new_account_contact");
             var fixture = Fixture(column, relationship);
-            var metadataRequests = new List<RetrieveMetadataChangesRequest>();
             fixture.Service.ExecuteRequest = request =>
             {
                 if (request is WhoAmIRequest) return MembershipTestData.WhoAmI(fixture.Solution.Environment.OrganizationId);
-                var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                metadataRequests.Add(metadataRequest);
-                if (metadataRequest.Query.AttributeQuery != null)
-                {
-                    return MetadataRows(EntityWithAttributes("account",
-                        new AttributeMetadata[]
-                        {
-                            new StringAttributeMetadata
-                            {
-                                MetadataId = column.Record.ObjectId,
-                                LogicalName = "new_code",
-                                SchemaName = "new_Code",
-                                MaxLength = 100
-                            }
-                        }));
-                }
-                return MetadataRows(EntityWithRelationships("account",
-                    new[]
-                    {
-                        new OneToManyRelationshipMetadata
-                        {
-                            MetadataId = relationship.Record.ObjectId,
-                            SchemaName = "new_account_contact",
-                            ReferencedEntity = "account",
-                            ReferencedAttribute = "accountid",
-                            ReferencingEntity = "contact",
-                            ReferencingAttribute = "new_accountid"
-                        }
-                    }));
+                var metadata = (RetrieveMetadataChangesRequest)request;
+                ParentMetadataTestData.AssertQuery(metadata);
+                Assert.AreEqual("LogicalName", metadata.Query.Criteria.Conditions.Single().PropertyName);
+                Assert.AreEqual("account", metadata.Query.Criteria.Conditions.Single().Value);
+                return ParentMetadataTestData.Response(ParentMetadataTestData.Root(Guid.NewGuid(), "account",
+                    new[] { ParentMetadataTestData.Column(column.Record.ObjectId.Value) },
+                    new[] { ParentMetadataTestData.Relationship(relationship.Record.ObjectId.Value) }));
             };
             var counter = new DataverseRequestCounter();
-
             var definitions = new DataverseComponentDefinitionReader().Read(fixture.Service,
                 fixture.Snapshot, CancellationToken.None, counter).Definitions;
-
             Assert.IsTrue(definitions.All(item => item.Status == ComponentDefinitionReadStatus.Available));
             Assert.AreEqual("100", definitions[0].ComparableProperties["MaxLength"]);
             Assert.AreEqual("contact", definitions[1].ComparableProperties["ReferencingEntity"]);
-            Assert.AreEqual(2, metadataRequests.Count);
-            Assert.IsTrue(metadataRequests.All(item => item.Query.Criteria.Conditions.Count == 0));
-            Assert.IsTrue(metadataRequests.All(item => item.Query.Properties.PropertyNames
-                .Contains("MetadataId") && item.Query.Properties.PropertyNames.Contains("LogicalName")));
-            Assert.IsTrue(metadataRequests.Select(item => item.Query.AttributeQuery?.Criteria ??
-                    item.Query.RelationshipQuery.Criteria)
-                .All(filter => filter.FilterOperator == LogicalOperator.Or &&
-                    filter.Conditions.All(condition => condition.PropertyName == "MetadataId" &&
-                        condition.ConditionOperator == MetadataConditionOperator.Equals &&
-                        condition.Value != null && condition.Value.GetType() == typeof(Guid))));
-            Assert.AreEqual(2, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));
         }
@@ -208,30 +174,16 @@ namespace D365SolutionComparer.Tests
         [TestMethod]
         public void RepeatedMetadataObjectIdsDoNotRepeatDirectMetadataRequests()
         {
-            var objectId = Guid.NewGuid();
-            var first = Identity("column", 2, "account.new_code", objectId);
-            var second = Identity("column", 2, "account.new_code", objectId);
-            var fixture = Fixture(first, second);
-            fixture.Service.ExecuteRequest = request =>
-            {
-                if (request is WhoAmIRequest) return MembershipTestData.WhoAmI(fixture.Solution.Environment.OrganizationId);
-                return MetadataRows(EntityWithAttributes("account",
-                    new AttributeMetadata[]
-                    {
-                        new StringAttributeMetadata
-                        {
-                            MetadataId = objectId,
-                            LogicalName = "new_code",
-                            SchemaName = "new_Code",
-                            MaxLength = 50
-                        }
-                    }));
-            };
+            var id = Guid.NewGuid();
+            var fixture = Fixture(Identity("column", 2, "account.new_code", id),
+                Identity("column", 2, "account.new_code", id));
+            fixture.Service.ExecuteRequest = request => request is WhoAmIRequest
+                ? (OrganizationResponse)MembershipTestData.WhoAmI(fixture.Solution.Environment.OrganizationId)
+                : ParentMetadataTestData.Response(ParentMetadataTestData.Root(Guid.NewGuid(), "account",
+                    new[] { ParentMetadataTestData.Column(id) }));
             var counter = new DataverseRequestCounter();
-
             var definitions = new DataverseComponentDefinitionReader().Read(fixture.Service,
                 fixture.Snapshot, CancellationToken.None, counter).Definitions;
-
             Assert.AreEqual(2, definitions.Count);
             Assert.IsTrue(definitions.All(item => item.Status == ComponentDefinitionReadStatus.Available));
             Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
@@ -239,70 +191,27 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void EduSizedColumnAndRelationshipPopulationUsesFourMetadataBatchesNotIndividualRequests()
+        public void EduSizedColumnAndRelationshipPopulationUsesOneParentBatchNotIndividualRequests()
         {
-            var columns = Enumerable.Range(0, 438)
-                .Select(index => Identity("column", 2, "account.new_column" + index)).ToArray();
-            var relationships = Enumerable.Range(0, 59)
-                .Select(index => Identity("relationship", 10, "new_relationship" + index)).ToArray();
+            var columns = Enumerable.Range(0, 438).Select(i => Identity("column", 2, "account.new_column" + i)).ToArray();
+            var relationships = Enumerable.Range(0, 59).Select(i => Identity("relationship", 10, "new_relationship" + i)).ToArray();
             var fixture = Fixture(columns.Concat(relationships).ToArray());
-            var attributeBatchSizes = new List<int>();
-            var relationshipBatchSizes = new List<int>();
-            var attributeRequestIds = new List<Guid>();
-            var relationshipRequestIds = new List<Guid>();
             fixture.Service.ExecuteRequest = request =>
             {
-                if (request is WhoAmIRequest)
-                    return MembershipTestData.WhoAmI(fixture.Solution.Environment.OrganizationId);
-                var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                if (metadataRequest.Query.AttributeQuery != null)
-                {
-                    var ids = metadataRequest.Query.AttributeQuery.Criteria.Conditions
-                        .Select(item => (Guid)item.Value).ToList();
-                    attributeBatchSizes.Add(ids.Count);
-                    attributeRequestIds.AddRange(ids);
-                    return MetadataRows(EntityWithAttributes("account",
-                        ids.Select(id => new StringAttributeMetadata
-                        {
-                            MetadataId = id,
-                            LogicalName = "new_column",
-                            SchemaName = "new_Column",
-                            MaxLength = 100
-                        }).Cast<AttributeMetadata>().ToArray()));
-                }
-                var relationshipIds = metadataRequest.Query.RelationshipQuery.Criteria.Conditions
-                    .Select(item => (Guid)item.Value).ToList();
-                relationshipBatchSizes.Add(relationshipIds.Count);
-                relationshipRequestIds.AddRange(relationshipIds);
-                return MetadataRows(EntityWithRelationships("account",
-                    relationshipIds.Select(id =>
-                        new OneToManyRelationshipMetadata
-                        {
-                            MetadataId = id,
-                            SchemaName = "new_relationship",
-                            ReferencedEntity = "account",
-                            ReferencedAttribute = "accountid",
-                            ReferencingEntity = "contact",
-                            ReferencingAttribute = "new_accountid"
-                        }).ToArray()));
+                if (request is WhoAmIRequest) return MembershipTestData.WhoAmI(fixture.Solution.Environment.OrganizationId);
+                ParentMetadataTestData.AssertQuery((RetrieveMetadataChangesRequest)request);
+                return ParentMetadataTestData.Response(ParentMetadataTestData.Root(Guid.NewGuid(), "account",
+                    columns.Select((item, i) => ParentMetadataTestData.Column(item.Record.ObjectId.Value, "new_column" + i)).ToArray(),
+                    relationships.Select((item, i) => ParentMetadataTestData.Relationship(item.Record.ObjectId.Value, "new_relationship" + i)).ToArray()));
             };
             var counter = new DataverseRequestCounter();
-
             var definitions = new DataverseComponentDefinitionReader().Read(fixture.Service,
                 fixture.Snapshot, CancellationToken.None, counter).Definitions;
-
             Assert.AreEqual(497, definitions.Count);
             Assert.IsTrue(definitions.All(item => item.Status == ComponentDefinitionReadStatus.Available));
-            CollectionAssert.AreEqual(new[] { 200, 200, 38 }, attributeBatchSizes);
-            CollectionAssert.AreEqual(new[] { 59 }, relationshipBatchSizes);
-            CollectionAssert.AreEqual(attributeRequestIds.OrderBy(item => item).ToArray(),
-                attributeRequestIds.ToArray());
-            CollectionAssert.AreEqual(relationshipRequestIds.OrderBy(item => item).ToArray(),
-                relationshipRequestIds.ToArray());
-            Assert.AreEqual(4, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));
-            Assert.AreEqual(5, counter.TotalRequests);
         }
 
         [TestMethod]
@@ -343,22 +252,11 @@ namespace D365SolutionComparer.Tests
             var counter = new DataverseRequestCounter();
             var context = new D365SolutionComparer.Services.Membership.DataverseReadContext(
                 fixture.Service, fixture.Solution.Environment, CancellationToken.None, counter);
-            context.MetadataCache.Store(new StringAttributeMetadata
-            {
-                MetadataId = column.Record.ObjectId,
-                LogicalName = "new_code",
-                SchemaName = "new_Code",
-                MaxLength = 100
-            });
-            context.MetadataCache.Store(new OneToManyRelationshipMetadata
-            {
-                MetadataId = relationship.Record.ObjectId,
-                SchemaName = "new_account_contact",
-                ReferencedEntity = "account",
-                ReferencedAttribute = "accountid",
-                ReferencingEntity = "contact",
-                ReferencingAttribute = "new_accountid"
-            });
+            var inventory = new D365SolutionComparer.Services.Membership.ParentEntityMetadataInventory();
+            inventory.Load(new[] { ParentMetadataTestData.Root(Guid.NewGuid(), "account",
+                new[] { ParentMetadataTestData.Column(column.Record.ObjectId.Value) },
+                new[] { ParentMetadataTestData.Relationship(relationship.Record.ObjectId.Value) }) });
+            context.MetadataCache.ParentMetadata = inventory;
             context.MetadataCache.StoreOptionSetCatalog(new OptionSetMetadataBase[]
             {
                 new OptionSetMetadata
@@ -382,11 +280,12 @@ namespace D365SolutionComparer.Tests
         [TestMethod]
         public void BulkIdentityResolutionMetadataIsReusedByDefinitionRetrieval()
         {
+            var parentId = Guid.NewGuid();
             var rawColumn = new SolutionComponentRecord(Guid.NewGuid(), 2, Guid.NewGuid());
             var rawRelationship = new SolutionComponentRecord(Guid.NewGuid(), 10, Guid.NewGuid());
             var rawChoice = new SolutionComponentRecord(Guid.NewGuid(), 9, Guid.NewGuid());
             var rawWebResource = new SolutionComponentRecord(Guid.NewGuid(), 61, Guid.NewGuid());
-            var fixture = Fixture(
+            var fixture = Fixture(ParentMetadataTestData.Raw(1, parentId),
                 new ComponentIdentity(rawColumn, IdentityResolutionStatus.Unresolved),
                 new ComponentIdentity(rawRelationship, IdentityResolutionStatus.Unresolved),
                 new ComponentIdentity(rawChoice, IdentityResolutionStatus.Unresolved),
@@ -411,30 +310,10 @@ namespace D365SolutionComparer.Tests
                     };
                     return optionResponse;
                 }
-                var metadataRequest = (RetrieveMetadataChangesRequest)request;
-                if (metadataRequest.Query.AttributeQuery != null)
-                    return MetadataRows(EntityWithAttributes("account", new AttributeMetadata[]
-                    {
-                        new StringAttributeMetadata
-                        {
-                            MetadataId = rawColumn.ObjectId,
-                            LogicalName = "new_code",
-                            SchemaName = "new_Code",
-                            MaxLength = 100
-                        }
-                    }));
-                return MetadataRows(EntityWithRelationships("account", new[]
-                {
-                    new OneToManyRelationshipMetadata
-                    {
-                        MetadataId = rawRelationship.ObjectId,
-                        SchemaName = "new_account_contact",
-                        ReferencedEntity = "account",
-                        ReferencedAttribute = "accountid",
-                        ReferencingEntity = "contact",
-                        ReferencingAttribute = "new_accountid"
-                    }
-                }));
+                ParentMetadataTestData.AssertQuery((RetrieveMetadataChangesRequest)request);
+                return ParentMetadataTestData.Response(ParentMetadataTestData.Root(parentId, "account",
+                    new[] { ParentMetadataTestData.Column(rawColumn.ObjectId.Value) },
+                    new[] { ParentMetadataTestData.Relationship(rawRelationship.ObjectId.Value) }));
             };
             var counter = new DataverseRequestCounter();
             var context = new D365SolutionComparer.Services.Membership.DataverseReadContext(
@@ -449,7 +328,7 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(definitions.All(item => item.Status == ComponentDefinitionReadStatus.Available));
             Assert.AreEqual(beforeDefinitionRead, counter.TotalRequests);
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
-            Assert.AreEqual(2, counter.GetExecuteCount("RetrieveMetadataChanges"));
+            Assert.AreEqual(1, counter.GetExecuteCount("RetrieveMetadataChanges"));
             Assert.AreEqual(1, counter.GetExecuteCount("RetrieveAllOptionSets"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveAttribute"));
             Assert.AreEqual(0, counter.GetExecuteCount("RetrieveRelationship"));

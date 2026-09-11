@@ -21,7 +21,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.GlobalChoice,
             ComponentSemanticKinds.Report,
             ComponentSemanticKinds.AppModule,
-            ComponentSemanticKinds.TeamTemplate
+            ComponentSemanticKinds.TeamTemplate,
+            ComponentSemanticKinds.SiteMap
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -160,6 +161,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.Report: return "Signed Report";
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
+                case ComponentSemanticKinds.SiteMap: return "Site Map";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

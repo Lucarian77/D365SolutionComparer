@@ -99,6 +99,8 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> siteMapDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
+            private readonly Dictionary<Guid, ResolutionValue> siteMapResolutions =
+                new Dictionary<Guid, ResolutionValue>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> canvasAppDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
@@ -148,6 +150,7 @@ namespace D365SolutionComparer.Services.Membership
                 CancellationToken cancellationToken)
             {
                 PrepareClassifications(components.Select(item => item.Record), cancellationToken);
+                ParentEntityMetadataReader.Ensure(context, components, cancellationToken);
                 var results = new ComponentIdentity[components.Count];
                 var pending = new List<PendingRecord>();
                 var unique = new HashSet<LookupKey>();
@@ -199,6 +202,8 @@ namespace D365SolutionComparer.Services.Membership
                         return ResolveOptionSet(record);
                     case ReportComponentType:
                         return ResolveReport(record);
+                    case SiteMapComponentType:
+                        return ResolveSiteMap(record);
                     case 1: kind = "table"; break;
                     case 2: kind = "column"; break;
                     case 10: kind = "relationship"; break;
@@ -338,7 +343,22 @@ namespace D365SolutionComparer.Services.Membership
 
             private void ResolveTableBatches(IReadOnlyList<LookupKey> keys, CancellationToken cancellationToken)
             {
-                foreach (var batch in Batch(keys))
+                var remaining = new List<LookupKey>();
+                foreach (var key in keys)
+                {
+                    EntityMetadata cached;
+                    var parentInventory = context.MetadataCache.ParentMetadata;
+                    if (parentInventory != null && parentInventory.Failed &&
+                        parentInventory.ParentIds.Contains(key.ObjectId))
+                        identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                            "Parent Table metadata retrieval was incomplete; see diagnostic evidence.",
+                            new[] { parentInventory.FailureEvidence });
+                    else if (context.MetadataCache.TryGetEntity(key.ObjectId, out cached) &&
+                        context.MetadataCache.HasCompleteEntityDefinition(key.ObjectId))
+                        identityCache[key] = ResolutionValue.FromKey(key.Kind, cached.LogicalName);
+                    else remaining.Add(key);
+                }
+                foreach (var batch in Batch(remaining))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     try
@@ -394,174 +414,23 @@ namespace D365SolutionComparer.Services.Membership
             }
 
             private void ResolveColumnBatches(IReadOnlyList<LookupKey> keys,
-                CancellationToken cancellationToken)
-            {
-                foreach (var batch in Batch(keys))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var attributeQuery = new AttributeQueryExpression
-                        {
-                            Properties = new MetadataPropertiesExpression(new[]
-                                { "MetadataId", "LogicalName" }
-                                .Concat(ComponentDefinitionContractCatalog.For(
-                                    ComponentSemanticKinds.Column).ComparableProperties)
-                                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
-                            Criteria = MetadataIdFilter(batch)
-                        };
-                        var query = new EntityQueryExpression
-                        {
-                            Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
-                            AttributeQuery = attributeQuery
-                        };
-                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
-                            as RetrieveMetadataChangesResponse;
-                        var entities = response?.EntityMetadata;
-                        if (entities == null)
-                        {
-                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                                "Column identity metadata retrieval returned no metadata collection.");
-                            continue;
-                        }
-                        var returned = entities.Where(entity => entity?.Attributes != null)
-                            .SelectMany(entity => entity.Attributes.Select(attribute =>
-                                new ColumnMetadataResult(entity.LogicalName, attribute)))
-                            .Where(item => item.Metadata != null).ToList();
-                        foreach (var item in returned) context.MetadataCache.Store(item.Metadata);
-                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
-                        if (returned.Any(item => !item.Metadata.MetadataId.HasValue ||
-                            !requested.Contains(item.Metadata.MetadataId.Value)))
-                        {
-                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                                "Column identity metadata retrieval returned conflicting identifiers.");
-                            continue;
-                        }
-                        var indexed = returned.GroupBy(item => item.Metadata.MetadataId.Value)
-                            .ToDictionary(group => group.Key, group => group.ToList());
-                        foreach (var key in batch)
-                        {
-                            List<ColumnMetadataResult> matches;
-                            if (!indexed.TryGetValue(key.ObjectId, out matches))
-                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
-                                    "No column metadata matched the component object ID.");
-                            else if (matches.Count != 1)
-                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
-                                    "Multiple column metadata records matched the component object ID.");
-                            else
-                            {
-                                var entityName = matches[0].ParentEntityLogicalName;
-                                var value = string.IsNullOrWhiteSpace(entityName) ||
-                                    string.IsNullOrWhiteSpace(matches[0].Metadata.LogicalName) ? null :
-                                    entityName + "." + matches[0].Metadata.LogicalName;
-                                identityCache[key] = ResolutionValue.FromKey(key.Kind, value);
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                            "Column identity metadata retrieval failed: " + ex.Message);
-                    }
-                }
-            }
+                CancellationToken cancellationToken) => ResolveChildMetadata(keys, cancellationToken);
 
             private void ResolveRelationshipBatches(IReadOnlyList<LookupKey> keys,
-                CancellationToken cancellationToken)
+                CancellationToken cancellationToken) => ResolveChildMetadata(keys, cancellationToken);
+
+            private void ResolveChildMetadata(IReadOnlyList<LookupKey> keys, CancellationToken cancellationToken)
             {
-                foreach (var batch in Batch(keys))
+                foreach (var key in keys)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var relationshipQuery = new RelationshipQueryExpression
-                        {
-                            Properties = new MetadataPropertiesExpression(new[]
-                                { "MetadataId", "SchemaName" }
-                                .Concat(ComponentDefinitionContractCatalog.For(
-                                    ComponentSemanticKinds.Relationship).ComparableProperties)
-                                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray()),
-                            Criteria = MetadataIdFilter(batch)
-                        };
-                        var query = new EntityQueryExpression
-                        {
-                            Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName"),
-                            RelationshipQuery = relationshipQuery
-                        };
-                        var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
-                            as RetrieveMetadataChangesResponse;
-                        var entities = response?.EntityMetadata;
-                        if (entities == null)
-                        {
-                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                                "Relationship identity metadata retrieval returned no metadata collection.");
-                            continue;
-                        }
-                        var returned = entities.SelectMany(Relationships).Where(item => item != null).ToList();
-                        foreach (var item in returned) context.MetadataCache.Store(item);
-                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
-                        if (returned.Any(item => !item.MetadataId.HasValue ||
-                            !requested.Contains(item.MetadataId.Value)))
-                        {
-                            SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                                "Relationship identity metadata retrieval returned conflicting identifiers.");
-                            continue;
-                        }
-                        var indexed = returned.GroupBy(item => item.MetadataId.Value)
-                            .ToDictionary(group => group.Key, group => group
-                                .GroupBy(item => item.SchemaName ?? string.Empty,
-                                    StringComparer.Ordinal).Select(items => items.First()).ToList());
-                        foreach (var key in batch)
-                        {
-                            List<RelationshipMetadataBase> matches;
-                            if (!indexed.TryGetValue(key.ObjectId, out matches))
-                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
-                                    "No relationship metadata matched the component object ID.");
-                            else if (matches.Count != 1)
-                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
-                                    "Multiple conflicting relationship metadata records matched the component object ID.");
-                            else identityCache[key] = ResolutionValue.FromKey(key.Kind, matches[0].SchemaName);
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (FaultException ex)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        SetMetadataResults(batch, IdentityResolutionStatus.Unresolved,
-                            "Relationship identity metadata retrieval failed: " + ex.Message);
-                    }
+                    var result = context.MetadataCache.ParentMetadata.Correlate(key.Kind, key.ObjectId);
+                    identityCache[key] = result.Status == IdentityResolutionStatus.Resolved
+                        ? ResolutionValue.FromKey(key.Kind, result.PortableKey, diagnosticEvidence: result.Evidence)
+                        : result.Status == IdentityResolutionStatus.Ambiguous
+                            ? ResolutionValue.Ambiguous(key.Kind, result.Diagnostic, result.Evidence)
+                            : ResolutionValue.Unresolved(key.Kind, result.Diagnostic, result.Evidence);
                 }
-            }
-
-            private static MetadataFilterExpression MetadataIdFilter(IEnumerable<LookupKey> keys)
-            {
-                var filter = new MetadataFilterExpression(LogicalOperator.Or);
-                foreach (var key in keys)
-                    filter.Conditions.Add(new MetadataConditionExpression("MetadataId",
-                        MetadataConditionOperator.Equals, key.ObjectId));
-                return filter;
-            }
-
-            private static IEnumerable<RelationshipMetadataBase> Relationships(EntityMetadata entity)
-            {
-                if (entity == null) return Enumerable.Empty<RelationshipMetadataBase>();
-                return (entity.OneToManyRelationships ?? new OneToManyRelationshipMetadata[0])
-                    .Cast<RelationshipMetadataBase>()
-                    .Concat((entity.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0])
-                        .Cast<RelationshipMetadataBase>())
-                    .Concat((entity.ManyToManyRelationships ?? new ManyToManyRelationshipMetadata[0])
-                        .Cast<RelationshipMetadataBase>());
-            }
-
-            private void SetMetadataResults(IEnumerable<LookupKey> keys,
-                IdentityResolutionStatus status, string diagnostic)
-            {
-                foreach (var key in keys)
-                    identityCache[key] = status == IdentityResolutionStatus.Ambiguous
-                        ? ResolutionValue.Ambiguous(key.Kind, diagnostic)
-                        : ResolutionValue.Unresolved(key.Kind, diagnostic);
             }
 
             private IDictionary<LookupKey, ResolutionValue> ResolveEntityBatch(string kind,
@@ -1947,7 +1816,8 @@ namespace D365SolutionComparer.Services.Membership
                 siteMapDiagnosticsLoaded = true;
                 siteMapSummaryComponentId = records[0].SolutionComponentId;
                 var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "sitemap", "sitemapid",
-                    new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique", "isappaware", "componentstate", "ismanaged" },
+                    new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique",
+                        "isappaware", "sitemapxml", "componentstate", "ismanaged" },
                     "Site Map diagnostic lookup returned an incomplete result set.",
                     "Site Map diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => "Site Map diagnostic lookup failed: " + ex.Message, cancellationToken);
@@ -1967,16 +1837,27 @@ namespace D365SolutionComparer.Services.Membership
                     var correlation = retrieval.GetCorrelation(objectId);
                     var matches = correlation.Rows;
                     if (correlation.Status == DiagnosticCorrelationStatus.Failed)
+                    {
                         evidence.Add(correlation.Failure);
+                        siteMapResolutions[objectId] = ResolutionValue.Unresolved(
+                            ComponentSemanticKinds.SiteMap,
+                            "Site Map correlation was incomplete or failed.");
+                    }
                     else if (correlation.Status == DiagnosticCorrelationStatus.Missing)
                     {
                         missing++;
                         evidence.Add("No sitemap row matched this solutioncomponent objectid.");
+                        siteMapResolutions[objectId] = ResolutionValue.Unresolved(
+                            ComponentSemanticKinds.SiteMap,
+                            "No Site Map row matched the component object ID.");
                     }
                     else if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
                     {
                         nonUnique++;
                         evidence.Add("Multiple sitemap rows matched this solutioncomponent objectid.");
+                        siteMapResolutions[objectId] = ResolutionValue.Ambiguous(
+                            ComponentSemanticKinds.SiteMap,
+                            "Multiple Site Map rows matched the component object ID.");
                     }
 
                     foreach (var row in matches) evidence.Add(DescribeSiteMap(row));
@@ -1985,14 +1866,47 @@ namespace D365SolutionComparer.Services.Membership
                         correlated++;
                         var row = matches[0];
                         var name = row.GetAttributeValue<string>("sitemapnameunique");
-                        if (string.IsNullOrWhiteSpace(name)) blankName++;
-                        else candidateNames.Add(name);
+                        context.MetadataCache.StoreEntityRow(row, objectId);
+                        if (string.IsNullOrWhiteSpace(name))
+                        {
+                            blankName++;
+                            siteMapResolutions[objectId] = ResolutionValue.Unresolved(
+                                ComponentSemanticKinds.SiteMap,
+                                "The correlated Site Map has a blank sitemapnameunique.");
+                        }
+                        else if (!IsCompleteSiteMap(row))
+                            siteMapResolutions[objectId] = ResolutionValue.Unresolved(
+                                ComponentSemanticKinds.SiteMap,
+                                "The correlated Site Map row is incomplete.");
+                        else
+                        {
+                            candidateNames.Add(name);
+                            siteMapResolutions[objectId] = ResolutionValue.FromKey(
+                                ComponentSemanticKinds.SiteMap, name);
+                        }
                         if (row.GetAttributeValue<bool?>("isappaware") == true) appAware++;
                     }
                     evidence.AddRange(correlation.UnassociatedRows.Select(row =>
                         "Unassociated or conflicting returned sitemap row: " + DescribeSiteMap(row)));
                     siteMapDiagnostics[objectId] = evidence.AsReadOnly();
                 }
+
+                var duplicateCandidates = siteMapResolutions.Where(item =>
+                        item.Value.Status == IdentityResolutionStatus.Resolved)
+                    .GroupBy(item => item.Value.Key, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1).ToList();
+                foreach (var group in duplicateCandidates)
+                    foreach (var item in group)
+                    {
+                        var evidence = siteMapDiagnostics[item.Key].ToList();
+                        evidence.Add("The candidate Site Map sitemapnameunique '" +
+                            EscapeDiagnosticText(item.Value.Key) +
+                            "' is not unique among correlated Type-62 records.");
+                        siteMapDiagnostics[item.Key] = evidence.AsReadOnly();
+                        siteMapResolutions[item.Key] = ResolutionValue.Ambiguous(
+                            ComponentSemanticKinds.SiteMap,
+                            "The candidate Site Map sitemapnameunique is not unique among correlated Type-62 records.");
+                    }
 
                 int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
                     item.ObjectId.Value == Guid.Empty);
@@ -2028,12 +1942,31 @@ namespace D365SolutionComparer.Services.Membership
                 return result;
             }
 
+            private ComponentIdentity ResolveSiteMap(SolutionComponentRecord record)
+            {
+                var evidence = GetSiteMapDiagnosticEvidence(record);
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                        diagnostic: "The Type-62 component has no usable object ID, so Site Map identity could not be verified.",
+                        componentTypeKey: ComponentSemanticKinds.SiteMap,
+                        semanticKind: ComponentSemanticKinds.SiteMap,
+                        diagnosticEvidence: evidence);
+                ResolutionValue resolution;
+                if (!siteMapResolutions.TryGetValue(record.ObjectId.Value, out resolution))
+                    resolution = ResolutionValue.Unresolved(ComponentSemanticKinds.SiteMap,
+                        "The Site Map lookup produced no auditable identity decision.");
+                return new ComponentIdentity(record, resolution.Status, resolution.Key,
+                    resolution.Diagnostic, ComponentSemanticKinds.SiteMap,
+                    ComponentSemanticKinds.SiteMap, diagnosticEvidence: evidence);
+            }
+
             private static string DescribeSiteMap(Entity row)
             {
                 var candidate = row.GetAttributeValue<string>("sitemapnameunique");
                 bool complete = HasGuid(row, "sitemapid") && HasText(row, "sitemapnameunique") &&
                     HasText(row, "sitemapname") && HasGuid(row, "sitemapidunique") &&
                     row.Attributes.ContainsKey("isappaware") && row.Attributes["isappaware"] is bool &&
+                    HasText(row, "sitemapxml") &&
                     HasOption(row, "componentstate") && row.Attributes.ContainsKey("ismanaged") &&
                     row.Attributes["ismanaged"] is bool;
                 return (complete ? "Site Map diagnostic lookup matched. " :
@@ -2043,11 +1976,12 @@ namespace D365SolutionComparer.Services.Membership
                     "; sitemapname=" + FormatSiteMapValue(row, "sitemapname") +
                     "; sitemapidunique=" + FormatSiteMapValue(row, "sitemapidunique") +
                     "; isappaware=" + FormatSiteMapValue(row, "isappaware") +
+                    "; sitemapxml=" + FormatSiteMapXml(row) +
                     "; componentstate=" + FormatSiteMapValue(row, "componentstate") +
                     "; ismanaged=" + FormatSiteMapValue(row, "ismanaged") +
                     "; candidatesitemapname=" + (string.IsNullOrWhiteSpace(candidate) ? "(unavailable)" :
                         "'" + EscapeDiagnosticText(candidate) + "'") +
-                    ". Diagnostic evidence only; the candidate is not used for membership comparison.";
+                    ". A verified nonblank sitemapnameunique is the portable Site Map identity; all other values are diagnostic evidence.";
             }
 
             private static string DescribeSiteMapSummary(int rawCount, int distinctObjectIdCount,
@@ -2227,6 +2161,21 @@ namespace D365SolutionComparer.Services.Membership
                     "; ismanaged=" + FormatCanvasAppValue(row, "ismanaged") +
                     "; candidateportableidentity=" + candidate +
                     ". Diagnostic evidence only; the candidate is not used for membership comparison.";
+            }
+
+            private static bool IsCompleteSiteMap(Entity row) =>
+                HasGuid(row, "sitemapid") && HasText(row, "sitemapnameunique") &&
+                HasText(row, "sitemapname") && HasGuid(row, "sitemapidunique") &&
+                row.Attributes.ContainsKey("isappaware") && row.Attributes["isappaware"] is bool &&
+                HasText(row, "sitemapxml") && HasOption(row, "componentstate") &&
+                row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
+
+            private static string FormatSiteMapXml(Entity row)
+            {
+                var value = row.GetAttributeValue<string>("sitemapxml");
+                return value == null ? "(not supplied)" :
+                    "(supplied, length=" + value.Length.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) + ")";
             }
 
             private static string DescribeCanvasAppSummary(int rawCount, int distinctObjectIdCount,
@@ -3135,19 +3084,6 @@ namespace D365SolutionComparer.Services.Membership
                 public int Index { get; }
                 public SolutionComponentRecord Record { get; }
                 public LookupKey Key { get; }
-            }
-
-            private sealed class ColumnMetadataResult
-            {
-                public ColumnMetadataResult(string parentEntityLogicalName,
-                    AttributeMetadata metadata)
-                {
-                    ParentEntityLogicalName = parentEntityLogicalName;
-                    Metadata = metadata;
-                }
-
-                public string ParentEntityLogicalName { get; }
-                public AttributeMetadata Metadata { get; }
             }
 
             private sealed class ResolutionValue
