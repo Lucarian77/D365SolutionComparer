@@ -20,6 +20,7 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly Dictionary<Guid, Entity> WorkflowDefinitions = new Dictionary<Guid, Entity>();
 
         internal ParentEntityMetadataInventory ParentMetadata { get; set; }
+        internal AppSettingResolutionOperation AppSettings { get; set; }
 
         public bool OptionSetCatalogAttempted { get; private set; }
         public OptionSetMetadataBase[] OptionSetCatalog { get; private set; }

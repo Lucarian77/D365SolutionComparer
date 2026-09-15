@@ -16,12 +16,15 @@ namespace D365SolutionComparer.Models.Membership
             ObjectTypeCode = objectTypeCode;
             Name = name;
             PrimaryEntityName = primaryEntityName ?? string.Empty;
-            SemanticKind = ComponentSemanticKinds.FromRegisteredDefinitionName(name);
+            SemanticKind = IsAppSetting ? ComponentSemanticKinds.AppSetting :
+                ComponentSemanticKinds.FromRegisteredDefinitionName(name);
         }
 
         public int ObjectTypeCode { get; }
         public string Name { get; }
         public string PrimaryEntityName { get; }
         public string SemanticKind { get; }
+        internal bool IsAppSetting => string.Equals(Name, "AppSetting", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(PrimaryEntityName, "appsetting", StringComparison.OrdinalIgnoreCase);
     }
 }

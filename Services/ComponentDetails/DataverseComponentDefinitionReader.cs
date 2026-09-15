@@ -36,7 +36,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.ConnectionReference,
                 ComponentSemanticKinds.AppModule,
                 ComponentSemanticKinds.SiteMap,
-                ComponentSemanticKinds.Process
+                ComponentSemanticKinds.Process,
+                ComponentSemanticKinds.AppSetting
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -96,6 +97,16 @@ namespace D365SolutionComparer.Services.ComponentDetails
             ReadRelationships(context, Pending(membership, results, ComponentSemanticKinds.Relationship),
                 results, cancellationToken);
             ReadWorkflows(context, Pending(membership, results, ComponentSemanticKinds.Process), results, cancellationToken);
+            var appSettings = Pending(membership, results, ComponentSemanticKinds.AppSetting);
+            if (appSettings.Count > 0 && context.MetadataCache.AppSettings != null)
+                context.MetadataCache.AppSettings.PrepareDefinitions(appSettings, cancellationToken);
+            foreach (var identity in appSettings)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Set(results, context.MetadataCache.AppSettings != null
+                    ? context.MetadataCache.AppSettings.Definition(identity)
+                    : Unresolved(identity, "AppSetting definition requires the coordinated identity read inventory."));
+            }
             ReadGlobalChoices(context, Pending(membership, results, ComponentSemanticKinds.GlobalChoice),
                 results, cancellationToken);
             ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.WebResource),

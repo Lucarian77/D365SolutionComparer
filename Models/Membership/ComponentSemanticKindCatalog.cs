@@ -19,6 +19,7 @@ namespace D365SolutionComparer.Models.Membership
         public const string AppModule = "appmodule";
         public const string TeamTemplate = "teamtemplate";
         public const string SiteMap = "sitemap";
+        public const string AppSetting = "appsetting";
         internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
         internal const string ReportCandidateTypeKey = "report:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";

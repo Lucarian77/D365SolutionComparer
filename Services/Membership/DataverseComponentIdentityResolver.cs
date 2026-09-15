@@ -136,6 +136,8 @@ namespace D365SolutionComparer.Services.Membership
                 PrepareClassifications(new[] { record }, cancellationToken);
                 string kind;
                 var immediate = Classify(record, cancellationToken, out kind);
+                if (immediate?.RegisteredDefinition?.IsAppSetting == true)
+                    return ResolveAppSettings(new[] { immediate }, cancellationToken)[0];
                 if (immediate != null) return immediate;
                 var cacheKey = new LookupKey(kind, record.ObjectId.Value);
                 ResolutionValue value;
@@ -163,6 +165,18 @@ namespace D365SolutionComparer.Services.Membership
             public IReadOnlyList<ComponentIdentity> ResolveAll(IReadOnlyList<ComponentIdentity> components,
                 CancellationToken cancellationToken)
             {
+                // Reuse authoritative AppSetting evidence when resolving an already discovered snapshot.
+                foreach (var group in components.Where(i => i.RegisteredDefinition != null)
+                    .GroupBy(i => i.Record.ComponentType).Where(g => g.Any(i => i.RegisteredDefinition.IsAppSetting)))
+                {
+                    var definitions = group.Select(i => i.RegisteredDefinition).ToList();
+                    var first = definitions[0];
+                    definitionMappings[group.Key] = definitions.Any(d =>
+                        !string.Equals(d.Name, first.Name, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(d.PrimaryEntityName, first.PrimaryEntityName, StringComparison.OrdinalIgnoreCase))
+                        ? DefinitionMapping.Ambiguous("Conflicting registered solution-component definitions use this component type.")
+                        : DefinitionMapping.Registered(first);
+                }
                 PrepareClassifications(components.Select(item => item.Record), cancellationToken);
                 workflowLookupIncomplete = components.Any(item => item.Record.ComponentType == 29 &&
                     (!item.Record.ObjectId.HasValue || item.Record.ObjectId.Value == Guid.Empty));
@@ -205,7 +219,46 @@ namespace D365SolutionComparer.Services.Membership
                     cancellationToken.ThrowIfCancellationRequested();
                     results[item.Index] = ToIdentity(identityCache[item.Key], item.Record);
                 }
+                var appSettings = results.Where(i => i.RegisteredDefinition?.IsAppSetting == true).ToList();
+                if (appSettings.Count > 0)
+                {
+                    var resolvedSettings = ResolveAppSettings(appSettings, cancellationToken)
+                        .GroupBy(i => i.Record.SolutionComponentId).ToDictionary(g => g.Key, g => g.First());
+                    for (int index = 0; index < results.Length; index++)
+                        if (results[index].RegisteredDefinition?.IsAppSetting == true)
+                            results[index] = resolvedSettings[results[index].Record.SolutionComponentId];
+                }
                 return Array.AsReadOnly(results);
+            }
+
+            private IReadOnlyList<ComponentIdentity> ResolveAppSettings(IReadOnlyList<ComponentIdentity> candidates,
+                CancellationToken token)
+            {
+                var operation = context.MetadataCache.AppSettings ??
+                    (context.MetadataCache.AppSettings = new AppSettingResolutionOperation(context));
+                return operation.Resolve(candidates, ids =>
+                {
+                    var keys = ids.Select(id => new LookupKey(ComponentSemanticKinds.AppModule, id)).ToList();
+                    var missing = keys.Where(key => !identityCache.ContainsKey(key)).ToList();
+                    try { ResolveAppModuleBatches(missing, token); }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        foreach (var key in missing)
+                            identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                "Parent AppModule retrieval failed; server details withheld.");
+                    }
+                    return keys.ToDictionary(key => key.ObjectId, key =>
+                    {
+                        Entity row;
+                        if (context.MetadataCache.TryGetEntityRow("appmodule", key.ObjectId, out row))
+                            return AppSettingRowResult.Unique(row);
+                        return new AppSettingRowResult(null, identityCache[key].Status == IdentityResolutionStatus.Ambiguous
+                            ? IdentityResolutionStatus.Ambiguous : IdentityResolutionStatus.Unresolved,
+                            "Parent AppModule correlation is missing, ambiguous or unavailable; server details withheld.");
+                    });
+                }, token);
             }
 
             private ComponentIdentity Classify(SolutionComponentRecord record, CancellationToken cancellationToken,
@@ -258,11 +311,18 @@ namespace D365SolutionComparer.Services.Membership
                                 "No identity resolver supports this component type.",
                                 diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
                         if (mapping.Definition != null)
+                        {
+                            if (mapping.Definition.IsAppSetting)
+                                return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                                    diagnostic: "AppSetting backing correlation is pending.",
+                                    componentTypeKey: ComponentSemanticKinds.AppSetting,
+                                    registeredDefinition: mapping.Definition);
                             return new ComponentIdentity(record, IdentityResolutionStatus.Unsupported,
                                 diagnostic: "No portable identity resolver supports registered solution-component family '" +
                                     mapping.Definition.Name + "'.",
                                 semanticKind: mapping.Definition.SemanticKind,
                                 registeredDefinition: mapping.Definition);
+                        }
                         if (connectionMappingDiagnostic != null)
                             return Unknown(record, connectionMappingStatus, connectionMappingDiagnostic,
                                 diagnosticEvidence: GetTeamTemplateDiagnosticEvidence(record));
@@ -2398,6 +2458,12 @@ namespace D365SolutionComparer.Services.Membership
                     foreach (var type in missing)
                     {
                         var matches = returned.Where(item => item.Key == type).Select(item => item.Value).ToList();
+                        // Equivalent AppSetting registrations may be repeated; no other family's
+                        // discovery behavior changes. Conflicting fields always remain ambiguous.
+                        if (matches.Count > 1 && matches.All(row =>
+                            string.Equals(row.GetAttributeValue<string>("name"), "AppSetting", StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(row.GetAttributeValue<string>("primaryentityname"), "appsetting", StringComparison.OrdinalIgnoreCase)))
+                            matches = matches.Take(1).ToList();
                         if (matches.Count > 1)
                         {
                             definitionMappings[type] = DefinitionMapping.Ambiguous(
