@@ -88,6 +88,7 @@
     <Compile Include="Models\Membership\MembershipCoverageDiagnostics.cs" />
     <Compile Include="Models\Membership\MembershipSnapshot.cs" />
     <Compile Include="Models\Membership\MembershipCompareResult.cs" />
+    <Compile Include="Models\Membership\AppSettingEvidence.cs" />
     <Compile Include="Services\Contracts\ISolutionMembershipReader.cs" />
     <Compile Include="Services\Contracts\IComponentIdentityResolver.cs" />
     <Compile Include="Services\Contracts\ISolutionMembershipComparer.cs" />
@@ -104,6 +105,8 @@
     <Compile Include="Services\Membership\DataverseComponentIdentityResolver.cs" />
     <Compile Include="Services\Membership\SolutionMembershipComparer.cs" />
     <Compile Include="Services\Membership\DataverseSolutionMembershipOperation.cs" />
+    <Compile Include="Services\Membership\DataverseAppSettingEvidenceOperation.cs" />
+    <Compile Include="Services\Membership\AppSettingResolutionOperation.cs" />
     <Compile Include="Services\Membership\MembershipCompareCommandEvaluator.cs" />
     <Compile Include="Services\Membership\MembershipResultPresenter.cs" />
     <Compile Include="Services\Membership\MembershipCoverageDiagnosticsBuilder.cs" />
@@ -125,6 +128,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="MembershipCoverageDetailsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="AppSettingEvidenceResultsForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="ComponentDefinitionDetailsForm.cs">

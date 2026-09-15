@@ -98,6 +98,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "appmodule": return "Model-driven App / AppModule";
                 case "teamtemplate": return "Team Template";
                 case "sitemap": return "Site Map";
+                case "appsetting": return "App Setting";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -186,6 +187,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
+                case ComponentSemanticKinds.AppSetting: return "App Setting";
                 default: return DisplayKind(identity);
             }
         }

@@ -22,7 +22,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.Report,
             ComponentSemanticKinds.AppModule,
             ComponentSemanticKinds.TeamTemplate,
-            ComponentSemanticKinds.SiteMap
+            ComponentSemanticKinds.SiteMap,
+            ComponentSemanticKinds.AppSetting
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -56,7 +57,8 @@ namespace D365SolutionComparer.Services.Membership
                 .Select(group => new MembershipCoverageRawComponentTypeGroup(group.Key, group.Count(),
                     CreateDiagnosticGroups(group), group.Select(CreateRawEvidence)))
                 .ToList();
-            var dynamicComponentTypes = components.Where(item => item.RegisteredDefinition != null)
+            var dynamicComponentTypes = components.Where(item => item.RegisteredDefinition != null &&
+                    ComponentSemanticKinds.IsRegisteredDefinitionKind(item.SemanticKind))
                 .GroupBy(item => item.Record.ComponentType)
                 .OrderBy(group => group.Key)
                 .Select(CreateDynamicComponentTypeGroup)
@@ -162,6 +164,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.AppModule: return "Model-driven App / AppModule";
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
+                case ComponentSemanticKinds.AppSetting: return "App Setting";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

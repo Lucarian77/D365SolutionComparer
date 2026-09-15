@@ -15,17 +15,22 @@ namespace D365SolutionComparer
         private readonly string sourceSolutionVersion;
         private readonly string targetSolutionVersion;
         private readonly ComboBox lifecycleOperation;
+        private readonly Action captureAppSettingEvidence;
 
         public MembershipCoverageDetailsForm(string sourceName, MembershipCoverageDiagnostics source,
             string targetName, MembershipCoverageDiagnostics target,
             MembershipComparisonPresentation presentation = null,
-            string sourceSolutionVersion = null, string targetSolutionVersion = null)
+            string sourceSolutionVersion = null, string targetSolutionVersion = null,
+            Microsoft.Xrm.Sdk.IOrganizationService sourceService = null,
+            Microsoft.Xrm.Sdk.IOrganizationService targetService = null,
+            Action captureAppSettingEvidence = null)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (target == null) throw new ArgumentNullException(nameof(target));
             this.presentation = presentation;
             this.sourceSolutionVersion = sourceSolutionVersion ?? string.Empty;
             this.targetSolutionVersion = targetSolutionVersion ?? string.Empty;
+            this.captureAppSettingEvidence = captureAppSettingEvidence;
             Text = "Membership Coverage Details";
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(800, 480);
@@ -91,6 +96,17 @@ namespace D365SolutionComparer
                 Width = 165
             };
             compare.Click += CompareLifecycleCsvs_Click;
+            var appSetting = new Button
+            {
+                Text = "Capture AppSetting Evidence...",
+                Width = 170,
+                Enabled = captureAppSettingEvidence != null && sourceService != null && targetService != null &&
+                    presentation != null && presentation.Source.Snapshot != null &&
+                    presentation.Target.Snapshot != null &&
+                    presentation.Source.Snapshot.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot.State == MembershipSnapshotState.Complete
+            };
+            appSetting.Click += (sender, args) => this.captureAppSettingEvidence?.Invoke();
             var buttons = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
@@ -99,6 +115,7 @@ namespace D365SolutionComparer
                 FlowDirection = FlowDirection.RightToLeft
             };
             buttons.Controls.Add(close);
+            buttons.Controls.Add(appSetting);
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);
             Controls.Add(tabs);

@@ -14,13 +14,22 @@ namespace D365SolutionComparer
         private readonly string sourceSolutionVersion;
         private readonly string targetSolutionVersion;
         private readonly DataGridView resultsGrid;
+        private readonly Action captureAppSettingEvidence;
+        private readonly Microsoft.Xrm.Sdk.IOrganizationService sourceService;
+        private readonly Microsoft.Xrm.Sdk.IOrganizationService targetService;
 
         public MembershipResultsForm(MembershipComparisonPresentation presentation,
-            string sourceSolutionVersion = null, string targetSolutionVersion = null)
+            string sourceSolutionVersion = null, string targetSolutionVersion = null,
+            Action captureAppSettingEvidence = null,
+            Microsoft.Xrm.Sdk.IOrganizationService sourceService = null,
+            Microsoft.Xrm.Sdk.IOrganizationService targetService = null)
         {
             this.presentation = presentation ?? throw new ArgumentNullException(nameof(presentation));
             this.sourceSolutionVersion = sourceSolutionVersion ?? string.Empty;
             this.targetSolutionVersion = targetSolutionVersion ?? string.Empty;
+            this.captureAppSettingEvidence = captureAppSettingEvidence;
+            this.sourceService = sourceService;
+            this.targetService = targetService;
             Text = "Solution Membership Compare - " + presentation.SolutionUniqueName;
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(900, 520);
@@ -127,7 +136,8 @@ namespace D365SolutionComparer
             using (var form = new MembershipCoverageDetailsForm(
                 presentation.Source.Diagnostics.EnvironmentName, source,
                 presentation.Target.Diagnostics.EnvironmentName, target, presentation,
-                sourceSolutionVersion, targetSolutionVersion))
+                sourceSolutionVersion, targetSolutionVersion,
+                sourceService, targetService, captureAppSettingEvidence))
                 form.ShowDialog(this);
         }
 

@@ -764,11 +764,91 @@ namespace D365SolutionComparer
                         return;
                     }
                     var resultsForm = new MembershipResultsForm(presentation,
-                        selected.SourceVersion, selected.TargetVersion);
+                        selected.SourceVersion, selected.TargetVersion,
+                        () => CaptureAppSettingEvidence(presentation), sourceService, destinationService);
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
                     SetStatusMessage("Membership comparison completed for " + presentation.SolutionUniqueName + ".",
                         Color.Green);
+                }
+            });
+        }
+
+        private void CaptureAppSettingEvidence(MembershipComparisonPresentation presentation)
+        {
+            if (presentation == null || presentation.Source.Snapshot == null || presentation.Target.Snapshot == null ||
+                presentation.Source.Snapshot.State != MembershipSnapshotState.Complete ||
+                presentation.Target.Snapshot.State != MembershipSnapshotState.Complete ||
+                sourceMembershipService == null || targetMembershipService == null)
+            {
+                MessageBox.Show(this, "AppSetting evidence requires completed Source and Target membership snapshots.",
+                    "AppSetting Evidence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            SetStatusMessage("Capturing read-only AppSetting evidence...", Color.DarkOrange);
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only AppSetting evidence...",
+                IsCancelable = true,
+                MessageWidth = 430,
+                MessageHeight = 150,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var sourceCounter = new DataverseRequestCounter();
+                            var targetCounter = new DataverseRequestCounter();
+                            var operation = new DataverseAppSettingEvidenceOperation();
+                            var source = operation.Capture(sourceMembershipService, presentation.Source.Snapshot,
+                                cancellation.Token, message => worker.ReportProgress(35,
+                                    new MembershipUiProgress("Source: " + message)), sourceCounter);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            var target = operation.Capture(targetMembershipService, presentation.Target.Snapshot,
+                                cancellation.Token, message => worker.ReportProgress(70,
+                                    new MembershipUiProgress("Target: " + message)), targetCounter);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = AppSettingEvidenceComparison.Create(source, target);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress == null) return;
+                    SetWorkingMessage(progress.Message, 430, 150);
+                    SetStatusMessage(progress.Message, Color.DarkOrange);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled)
+                    {
+                        SetStatusMessage("AppSetting evidence capture cancelled; no partial report was opened.",
+                            Color.DarkOrange);
+                        return;
+                    }
+                    if (args.Error != null)
+                    {
+                        SetStatusMessage("AppSetting evidence capture failed.", Color.Red);
+                        MessageBox.Show(this, "AppSetting evidence capture failed.\n\n" + args.Error.Message,
+                            "AppSetting Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    var result = args.Result as AppSettingEvidenceComparison;
+                    if (result == null) return;
+                    using (var form = new AppSettingEvidenceResultsForm(result))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                    SetStatusMessage("AppSetting evidence capture completed (read-only).", Color.Green);
                 }
             });
         }
