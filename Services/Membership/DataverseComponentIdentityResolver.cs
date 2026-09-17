@@ -20,12 +20,26 @@ namespace D365SolutionComparer.Services.Membership
     public sealed class DataverseComponentIdentityResolver : IComponentIdentityResolver
     {
         private const int BatchSize = 200;
+        private readonly bool entityKeyResolutionEnabled;
+
+        public DataverseComponentIdentityResolver()
+        {
+            // Entity Key resolution is now part of the production resolver path.
+            entityKeyResolutionEnabled = true;
+        }
+
+        /// <summary>Internal switch retained for focused conservative-path tests.</summary>
+        internal DataverseComponentIdentityResolver(bool enableEntityKeyResolution)
+        {
+            entityKeyResolutionEnabled = enableEntityKeyResolution;
+        }
 
         public ComponentIdentity Resolve(IOrganizationService service, EnvironmentIdentity environment,
             SolutionComponentRecord component, CancellationToken cancellationToken)
         {
             if (component == null) throw new ArgumentNullException(nameof(component));
-            return new ResolutionContext(new DataverseReadContext(service, environment, cancellationToken))
+            return new ResolutionContext(new DataverseReadContext(service, environment, cancellationToken),
+                entityKeyResolutionEnabled)
                 .Resolve(component, cancellationToken);
         }
 
@@ -55,7 +69,8 @@ namespace D365SolutionComparer.Services.Membership
             if (snapshot.State != MembershipSnapshotState.Complete) return snapshot;
             if (context.Environment.OrganizationId != snapshot.Environment.OrganizationId)
                 throw new InvalidOperationException("The verified context belongs to a different environment.");
-            var resolved = new ResolutionContext(context).ResolveAll(snapshot.Components, cancellationToken);
+            var resolved = new ResolutionContext(context, entityKeyResolutionEnabled)
+                .ResolveAll(snapshot.Components, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             return MembershipSnapshot.Complete(snapshot.Solution, resolved, snapshot.CapturedAt);
         }
@@ -73,6 +88,7 @@ namespace D365SolutionComparer.Services.Membership
             private const int CanvasAppComponentType = 300;
             private const int TeamTemplateComponentType = 511;
             private readonly DataverseReadContext context;
+            private readonly bool entityKeyResolutionEnabled;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
             private bool workflowLookupIncomplete;
@@ -128,7 +144,11 @@ namespace D365SolutionComparer.Services.Membership
             private string connectionMappingDiagnostic;
             private IdentityResolutionStatus connectionMappingStatus = IdentityResolutionStatus.Unresolved;
 
-            public ResolutionContext(DataverseReadContext context) { this.context = context; }
+            public ResolutionContext(DataverseReadContext context, bool entityKeyResolutionEnabled)
+            {
+                this.context = context;
+                this.entityKeyResolutionEnabled = entityKeyResolutionEnabled;
+            }
 
             public ComponentIdentity Resolve(SolutionComponentRecord record, CancellationToken cancellationToken)
             {
@@ -180,7 +200,8 @@ namespace D365SolutionComparer.Services.Membership
                 PrepareClassifications(components.Select(item => item.Record), cancellationToken);
                 workflowLookupIncomplete = components.Any(item => item.Record.ComponentType == 29 &&
                     (!item.Record.ObjectId.HasValue || item.Record.ObjectId.Value == Guid.Empty));
-                ParentEntityMetadataReader.Ensure(context, components, cancellationToken);
+                ParentEntityMetadataReader.Ensure(context, components, cancellationToken,
+                    entityKeyResolutionEnabled);
                 var results = new ComponentIdentity[components.Count];
                 var pending = new List<PendingRecord>();
                 var unique = new HashSet<LookupKey>();
@@ -205,6 +226,8 @@ namespace D365SolutionComparer.Services.Membership
                     cancellationToken.ThrowIfCancellationRequested();
                     var keys = group.ToList();
                     if (group.Key == ComponentSemanticKinds.Process) ResolveProcessBatches(keys, cancellationToken);
+                    else if (group.Key == ComponentSemanticKinds.EntityKey)
+                        ResolveEntityKeyBatches(keys, cancellationToken);
                     else if (group.Key == ComponentSemanticKinds.AppModule)
                         ResolveAppModuleBatches(keys, cancellationToken);
                     else if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
@@ -228,7 +251,31 @@ namespace D365SolutionComparer.Services.Membership
                         if (results[index].RegisteredDefinition?.IsAppSetting == true)
                             results[index] = resolvedSettings[results[index].Record.SolutionComponentId];
                 }
+                ApplyEntityKeyDuplicateSafeguard(results);
                 return Array.AsReadOnly(results);
+            }
+
+            private static void ApplyEntityKeyDuplicateSafeguard(ComponentIdentity[] results)
+            {
+                var duplicateKeys = new HashSet<string>(results.Where(item => item != null &&
+                        item.SemanticKind == ComponentSemanticKinds.EntityKey &&
+                        item.Status == IdentityResolutionStatus.Resolved)
+                    .GroupBy(item => item.ComparisonKey, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Select(item => item.Record.ObjectId).Distinct().Count() > 1)
+                    .Select(group => group.Key), StringComparer.OrdinalIgnoreCase);
+                for (int index = 0; index < results.Length; index++)
+                {
+                    var item = results[index];
+                    if (item == null || item.SemanticKind != ComponentSemanticKinds.EntityKey ||
+                        item.Status != IdentityResolutionStatus.Resolved ||
+                        !duplicateKeys.Contains(item.ComparisonKey)) continue;
+                    results[index] = new ComponentIdentity(item.Record, IdentityResolutionStatus.Ambiguous,
+                        diagnostic: "Multiple Entity Key membership records share the same portable identity.",
+                        componentTypeKey: ComponentSemanticKinds.EntityKey,
+                        semanticKind: ComponentSemanticKinds.EntityKey,
+                        diagnosticEvidence: item.DiagnosticEvidence,
+                        blockerPortableIdentity: item.ComparisonKey);
+                }
             }
 
             private IReadOnlyList<ComponentIdentity> ResolveAppSettings(IReadOnlyList<ComponentIdentity> candidates,
@@ -278,6 +325,11 @@ namespace D365SolutionComparer.Services.Membership
                     case 10: kind = "relationship"; break;
                     case 61: kind = "webresource"; break;
                     case AppModuleComponentType: kind = ComponentSemanticKinds.AppModule; break;
+                    case 14:
+                        if (entityKeyResolutionEnabled) { kind = ComponentSemanticKinds.EntityKey; break; }
+                        return Unknown(record, IdentityResolutionStatus.Unsupported,
+                            "No identity resolver supports this known component type.",
+                            diagnosticEvidence: GetKnownComponentDiagnosticEvidence(record));
                     case 29: kind = "process"; break;
                     case 20: kind = "securityrole"; break;
                     case 380: kind = "environmentvariabledefinition"; break;
@@ -333,6 +385,48 @@ namespace D365SolutionComparer.Services.Membership
                     return Unknown(record, IdentityResolutionStatus.Unresolved,
                         "The raw component has no usable object ID.", kind);
                 return null;
+            }
+
+            private void ResolveEntityKeyBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                var inventory = context.MetadataCache.ParentMetadata;
+                foreach (var key in keys)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (inventory == null)
+                    {
+                        identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                            "Entity Key metadata inventory was not loaded.");
+                        continue;
+                    }
+                    var correlation = inventory.CorrelateEntityKey(key.ObjectId);
+                    if (correlation.Status == IdentityResolutionStatus.Ambiguous)
+                        identityCache[key] = ResolutionValue.Ambiguous(key.Kind, correlation.Diagnostic,
+                            correlation.Evidence);
+                    else if (correlation.Status != IdentityResolutionStatus.Resolved)
+                        identityCache[key] = ResolutionValue.Unresolved(key.Kind, correlation.Diagnostic,
+                            correlation.Evidence);
+                    else
+                    {
+                        var evidence = correlation.Evidence.Concat(new[] {
+                            "Entity Key LogicalName=" + correlation.Metadata.LogicalName,
+                            "Entity Key SchemaName=" + (correlation.Metadata.SchemaName ?? "(blank)"),
+                            "KeyAttributes=" + string.Join(",", CanonicalKeyAttributes(correlation.Metadata.KeyAttributes))
+                        });
+                        identityCache[key] = ResolutionValue.FromKey(key.Kind, correlation.PortableKey,
+                            diagnosticEvidence: evidence.ToArray());
+                    }
+                }
+            }
+
+            private static IEnumerable<string> CanonicalKeyAttributes(IEnumerable<string> values)
+            {
+                return (values ?? Enumerable.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value.Trim().ToLowerInvariant())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(value => value, StringComparer.OrdinalIgnoreCase);
             }
 
             private ResolutionValue ResolveOne(LookupKey key, CancellationToken cancellationToken)

@@ -99,6 +99,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "teamtemplate": return "Team Template";
                 case "sitemap": return "Site Map";
                 case "appsetting": return "App Setting";
+                case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -188,6 +189,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
+                case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 default: return DisplayKind(identity);
             }
         }

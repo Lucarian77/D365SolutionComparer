@@ -49,7 +49,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 // Runtime metadata must verify these exact fields/types before they are read.
                 // value/defaultvalue, localized text and free-form URLs are deliberately excluded.
                 [ComponentSemanticKinds.AppSetting] = Contract(ComponentSemanticKinds.AppSetting,
-                    "datatype", "isoverridable", "overridablelevel", "releaselevel")
+                    "datatype", "isoverridable", "overridablelevel", "releaselevel"),
+                [ComponentSemanticKinds.EntityKey] = Contract(ComponentSemanticKinds.EntityKey,
+                    "EntityLogicalName", "LogicalName", "KeyAttributes")
             };
 
         public static ComponentDefinitionContract For(string semanticKind)
@@ -69,6 +71,8 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 return new[] { "appsettingid", "settingdefinitionid", "parentappmoduleid", "solutioncomponentid",
                     "componentidunique", "componentstate", "ismanaged", "name", "uniquename",
                     "value", "defaultvalue", "ownerid", "createdon", "modifiedon", "solutionid" };
+            if (string.Equals(kind, ComponentSemanticKinds.EntityKey, StringComparison.OrdinalIgnoreCase))
+                return new[] { "MetadataId", "SchemaName", "EntityKeyIndexStatus", "AsyncJob" };
             if (string.Equals(kind, ComponentSemanticKinds.Table, StringComparison.OrdinalIgnoreCase))
                 return new[] { "MetadataId", "LogicalName", "IsManaged" };
             if (string.Equals(kind, ComponentSemanticKinds.Column, StringComparison.OrdinalIgnoreCase))

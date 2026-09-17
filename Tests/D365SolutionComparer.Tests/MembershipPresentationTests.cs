@@ -85,6 +85,21 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
+        public void EntityKeyIdentityUsesEntityKeyPresentationLabel()
+        {
+            const string portableKey = "entitykey:v1:7:account:10:new_keyone";
+            var presentation = Present(
+                Snapshot(Identity(portableKey, 14, kind: ComponentSemanticKinds.EntityKey)),
+                Snapshot(Identity(portableKey, 14, kind: ComponentSemanticKinds.EntityKey)));
+
+            var row = presentation.Rows.Single();
+            Assert.AreEqual("Entity Key", row.ComponentKind);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+            Assert.AreEqual(14, row.SourceRawComponentType);
+            Assert.AreEqual(14, row.TargetRawComponentType);
+        }
+
+        [TestMethod]
         public void UnsupportedTeamTemplateUsesTeamTemplatePresentationLabel()
         {
             var teamTemplate = Identity(null, 511, IdentityResolutionStatus.Unsupported,

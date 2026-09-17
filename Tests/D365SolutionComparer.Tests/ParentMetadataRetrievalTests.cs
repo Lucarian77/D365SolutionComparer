@@ -23,13 +23,14 @@ namespace D365SolutionComparer.Tests
     {
         internal static EntityMetadata Root(Guid id, string name, AttributeMetadata[] columns = null,
             OneToManyRelationshipMetadata[] one = null, OneToManyRelationshipMetadata[] many = null,
-            ManyToManyRelationshipMetadata[] multiple = null)
+            ManyToManyRelationshipMetadata[] multiple = null, EntityKeyMetadata[] keys = null)
         {
             var root = new EntityMetadata { MetadataId = id, LogicalName = name, SchemaName = name };
             typeof(EntityMetadata).GetProperty("Attributes").SetValue(root, columns ?? new AttributeMetadata[0]);
             typeof(EntityMetadata).GetProperty("OneToManyRelationships").SetValue(root, one ?? new OneToManyRelationshipMetadata[0]);
             typeof(EntityMetadata).GetProperty("ManyToOneRelationships").SetValue(root, many ?? new OneToManyRelationshipMetadata[0]);
             typeof(EntityMetadata).GetProperty("ManyToManyRelationships").SetValue(root, multiple ?? new ManyToManyRelationshipMetadata[0]);
+            typeof(EntityMetadata).GetProperty("Keys").SetValue(root, keys ?? new EntityKeyMetadata[0]);
             return root;
         }
         internal static AttributeMetadata Column(Guid id, string name = "new_code") =>
