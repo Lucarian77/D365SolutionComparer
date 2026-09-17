@@ -165,6 +165,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.TeamTemplate: return "Team Template";
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
+                case ComponentSemanticKinds.EntityKey: return "Entity Key";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

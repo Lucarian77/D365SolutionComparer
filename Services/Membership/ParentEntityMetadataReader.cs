@@ -36,20 +36,44 @@ namespace D365SolutionComparer.Services.Membership
             "RelationshipType", "IsCustomizable", "ReferencedEntity", "ReferencedAttribute",
             "ReferencingEntity", "ReferencingAttribute", "CascadeConfiguration",
             "Entity1LogicalName", "Entity2LogicalName", "IntersectEntityName" };
+        internal static readonly string[] EntityKeyProperties = { "MetadataId", "EntityLogicalName",
+            "LogicalName", "SchemaName", "KeyAttributes" };
 
         internal static void Ensure(DataverseReadContext context,
-            IReadOnlyList<ComponentIdentity> components, CancellationToken cancellationToken)
+            IReadOnlyList<ComponentIdentity> components, CancellationToken cancellationToken,
+            bool enableEntityKeyResolution = false)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (context.MetadataCache.ParentMetadata != null) return;
+            enableEntityKeyResolution = enableEntityKeyResolution ||
+                components.Any(item => string.Equals(item.SemanticKind, ComponentSemanticKinds.EntityKey,
+                    StringComparison.OrdinalIgnoreCase));
+            if (context.MetadataCache.ParentMetadata != null &&
+                (!enableEntityKeyResolution || context.MetadataCache.ParentMetadata.IncludesEntityKeys)) return;
             var children = components.Where(item => item.Record.ComponentType == 2 ||
-                item.Record.ComponentType == 10).ToList();
+                item.Record.ComponentType == 10 ||
+                (enableEntityKeyResolution && item.Record.ComponentType == 14)).ToList();
             if (children.Count == 0) return;
+            var includeKeys = children.Any(item => item.Record.ComponentType == 14);
             var inventory = new ParentEntityMetadataInventory();
             var parentIds = components.Where(item => item.Record.ComponentType == 1 &&
                     item.Record.ObjectId.HasValue && item.Record.ObjectId.Value != Guid.Empty)
                 .Select(item => item.Record.ObjectId.Value).Distinct().OrderBy(id => id).ToList();
             inventory.ParentIds.UnionWith(parentIds);
+            // Entity Key membership rows point at a root solutioncomponent row. That root
+            // carries the parent Table metadata ID, allowing Keys to be retrieved in this
+            // grouped metadata request without a per-key request or a guessed table name.
+            var bySolutionComponentId = components.Select(item => item.Record)
+                .GroupBy(item => item.SolutionComponentId)
+                .ToDictionary(group => group.Key, group => group.First());
+            foreach (var key in children.Where(item => item.Record.ComponentType == 14))
+            {
+                SolutionComponentRecord root;
+                if (key.Record.RootSolutionComponentId.HasValue &&
+                    bySolutionComponentId.TryGetValue(key.Record.RootSolutionComponentId.Value, out root) &&
+                    root.ObjectId.HasValue && root.ObjectId.Value != Guid.Empty)
+                    inventory.ParentIds.Add(root.ObjectId.Value);
+            }
+            parentIds = inventory.ParentIds.OrderBy(id => id).ToList();
             var conditions = parentIds.Select(id => new MetadataConditionExpression("MetadataId",
                 MetadataConditionOperator.Equals, id)).ToList();
 
@@ -87,7 +111,9 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         Properties = new MetadataPropertiesExpression(new[] { "MetadataId", "LogicalName" }
                             .Concat(ComponentDefinitionContractCatalog.For(ComponentSemanticKinds.Table)
-                                .ComparableProperties).Concat(Collections).Distinct(StringComparer.Ordinal).ToArray()),
+                                .ComparableProperties).Concat(Collections)
+                            .Concat(includeKeys ? new[] { "Keys" } : Enumerable.Empty<string>())
+                            .Distinct(StringComparer.Ordinal).ToArray()),
                         Criteria = new MetadataFilterExpression(LogicalOperator.Or),
                         AttributeQuery = new AttributeQueryExpression
                         {
@@ -98,6 +124,11 @@ namespace D365SolutionComparer.Services.Membership
                             Properties = new MetadataPropertiesExpression(RelationshipProperties)
                         }
                     };
+                    if (includeKeys)
+                        query.KeyQuery = new EntityKeyQueryExpression
+                        {
+                            Properties = new MetadataPropertiesExpression(EntityKeyProperties)
+                        };
                     foreach (var condition in batch) query.Criteria.Conditions.Add(condition);
                     var response = context.Execute(new RetrieveMetadataChangesRequest { Query = query })
                         as RetrieveMetadataChangesResponse;
@@ -119,6 +150,8 @@ namespace D365SolutionComparer.Services.Membership
                         entity.OneToManyRelationships == null || entity.ManyToOneRelationships == null ||
                         entity.ManyToManyRelationships == null))
                         throw new InvalidOperationException("One or more requested child metadata collections were not supplied.");
+                    if (includeKeys && entities.Any(entity => entity.Keys == null))
+                        inventory.MarkKeyFailure("Entity Key metadata collection was not supplied by the SDK.");
                     returned.AddRange(entities);
                 }
                 catch (OperationCanceledException) { throw; }
@@ -135,7 +168,7 @@ namespace D365SolutionComparer.Services.Membership
                 returned.GroupBy(item => item.LogicalName, StringComparer.OrdinalIgnoreCase)
                     .Any(group => group.Count() != 1))
                 inventory.Fail("Column / Relationship parent metadata has conflicting parents across batches.");
-            else inventory.Load(returned);
+            else inventory.Load(returned, includeKeys);
             cancellationToken.ThrowIfCancellationRequested();
             if (!inventory.Failed)
                 foreach (var entity in returned) context.MetadataCache.Store(entity, true);
@@ -150,15 +183,25 @@ namespace D365SolutionComparer.Services.Membership
             new Dictionary<Guid, List<ChildMetadataCorrelation>>();
         private readonly Dictionary<Guid, List<ChildMetadataCorrelation>> relationships =
             new Dictionary<Guid, List<ChildMetadataCorrelation>>();
+        private readonly Dictionary<Guid, List<EntityKeyMetadataCorrelation>> keys =
+            new Dictionary<Guid, List<EntityKeyMetadataCorrelation>>();
         internal string ScopeEvidence;
         internal readonly HashSet<Guid> ParentIds = new HashSet<Guid>();
+        internal bool IncludesEntityKeys { get; private set; }
         internal string FailureEvidence => failure;
         private string failure;
+        private string keyFailure;
         internal bool Failed => failure != null;
-        internal void Fail(string diagnostic) { failure = diagnostic; columns.Clear(); relationships.Clear(); }
-
-        internal void Load(IEnumerable<EntityMetadata> entities)
+        internal void Fail(string diagnostic) { failure = diagnostic; columns.Clear(); relationships.Clear(); keys.Clear(); }
+        internal void MarkKeyFailure(string diagnostic)
         {
+            if (keyFailure == null) keyFailure = diagnostic;
+            keys.Clear();
+        }
+
+        internal void Load(IEnumerable<EntityMetadata> entities, bool includeKeys = false)
+        {
+            IncludesEntityKeys = includeKeys;
             foreach (var entity in entities)
             {
                 foreach (var attribute in entity.Attributes)
@@ -180,7 +223,72 @@ namespace D365SolutionComparer.Services.Membership
                         Relationship = relationship, ParentLogicalName = entity.LogicalName
                     });
                 }
+                if (includeKeys)
+                {
+                    foreach (var key in entity.Keys ?? new EntityKeyMetadata[0])
+                    {
+                        if (key?.MetadataId == null || key.MetadataId == Guid.Empty)
+                        { MarkKeyFailure("Entity Key parent metadata contains a key without a usable MetadataId."); continue; }
+                        Add(keys, key.MetadataId.Value, new EntityKeyMetadataCorrelation
+                        {
+                            Metadata = key, ParentLogicalName = entity.LogicalName
+                        });
+                    }
+                }
             }
+        }
+
+        internal EntityKeyMetadataCorrelation CorrelateEntityKey(Guid id)
+        {
+            var result = new EntityKeyMetadataCorrelation();
+            if (Failed)
+            {
+                result.Diagnostic = "Entity Key metadata inventory is incomplete; see diagnostic evidence.";
+                result.Evidence = new[] { failure };
+                return result;
+            }
+            if (keyFailure != null)
+            {
+                result.Diagnostic = keyFailure;
+                result.Evidence = new[] { keyFailure };
+                return result;
+            }
+            List<EntityKeyMetadataCorrelation> matches;
+            if (!keys.TryGetValue(id, out matches))
+            {
+                result.Diagnostic = "No Entity Key metadata matched the component object ID within verified parent Tables.";
+                result.Evidence = Evidence(id, ComponentSemanticKinds.EntityKey);
+                return result;
+            }
+            if (matches.Count != 1)
+            {
+                result.Status = IdentityResolutionStatus.Ambiguous;
+                result.Diagnostic = "Multiple conflicting Entity Key metadata records matched the component object ID.";
+                result.Evidence = Evidence(id, ComponentSemanticKinds.EntityKey);
+                return result;
+            }
+            result = matches[0];
+            result.Evidence = Evidence(id, ComponentSemanticKinds.EntityKey).Concat(new[] {
+                "Correlated parent=" + result.ParentLogicalName + "." }).ToArray();
+            var metadata = result.Metadata;
+            if (string.IsNullOrWhiteSpace(result.ParentLogicalName) ||
+                string.IsNullOrWhiteSpace(metadata.EntityLogicalName) ||
+                !StringComparer.OrdinalIgnoreCase.Equals(result.ParentLogicalName, metadata.EntityLogicalName) ||
+                string.IsNullOrWhiteSpace(metadata.LogicalName))
+            {
+                result.Diagnostic = "Entity Key metadata has a missing or conflicting parent/logical name.";
+                return result;
+            }
+            result.PortableKey = EntityKeyPortableKey(result.ParentLogicalName, metadata.LogicalName);
+            result.Status = IdentityResolutionStatus.Resolved;
+            return result;
+        }
+
+        internal static string EntityKeyPortableKey(string parentLogicalName, string keyLogicalName)
+        {
+            return "entitykey:v1:" + parentLogicalName.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                ":" + parentLogicalName + ":" + keyLogicalName.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                ":" + keyLogicalName;
         }
 
         internal ChildMetadataCorrelation Correlate(string kind, Guid id)
@@ -252,6 +360,14 @@ namespace D365SolutionComparer.Services.Membership
             list.Add(value);
         }
 
+        private static void Add(Dictionary<Guid, List<EntityKeyMetadataCorrelation>> index, Guid id,
+            EntityKeyMetadataCorrelation value)
+        {
+            List<EntityKeyMetadataCorrelation> list;
+            if (!index.TryGetValue(id, out list)) index[id] = list = new List<EntityKeyMetadataCorrelation>();
+            list.Add(value);
+        }
+
         private static string RelationshipSignature(RelationshipMetadataBase metadata)
         {
             using (var stream = new MemoryStream())
@@ -270,6 +386,16 @@ namespace D365SolutionComparer.Services.Membership
         internal string ParentLogicalName;
         internal AttributeMetadata Attribute;
         internal RelationshipMetadataBase Relationship;
+        internal IEnumerable<string> Evidence = new string[0];
+    }
+
+    internal sealed class EntityKeyMetadataCorrelation
+    {
+        internal IdentityResolutionStatus Status = IdentityResolutionStatus.Unresolved;
+        internal string Diagnostic = string.Empty;
+        internal string PortableKey;
+        internal string ParentLogicalName;
+        internal EntityKeyMetadata Metadata;
         internal IEnumerable<string> Evidence = new string[0];
     }
 }

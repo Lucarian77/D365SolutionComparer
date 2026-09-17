@@ -37,7 +37,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.AppModule,
                 ComponentSemanticKinds.SiteMap,
                 ComponentSemanticKinds.Process,
-                ComponentSemanticKinds.AppSetting
+                ComponentSemanticKinds.AppSetting,
+                ComponentSemanticKinds.EntityKey
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -87,7 +88,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
 
             if (membership.Components.Any(item => item.Status == IdentityResolutionStatus.Resolved &&
                 (item.SemanticKind == ComponentSemanticKinds.Column ||
-                 item.SemanticKind == ComponentSemanticKinds.Relationship)))
+                 item.SemanticKind == ComponentSemanticKinds.Relationship ||
+                 item.SemanticKind == ComponentSemanticKinds.EntityKey)))
                 ParentEntityMetadataReader.Ensure(context, membership.Components, cancellationToken);
 
             ReadTables(context, Pending(membership, results, ComponentSemanticKinds.Table),
@@ -95,6 +97,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
             ReadAttributes(context, Pending(membership, results, ComponentSemanticKinds.Column),
                 results, cancellationToken);
             ReadRelationships(context, Pending(membership, results, ComponentSemanticKinds.Relationship),
+                results, cancellationToken);
+            ReadEntityKeys(context, Pending(membership, results, ComponentSemanticKinds.EntityKey),
                 results, cancellationToken);
             ReadWorkflows(context, Pending(membership, results, ComponentSemanticKinds.Process), results, cancellationToken);
             var appSettings = Pending(membership, results, ComponentSemanticKinds.AppSetting);
@@ -212,6 +216,46 @@ namespace D365SolutionComparer.Services.ComponentDetails
             IReadOnlyList<ComponentIdentity> identities,
             IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken) =>
             ReadChildren(context, identities, results, cancellationToken);
+
+        private static void ReadEntityKeys(DataverseReadContext context,
+            IReadOnlyList<ComponentIdentity> identities,
+            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken)
+        {
+            foreach (var identity in identities)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var correlation = context.MetadataCache.ParentMetadata?.CorrelateEntityKey(
+                    identity.Record.ObjectId.Value);
+                if (correlation == null || correlation.Status != IdentityResolutionStatus.Resolved ||
+                    !StringComparer.OrdinalIgnoreCase.Equals(identity.ComparisonKey, correlation.PortableKey))
+                {
+                    Set(results, new ComponentDefinition(identity,
+                        correlation?.Status == IdentityResolutionStatus.Ambiguous
+                            ? ComponentDefinitionReadStatus.Ambiguous : ComponentDefinitionReadStatus.Unresolved,
+                        diagnostic: correlation?.Diagnostic ?? "Entity Key metadata was not available.",
+                        diagnosticEvidence: correlation?.Evidence));
+                    continue;
+                }
+                var attributes = (correlation.Metadata.KeyAttributes ?? Enumerable.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim().ToLowerInvariant())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToList();
+                if (attributes.Count == 0)
+                {
+                    Set(results, new ComponentDefinition(identity, ComponentDefinitionReadStatus.Unresolved,
+                        diagnostic: "The correlated Entity Key has no usable KeyAttributes.",
+                        diagnosticEvidence: correlation.Evidence));
+                    continue;
+                }
+                Set(results, new ComponentDefinition(identity, ComponentDefinitionReadStatus.Available,
+                    new[]
+                    {
+                        new KeyValuePair<string, string>("EntityLogicalName", correlation.Metadata.EntityLogicalName.ToLowerInvariant()),
+                        new KeyValuePair<string, string>("LogicalName", correlation.Metadata.LogicalName.ToLowerInvariant()),
+                        new KeyValuePair<string, string>("KeyAttributes", string.Join(",", attributes))
+                    }, diagnosticEvidence: correlation.Evidence));
+            }
+        }
 
         private static void ReadChildren(DataverseReadContext context,
             IReadOnlyList<ComponentIdentity> identities,
