@@ -23,7 +23,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.AppModule,
             ComponentSemanticKinds.TeamTemplate,
             ComponentSemanticKinds.SiteMap,
-            ComponentSemanticKinds.AppSetting
+            ComponentSemanticKinds.AppSetting,
+            ComponentSemanticKinds.EntityKey
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)

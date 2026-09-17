@@ -14,6 +14,22 @@ namespace D365SolutionComparer.Tests
             new MembershipCoverageDiagnosticsBuilder();
 
         [TestMethod]
+        public void EmptySnapshotIncludesZeroTotalEntityKeyCoverageBucket()
+        {
+            var diagnostics = builder.Build(Snapshot());
+
+            var entityKey = Kind(diagnostics, ComponentSemanticKinds.EntityKey);
+            Assert.AreEqual("Entity Key", entityKey.DisplayName);
+            Assert.AreEqual(MembershipCoverageBucketType.SemanticKind, entityKey.BucketType);
+            Assert.AreEqual(0, entityKey.TotalCandidates);
+            Assert.AreEqual(0, entityKey.Resolved);
+            Assert.AreEqual(0, entityKey.Unsupported);
+            Assert.AreEqual(0, entityKey.Unresolved);
+            Assert.AreEqual(0, entityKey.Ambiguous);
+            Assert.AreEqual(MembershipCoverageStatus.Complete, entityKey.CoverageStatus);
+        }
+
+        [TestMethod]
         public void CompleteSemanticKindReportsCountsAndCompleteCoverage()
         {
             var diagnostics = builder.Build(Snapshot(
