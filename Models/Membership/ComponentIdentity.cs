@@ -5,6 +5,7 @@ namespace D365SolutionComparer.Models.Membership
 {
     public enum IdentityResolutionStatus { Unresolved, Resolved, Unsupported, Ambiguous }
     public enum ResolutionBlockerScope { None, PortableIdentity, SemanticKind }
+    public enum InventoryAbsencePolicy { CompleteInventory, MatchOnly }
 
     /// <summary>A type-specific key plus the original record. Display names alone are not identity keys.</summary>
     public sealed class ComponentIdentity
@@ -13,7 +14,8 @@ namespace D365SolutionComparer.Models.Membership
             string comparisonKey = null, string diagnostic = null, string componentTypeKey = null,
             string semanticKind = null, SolutionComponentDefinitionIdentity registeredDefinition = null,
             IEnumerable<string> diagnosticEvidence = null, string workflowCandidateKey = null,
-            string blockerPortableIdentity = null, ResolutionBlockerScope blockerScope = ResolutionBlockerScope.None)
+            string blockerPortableIdentity = null, ResolutionBlockerScope blockerScope = ResolutionBlockerScope.None,
+            InventoryAbsencePolicy inventoryAbsencePolicy = InventoryAbsencePolicy.CompleteInventory)
         {
             Record = record ?? throw new ArgumentNullException(nameof(record));
             if (!Enum.IsDefined(typeof(IdentityResolutionStatus), status)) throw new ArgumentOutOfRangeException(nameof(status));
@@ -48,7 +50,14 @@ namespace D365SolutionComparer.Models.Membership
                 throw new ArgumentException("A portable-identity blocker requires its identity.", nameof(blockerPortableIdentity));
             if (status == IdentityResolutionStatus.Resolved && BlockerScope != ResolutionBlockerScope.None)
                 throw new ArgumentException("Resolved identities cannot carry a resolution blocker.", nameof(blockerScope));
+            if (!Enum.IsDefined(typeof(InventoryAbsencePolicy), inventoryAbsencePolicy))
+                throw new ArgumentOutOfRangeException(nameof(inventoryAbsencePolicy));
+            if (status != IdentityResolutionStatus.Resolved &&
+                inventoryAbsencePolicy != InventoryAbsencePolicy.CompleteInventory)
+                throw new ArgumentException("Only resolved identities can restrict inventory absence evidence.",
+                    nameof(inventoryAbsencePolicy));
             ComparisonKey = comparisonKey;
+            InventoryAbsencePolicy = inventoryAbsencePolicy;
             Diagnostic = diagnostic ?? string.Empty;
             RegisteredDefinition = registeredDefinition;
             DiagnosticEvidence = new List<string>(diagnosticEvidence ?? new string[0]).AsReadOnly();
@@ -65,6 +74,8 @@ namespace D365SolutionComparer.Models.Membership
         public string WorkflowCandidateKey { get; }
         public string BlockerPortableIdentity { get; }
         public ResolutionBlockerScope BlockerScope { get; }
+        /// <summary>Controls whether an unmatched resolved identity can use complete inventory as absence proof.</summary>
+        public InventoryAbsencePolicy InventoryAbsencePolicy { get; }
         public string Diagnostic { get; }
         public SolutionComponentDefinitionIdentity RegisteredDefinition { get; }
         /// <summary>Per-record audit data that is never used as an identity or diagnostic grouping key.</summary>

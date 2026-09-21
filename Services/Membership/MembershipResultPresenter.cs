@@ -100,6 +100,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "sitemap": return "Site Map";
                 case "appsetting": return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
+                case ComponentSemanticKinds.SystemForm: return "System Form";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -166,8 +167,11 @@ namespace D365SolutionComparer.Services.Membership
             else if (item.Presence == MembershipPresence.Indeterminate &&
                 (item.Source ?? item.Target).Status == IdentityResolutionStatus.Resolved &&
                 source.State != MembershipSnapshotState.Unavailable && target.State != MembershipSnapshotState.Unavailable)
-                Add(messages, "Absence is not established because the opposite " +
-                    DisplaySemanticKind(item.Source ?? item.Target) + " component kind is not fully resolved.");
+                Add(messages, (item.Source ?? item.Target).InventoryAbsencePolicy ==
+                    InventoryAbsencePolicy.MatchOnly
+                    ? "Absence is not established because this identity path can prove a shared match but cannot use complete inventory to prove a one-sided result."
+                    : "Absence is not established because the opposite " +
+                        DisplaySemanticKind(item.Source ?? item.Target) + " component kind is not fully resolved.");
             return string.Join(" ", messages.Distinct(StringComparer.Ordinal));
         }
 
@@ -190,6 +194,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
+                case ComponentSemanticKinds.SystemForm: return "System Form";
                 default: return DisplayKind(identity);
             }
         }

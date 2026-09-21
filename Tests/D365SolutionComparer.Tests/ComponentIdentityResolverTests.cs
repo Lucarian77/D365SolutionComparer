@@ -1776,7 +1776,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type60SystemFormLookupCapturesCandidateEvidenceWithoutCreatingIdentity()
+        public void Type60SystemFormLookupCapturesEvidenceAndCreatesProductionIdentity()
         {
             var solution = Solution(); var objectId = Guid.NewGuid(); var componentId = Guid.NewGuid();
             int metadataRequests = 0;
@@ -1791,10 +1791,10 @@ namespace D365SolutionComparer.Tests
                 new SolutionComponentRecord(componentId, 60, objectId), CancellationToken.None);
 
             Assert.AreEqual(0, metadataRequests);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
-            Assert.IsNull(result.ComparisonKey);
-            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.AreEqual("systemform:v1:entity:7:account:15:new_AccountMain", result.ComparisonKey);
+            Assert.AreEqual("System Form identity resolved through EntityScopedUniqueName.", result.Diagnostic);
             var evidence = result.DiagnosticEvidence.First();
             StringAssert.Contains(evidence, "formid=" + objectId.ToString("D"));
             StringAssert.Contains(evidence, "uniquename='new_AccountMain'");
@@ -1854,7 +1854,8 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
                 evidence.Contains("lifecycle candidate status=CandidateValid"))));
             Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+                item.Status == IdentityResolutionStatus.Resolved && item.ComparisonKey != null &&
+                item.SemanticKind == ComponentSemanticKinds.SystemForm));
         }
 
         [TestMethod]
@@ -1892,8 +1893,8 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(2, counter.TotalRequests);
             Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null &&
-                item.SemanticKind == "unsupported:componenttype:60"));
+                item.Status == IdentityResolutionStatus.Ambiguous && item.ComparisonKey == null &&
+                item.SemanticKind == ComponentSemanticKinds.SystemForm));
             Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
                 evidence.Contains("candidate status=DuplicateCandidate"))));
             var summary = result.Components.SelectMany(item => item.DiagnosticEvidence).Single(item =>
@@ -1907,10 +1908,10 @@ namespace D365SolutionComparer.Tests
                 "duplicatecandidateidentities=['account.new_main']");
             StringAssert.Contains(summary, "ValidCandidateList=[]");
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:60");
+                item.SemanticKind == ComponentSemanticKinds.SystemForm);
             Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
             Assert.AreEqual(6, bucket.DiagnosticGroups.Single().Count);
-            Assert.AreEqual("No identity resolver supports this known component type.",
+            Assert.AreEqual("Multiple System Form records share the same portable identity.",
                 bucket.DiagnosticGroups.Single().Diagnostic);
         }
 
@@ -1929,8 +1930,8 @@ namespace D365SolutionComparer.Tests
                 Assert.IsTrue(ids.Count <= 200);
                 Assert.AreEqual(ids.Count, ids.Distinct().Count());
                 queriedIds.AddRange(ids);
-                return Rows(ids.Select((id, index) => SystemForm(id, "new_Form" + index,
-                    "Form " + index, "account", 2, Guid.NewGuid(), false)).ToArray());
+                return Rows(ids.Select(id => SystemForm(id, "new_Form" + id.ToString("N"),
+                    "Form", "account", 2, Guid.NewGuid(), false)).ToArray());
             });
             var counter = new D365SolutionComparer.Infrastructure.DataverseRequestCounter();
 
@@ -1943,13 +1944,11 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(3, counter.TotalRequests);
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:60");
-            Assert.AreEqual(MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(202, bucket.DiagnosticGroups.Single().Count);
+                item.SemanticKind == ComponentSemanticKinds.SystemForm);
+            Assert.AreEqual(MembershipCoverageBucketType.SemanticKind, bucket.BucketType);
+            Assert.AreEqual(0, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(202, bucket.Resolved);
             Assert.AreEqual(202, bucket.AuditEvidence.Count);
-            Assert.AreEqual("No identity resolver supports this known component type.",
-                bucket.DiagnosticGroups.Single().Diagnostic);
         }
 
         [TestMethod]
@@ -1992,12 +1991,15 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "MissingCorrelationCount=1");
             StringAssert.Contains(summary, "DuplicateCorrelationCount=1");
             StringAssert.Contains(summary, "ValidCandidateCount=0");
-            Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Components[0].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[1].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Components[2].Status);
+            Assert.AreEqual(InventoryAbsencePolicy.MatchOnly,
+                result.Components[2].InventoryAbsencePolicy);
         }
 
         [TestMethod]
-        public void Type60ConflictingResultPreservesEvidenceAndRemainsUnsupported()
+        public void Type60ConflictingResultPreservesEvidenceAndRemainsUnresolved()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
             var conflicting = SystemForm(objectId, "new_Conflict", "Conflict", "account", 2,
@@ -2008,8 +2010,8 @@ namespace D365SolutionComparer.Tests
                 SystemFormService(solution, query => Rows(conflicting)), solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 60, objectId), CancellationToken.None);
 
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
             Assert.IsNull(result.ComparisonKey);
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("conflicting or incomplete")));
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("name='Conflict'")));
@@ -2032,6 +2034,7 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(paged.DiagnosticEvidence.Any(item =>
                 item.Contains("candidate status=Incomplete")));
             Assert.IsTrue(paged.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, paged.Status);
         }
 
         [TestMethod]
@@ -2043,8 +2046,8 @@ namespace D365SolutionComparer.Tests
                     Guid.NewGuid(), false)), request => throw new FaultException("Entity metadata denied")),
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
                 CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, metadataFault.Status);
-            Assert.AreEqual("unsupported:componenttype:60", metadataFault.SemanticKind);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, metadataFault.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, metadataFault.SemanticKind);
             Assert.IsNull(metadataFault.ComparisonKey);
             StringAssert.Contains(metadataFault.DiagnosticEvidence.First(), "Entity metadata denied");
             StringAssert.Contains(metadataFault.DiagnosticEvidence.First(),
@@ -2067,7 +2070,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type60QueryFaultRemainsDiagnosticAndCandidateNamesCannotCreateMatches()
+        public void Type60QueryFaultRemainsConservativeAndPortableNamesCreateMatches()
         {
             var sourceSolution = Solution();
             var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
@@ -2085,10 +2088,10 @@ namespace D365SolutionComparer.Tests
             var compared = new SolutionMembershipComparer().Compare(
                 MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
-            Assert.AreEqual(2, compared.Count);
-            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
-            Assert.IsNull(source.ComparisonKey);
-            Assert.IsNull(target.ComparisonKey);
+            Assert.AreEqual(1, compared.Count);
+            Assert.AreEqual(MembershipPresence.PresentInBoth, compared.Single().Presence);
+            Assert.IsNotNull(source.ComparisonKey);
+            Assert.IsNotNull(target.ComparisonKey);
             var sourceCandidate = source.DiagnosticEvidence.Single(item =>
                 item.Contains("lifecycle candidate status=CandidateValid"));
             var targetCandidate = target.DiagnosticEvidence.Single(item =>
@@ -2101,7 +2104,7 @@ namespace D365SolutionComparer.Tests
             var faulted = resolver.Resolve(SystemFormService(sourceSolution,
                     query => throw new FaultException("System Form denied")), sourceSolution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 60, Guid.NewGuid()), CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, faulted.Status);
             Assert.IsNull(faulted.ComparisonKey);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "System Form denied");
             Assert.IsTrue(faulted.DiagnosticEvidence.Any(item =>
@@ -2117,8 +2120,8 @@ namespace D365SolutionComparer.Tests
                 new SolutionComponentRecord(Guid.NewGuid(), 60, null), CancellationToken.None);
 
             Assert.AreEqual(0, queryCount);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
@@ -2133,7 +2136,7 @@ namespace D365SolutionComparer.Tests
                 SystemForm(objectId, "new_AccountMain", "Account main", "account", 2,
                     Guid.NewGuid(), false));
 
-            AssertType60DiagnosticOnly(result);
+            AssertType60Resolved(result);
             AssertCandidateStatus(result, "CandidateValid");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
                 item.Contains("candidate='account.new_AccountMain'")));
@@ -2204,13 +2207,14 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod]
-        public void Type60Lifecycle08BlankUniqueNameCannotCreateCandidate()
+        public void Type60Lifecycle08BlankUniqueNameUsesFormIdFallback()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
             var result = ResolveType60(solution, objectId,
                 SystemForm(objectId, " ", "Display only", "account", 2, Guid.NewGuid(), false));
 
-            AssertType60DiagnosticOnly(result);
+            AssertType60Resolved(result);
+            Assert.AreEqual(InventoryAbsencePolicy.MatchOnly, result.InventoryAbsencePolicy);
             AssertCandidateStatus(result, "BlankUniqueName");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item =>
                 item.Contains("candidateportableidentity=(unavailable)")));
@@ -2226,7 +2230,9 @@ namespace D365SolutionComparer.Tests
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
                 CancellationToken.None);
 
-            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
             AssertCandidateStatus(result, "EntityLogicalNameUnresolved");
         }
 
@@ -2276,7 +2282,9 @@ namespace D365SolutionComparer.Tests
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
                 CancellationToken.None);
 
-            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
             AssertCandidateStatus(result, "CorrelationDuplicate");
         }
 
@@ -2288,7 +2296,9 @@ namespace D365SolutionComparer.Tests
                 SystemFormService(solution, query => Rows()), solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 60, objectId), CancellationToken.None);
 
-            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
             AssertCandidateStatus(result, "CorrelationMissing");
         }
 
@@ -2306,7 +2316,9 @@ namespace D365SolutionComparer.Tests
                 }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
                 CancellationToken.None);
 
-            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
             AssertCandidateStatus(result, "Incomplete");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
         }
@@ -2320,7 +2332,9 @@ namespace D365SolutionComparer.Tests
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), 60, objectId),
                 CancellationToken.None);
 
-            AssertType60DiagnosticOnly(result);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNull(result.ComparisonKey);
             AssertCandidateStatus(result, "Faulted");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("System Form denied")));
         }
@@ -2378,17 +2392,15 @@ namespace D365SolutionComparer.Tests
                 SystemForm(firstId, "new_First", "First", "account", 2, Guid.NewGuid(), false),
                 SystemForm(secondId, "new_Second", "Second", "contact", 2, Guid.NewGuid(), true)));
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == "unsupported:componenttype:60");
+                item.SemanticKind == ComponentSemanticKinds.SystemForm);
 
-            Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(2, bucket.DiagnosticGroups.Single().Count);
-            Assert.AreEqual("No identity resolver supports this known component type.",
-                bucket.DiagnosticGroups.Single().Diagnostic);
+            Assert.AreEqual(0, bucket.DiagnosticGroups.Count);
+            Assert.AreEqual(2, bucket.Resolved);
             Assert.AreEqual(2, bucket.AuditEvidence.Count);
         }
 
         [TestMethod]
-        public void Type60Lifecycle19RemainsUnsupportedIndeterminateWithoutPortableKey()
+        public void Type60Lifecycle19SemanticIdentityCanEstablishOneSidedMembership()
         {
             var solution = Solution(); var objectId = Guid.NewGuid();
             var result = ResolveType60(solution, objectId,
@@ -2399,13 +2411,14 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(solution, new[] { result }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(target, new ComponentIdentity[0], DateTimeOffset.UtcNow));
 
-            AssertType60DiagnosticOnly(result);
-            Assert.AreEqual(MembershipPresence.Indeterminate, compared.Single().Presence);
-            Assert.AreEqual(MembershipAbsenceEvidence.None, compared.Single().AbsenceEvidence);
+            AssertType60Resolved(result);
+            Assert.AreEqual(MembershipPresence.OnlyInSource, compared.Single().Presence);
+            Assert.AreEqual(MembershipAbsenceEvidence.CompleteResolvedInventory,
+                compared.Single().AbsenceEvidence);
         }
 
         [TestMethod]
-        public void Type60Lifecycle20CannotCreateAnyDefinitiveOrAmbiguousMembershipResult()
+        public void Type60Lifecycle20MatchingPortableIdentityCreatesSharedMembership()
         {
             var sourceSolution = Solution();
             var targetSolution = new SolutionIdentity(new EnvironmentIdentity(Guid.NewGuid(), "Target"),
@@ -2420,13 +2433,11 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(sourceSolution, new[] { source }, DateTimeOffset.UtcNow),
                 MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
 
-            Assert.AreEqual(2, compared.Count);
-            Assert.IsTrue(compared.All(item => item.Presence == MembershipPresence.Indeterminate));
-            Assert.IsFalse(compared.Any(item => item.Presence == MembershipPresence.PresentInBoth ||
-                item.Presence == MembershipPresence.OnlyInSource ||
-                item.Presence == MembershipPresence.OnlyInTarget));
+            Assert.AreEqual(1, compared.Count);
+            Assert.AreEqual(MembershipPresence.PresentInBoth, compared.Single().Presence);
             Assert.IsTrue(new[] { source, target }.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.Status != IdentityResolutionStatus.Ambiguous));
+                item.Status == IdentityResolutionStatus.Resolved &&
+                item.SemanticKind == ComponentSemanticKinds.SystemForm));
         }
 
         [TestMethod]
@@ -3473,7 +3484,7 @@ namespace D365SolutionComparer.Tests
             var result = ResolveType60(solution, formId,
                 SystemForm(formId, "new_Main", "Main", "account", 2, Guid.NewGuid(), false));
 
-            AssertType60DiagnosticOnly(result);
+            AssertType60Resolved(result);
             AssertCandidateStatus(result, "CandidateValid");
         }
 
@@ -4198,20 +4209,21 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(records.Count, result.Components.Count);
             Assert.IsTrue(result.Components.Select((item, index) => ReferenceEquals(item.Record,
                 records[index].Record)).All(item => item));
-            var expectedStatus = componentType == 31 || componentType == 62
+            var expectedStatus = componentType == 31 || componentType == 60 || componentType == 62
                 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported;
             Assert.IsTrue(result.Components.All(item =>
                 item.Status == expectedStatus && item.ComparisonKey == null));
 
-            var expectedSemanticKind = componentType == 62 ? ComponentSemanticKinds.SiteMap :
+            var expectedSemanticKind = componentType == 60 ? ComponentSemanticKinds.SystemForm :
+                componentType == 62 ? ComponentSemanticKinds.SiteMap :
                 "unsupported:componenttype:" + componentType;
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
                 item.SemanticKind == expectedSemanticKind);
             Assert.AreEqual(records.Count, coverage.TotalCandidates);
-            Assert.AreEqual(componentType == 31 || componentType == 62 ? 0 : records.Count,
+            Assert.AreEqual(componentType == 31 || componentType == 60 || componentType == 62 ? 0 : records.Count,
                 coverage.Unsupported);
             Assert.AreEqual(0, coverage.Resolved);
-            Assert.AreEqual(componentType == 31 || componentType == 62 ? records.Count : 0,
+            Assert.AreEqual(componentType == 31 || componentType == 60 || componentType == 62 ? records.Count : 0,
                 coverage.Unresolved);
             Assert.AreEqual(0, coverage.Ambiguous);
             Assert.AreEqual(1, coverage.DiagnosticGroups.Count);
@@ -4220,6 +4232,8 @@ namespace D365SolutionComparer.Tests
                 coverage.DiagnosticGroups.Single().ResolutionStatus);
             Assert.AreEqual(componentType == 31
                     ? "No report row matched the component object ID, so signed Report identity could not be verified."
+                    : componentType == 60
+                        ? "System Form identity evidence is incomplete or unavailable."
                     : componentType == 62
                         ? "No Site Map row matched the component object ID."
                         : "No identity resolver supports this known component type.",
@@ -4307,7 +4321,7 @@ namespace D365SolutionComparer.Tests
                         "charttype", "savedqueryvisualizationidunique", "componentstate", "ismanaged" };
                 case 60:
                     return new[] { "formid", "uniquename", "name", "objecttypecode", "type",
-                        "formidunique", "componentstate", "ismanaged" };
+                        "formactivationstate", "formidunique", "componentstate", "ismanaged" };
                 case 62:
                     return new[] { "sitemapid", "sitemapnameunique", "sitemapname", "sitemapidunique",
                         "isappaware", "sitemapxml", "componentstate", "ismanaged" };
@@ -4545,7 +4559,8 @@ namespace D365SolutionComparer.Tests
 
             Assert.AreEqual(2, result.Components.Count);
             Assert.IsTrue(result.Components.All(item =>
-                item.Status == IdentityResolutionStatus.Unsupported && item.ComparisonKey == null));
+                item.Status == IdentityResolutionStatus.Ambiguous && item.ComparisonKey == null &&
+                item.SemanticKind == ComponentSemanticKinds.SystemForm));
             Assert.IsTrue(result.Components.All(item => item.DiagnosticEvidence.Any(evidence =>
                 evidence.Contains("candidate status=DuplicateCandidate"))));
             var summary = Type60Summary(result);
@@ -4553,12 +4568,11 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "DistinctCaseInsensitiveCandidateCount=1");
         }
 
-        private static void AssertType60DiagnosticOnly(ComponentIdentity result)
+        private static void AssertType60Resolved(ComponentIdentity result)
         {
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual("unsupported:componenttype:60", result.SemanticKind);
-            Assert.IsNull(result.ComparisonKey);
-            Assert.AreEqual("No identity resolver supports this known component type.", result.Diagnostic);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Status);
+            Assert.AreEqual(ComponentSemanticKinds.SystemForm, result.SemanticKind);
+            Assert.IsNotNull(result.ComparisonKey);
         }
 
         private static void AssertCandidateStatus(ComponentIdentity result, string expectedStatus)
@@ -4597,7 +4611,8 @@ namespace D365SolutionComparer.Tests
         {
             Assert.AreEqual("systemform", query.EntityName);
             CollectionAssert.AreEquivalent(new[] { "formid", "uniquename", "name", "objecttypecode",
-                "type", "formidunique", "componentstate", "ismanaged" }, query.ColumnSet.Columns.ToArray());
+                "type", "formactivationstate", "formidunique", "componentstate", "ismanaged" },
+                query.ColumnSet.Columns.ToArray());
             Assert.AreEqual(1, query.Criteria.Conditions.Count);
             var condition = query.Criteria.Conditions.Single();
             Assert.AreEqual("formid", condition.AttributeName);
@@ -4616,6 +4631,7 @@ namespace D365SolutionComparer.Tests
                 ["name"] = name,
                 ["objecttypecode"] = objectTypeCode,
                 ["type"] = new OptionSetValue(formType),
+                ["formactivationstate"] = new OptionSetValue(1),
                 ["formidunique"] = formIdUnique,
                 ["componentstate"] = new OptionSetValue(0),
                 ["ismanaged"] = isManaged

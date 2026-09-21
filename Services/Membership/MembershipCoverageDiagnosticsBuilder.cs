@@ -24,7 +24,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.TeamTemplate,
             ComponentSemanticKinds.SiteMap,
             ComponentSemanticKinds.AppSetting,
-            ComponentSemanticKinds.EntityKey
+            ComponentSemanticKinds.EntityKey,
+            ComponentSemanticKinds.SystemForm
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -116,7 +117,9 @@ namespace D365SolutionComparer.Services.Membership
             int unsupported = candidates.Count(item => item.Status == IdentityResolutionStatus.Unsupported);
             int unresolved = candidates.Count(item => item.Status == IdentityResolutionStatus.Unresolved);
             int ambiguous = candidates.Count(item => item.Status == IdentityResolutionStatus.Ambiguous);
-            bool localBlocker = unsupported > 0 || unresolved > 0 || ambiguous > 0;
+            bool localBlocker = unsupported > 0 || unresolved > 0 || ambiguous > 0 ||
+                candidates.Any(item => item.Status == IdentityResolutionStatus.Resolved &&
+                    item.InventoryAbsencePolicy == InventoryAbsencePolicy.MatchOnly);
             bool complete = state == MembershipSnapshotState.SolutionAbsent ||
                 state == MembershipSnapshotState.Complete && !localBlocker && !hasBroadBlockers;
             if (bucketType == MembershipCoverageBucketType.BroadUnclassifiable)
@@ -167,6 +170,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.SiteMap: return "Site Map";
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
+                case ComponentSemanticKinds.SystemForm: return "System Form";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

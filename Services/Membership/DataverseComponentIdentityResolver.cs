@@ -118,6 +118,8 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, ResolutionValue> siteMapResolutions =
                 new Dictionary<Guid, ResolutionValue>();
+            private readonly Dictionary<Guid, SystemFormResolutionValue> systemFormResolutions =
+                new Dictionary<Guid, SystemFormResolutionValue>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> canvasAppDiagnostics =
                 new Dictionary<Guid, IReadOnlyList<string>>();
             private readonly Dictionary<Guid, IReadOnlyList<string>> teamTemplateDiagnostics =
@@ -318,6 +320,8 @@ namespace D365SolutionComparer.Services.Membership
                         return ResolveOptionSet(record);
                     case ReportComponentType:
                         return ResolveReport(record);
+                    case SystemFormComponentType:
+                        return ResolveSystemForm(record);
                     case SiteMapComponentType:
                         return ResolveSiteMap(record);
                     case 1: kind = "table"; break;
@@ -1770,7 +1774,7 @@ namespace D365SolutionComparer.Services.Membership
                 systemFormSummaryComponentId = records[0].SolutionComponentId;
                 var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "systemform",
                     "formid", new[] { "formid", "uniquename", "name", "objecttypecode", "type",
-                        "formidunique", "componentstate", "ismanaged" },
+                        "formactivationstate", "formidunique", "componentstate", "ismanaged" },
                     "System Form diagnostic lookup returned an incomplete result set.",
                     "System Form diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => "System Form diagnostic lookup failed: " + ex.Message, cancellationToken);
@@ -1789,13 +1793,17 @@ namespace D365SolutionComparer.Services.Membership
                 int blankUniqueName = 0;
                 int unresolvedEntityName = 0;
                 var analyses = objectIds.ToDictionary(item => item, item =>
-                    AnalyzeSystemFormCandidate(retrieval.GetCorrelation(item), entityLogicalNames));
+                    AnalyzeSystemFormCandidate(item, retrieval.GetCorrelation(item), entityLogicalNames));
+                var resolutionGroups = analyses.Values.Where(item =>
+                        !string.IsNullOrWhiteSpace(item.PortableKey))
+                    .GroupBy(item => item.PortableKey, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                foreach (var group in resolutionGroups.Where(item => item.Count() > 1))
+                    foreach (var analysis in group) analysis.MarkDuplicateCandidate();
                 var candidateGroups = analyses.Values.Where(item =>
                         !string.IsNullOrWhiteSpace(item.CandidateIdentity))
                     .GroupBy(item => item.CandidateIdentity, StringComparer.OrdinalIgnoreCase)
                     .ToList();
-                foreach (var group in candidateGroups.Where(item => item.Count() > 1))
-                    foreach (var analysis in group) analysis.MarkDuplicateCandidate();
                 int validCandidates = analyses.Values.Count(item =>
                     item.Status == SystemFormCandidateStatus.CandidateValid);
                 int duplicateCandidates = analyses.Values.Count(item =>
@@ -1830,6 +1838,7 @@ namespace D365SolutionComparer.Services.Membership
                     {
                         correlated++;
                         var row = matches[0];
+                        context.MetadataCache.StoreEntityRow(row, objectId);
                         var uniqueName = row.GetAttributeValue<string>("uniquename");
                         if (string.IsNullOrWhiteSpace(uniqueName)) blankUniqueName++;
                         if (!analysis.EntityLogicalName.IsVerified) unresolvedEntityName++;
@@ -1840,6 +1849,7 @@ namespace D365SolutionComparer.Services.Membership
                                 "(not resolved for an unassociated row)"))));
                     evidence.Add(DescribeSystemFormCandidateAnalysis(analysis));
                     systemFormDiagnostics[objectId] = evidence.AsReadOnly();
+                    systemFormResolutions[objectId] = analysis.ToResolution(evidence);
                 }
 
                 int missingObjectIds = records.Count(item => !item.ObjectId.HasValue ||
@@ -1896,7 +1906,22 @@ namespace D365SolutionComparer.Services.Membership
                 return result;
             }
 
-            private static SystemFormCandidateAnalysis AnalyzeSystemFormCandidate(
+            private ComponentIdentity ResolveSystemForm(SolutionComponentRecord record)
+            {
+                if (!record.ObjectId.HasValue || record.ObjectId.Value == Guid.Empty)
+                    return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                        diagnostic: "The System Form component has no usable object ID.",
+                        componentTypeKey: ComponentSemanticKinds.SystemForm,
+                        semanticKind: ComponentSemanticKinds.SystemForm,
+                        diagnosticEvidence: GetSystemFormDiagnosticEvidence(record));
+                SystemFormResolutionValue resolution;
+                if (!systemFormResolutions.TryGetValue(record.ObjectId.Value, out resolution))
+                    resolution = SystemFormResolutionValue.Unresolved(
+                        "System Form resolution produced no correlated result.");
+                return resolution.ToIdentity(record, GetSystemFormDiagnosticEvidence(record));
+            }
+
+            private static SystemFormCandidateAnalysis AnalyzeSystemFormCandidate(Guid objectId,
                 DiagnosticRowCorrelation correlation,
                 IDictionary<int, EntityLogicalNameDiagnostic> entityLogicalNames)
             {
@@ -1913,8 +1938,29 @@ namespace D365SolutionComparer.Services.Membership
                 var row = correlation.Rows[0];
                 var entityName = ResolveSystemFormEntityLogicalName(row, entityLogicalNames);
                 var uniqueName = row.GetAttributeValue<string>("uniquename");
-                var candidate = entityName.IsVerified && !string.IsNullOrWhiteSpace(uniqueName)
-                    ? entityName.DisplayValue + "." + uniqueName : null;
+                var normalizedUniqueName = string.IsNullOrWhiteSpace(uniqueName) ? null : uniqueName.Trim();
+                bool tableless = entityName.IsVerified && string.Equals(entityName.DisplayValue,
+                    "none", StringComparison.OrdinalIgnoreCase);
+                string portableKey = null;
+                string identityPath = null;
+                var absencePolicy = InventoryAbsencePolicy.CompleteInventory;
+                if (normalizedUniqueName != null && tableless)
+                {
+                    portableKey = SystemFormTablelessPortableKey(normalizedUniqueName);
+                    identityPath = "TablelessUniqueName";
+                }
+                else if (normalizedUniqueName != null && entityName.IsVerified)
+                {
+                    portableKey = SystemFormEntityPortableKey(entityName.DisplayValue,
+                        normalizedUniqueName);
+                    identityPath = "EntityScopedUniqueName";
+                }
+                else if (normalizedUniqueName == null)
+                {
+                    portableKey = SystemFormIdPortableKey(objectId);
+                    identityPath = "FormIdFallback";
+                    absencePolicy = InventoryAbsencePolicy.MatchOnly;
+                }
                 var status = string.IsNullOrWhiteSpace(uniqueName)
                     ? SystemFormCandidateStatus.BlankUniqueName
                     : !entityName.IsVerified
@@ -1922,16 +1968,36 @@ namespace D365SolutionComparer.Services.Membership
                     : !IsCompleteSystemForm(row)
                     ? SystemFormCandidateStatus.Incomplete
                     : SystemFormCandidateStatus.CandidateValid;
-                return new SystemFormCandidateAnalysis(status, candidate, entityName,
-                    row.GetAttributeValue<bool?>("ismanaged"));
+                return new SystemFormCandidateAnalysis(status,
+                    entityName.IsVerified && normalizedUniqueName != null
+                        ? entityName.DisplayValue + "." + normalizedUniqueName : null,
+                    entityName, row.GetAttributeValue<bool?>("ismanaged"), portableKey,
+                    identityPath, absencePolicy);
             }
+
+            internal static string SystemFormEntityPortableKey(string parentLogicalName,
+                string uniqueName) => "systemform:v1:entity:" + parentLogicalName.Length.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture) + ":" + parentLogicalName + ":" +
+                    uniqueName.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + uniqueName;
+
+            internal static string SystemFormTablelessPortableKey(string uniqueName) =>
+                "systemform:v1:tableless:" + uniqueName.Length.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture) + ":" + uniqueName;
+
+            internal static string SystemFormIdPortableKey(Guid formId) =>
+                "systemform:v1:formid:36:" + formId.ToString("D");
 
             private static string DescribeSystemFormCandidateAnalysis(SystemFormCandidateAnalysis analysis)
             {
                 return "System Form lifecycle candidate status=" + analysis.Status +
                     "; candidate=" + (string.IsNullOrWhiteSpace(analysis.CandidateIdentity)
                         ? "(unavailable)" : "'" + EscapeDiagnosticText(analysis.CandidateIdentity) + "'") +
-                    ". Diagnostic validation only; the candidate is not used for membership comparison.";
+                    "; identityPath=" + (analysis.IdentityPath ?? "(unavailable)") +
+                    "; portableKey=" + (analysis.PortableKey == null ? "(unavailable)" : "'" +
+                        EscapeDiagnosticText(analysis.PortableKey) + "'") +
+                    "; inventoryAbsencePolicy=" + analysis.InventoryAbsencePolicy +
+                    ". System Form correlation evidence. Portable identity is selected according to " +
+                    "the reported identityPath and inventoryAbsencePolicy.";
             }
 
             private static EntityLogicalNameDiagnostic ResolveSystemFormEntityLogicalName(Entity row,
@@ -1967,11 +2033,13 @@ namespace D365SolutionComparer.Services.Membership
                     "; objecttypecode=" + FormatSystemFormValue(row, "objecttypecode") +
                     "; entitylogicalname=" + entityLogicalName.DisplayValue +
                     "; type=" + FormatSystemFormValue(row, "type") +
+                    "; formactivationstate=" + FormatSystemFormValue(row, "formactivationstate") +
                     "; formidunique=" + FormatSystemFormValue(row, "formidunique") +
                     "; componentstate=" + FormatSystemFormValue(row, "componentstate") +
                     "; ismanaged=" + FormatSystemFormValue(row, "ismanaged") +
                     "; candidateportableidentity=" + candidate +
-                    ". Diagnostic evidence only; the candidate is not used for membership comparison.";
+                    ". System Form correlation evidence. Portable identity is selected according to " +
+                    "the reported identityPath and inventoryAbsencePolicy.";
             }
 
             private static string DescribeSystemFormSummary(int rawCount, int distinctObjectIdCount,
@@ -2017,6 +2085,7 @@ namespace D365SolutionComparer.Services.Membership
             {
                 return HasGuid(row, "formid") && HasText(row, "uniquename") &&
                     HasText(row, "name") && HasSystemFormObjectType(row) && HasOption(row, "type") &&
+                    HasOption(row, "formactivationstate") &&
                     HasGuid(row, "formidunique") && HasOption(row, "componentstate") &&
                     row.Attributes.ContainsKey("ismanaged") && row.Attributes["ismanaged"] is bool;
             }
@@ -3172,24 +3241,95 @@ namespace D365SolutionComparer.Services.Membership
             {
                 public SystemFormCandidateAnalysis(SystemFormCandidateStatus status,
                     string candidateIdentity = null, EntityLogicalNameDiagnostic entityLogicalName = null,
-                    bool? isManaged = null)
+                    bool? isManaged = null, string portableKey = null, string identityPath = null,
+                    InventoryAbsencePolicy inventoryAbsencePolicy = InventoryAbsencePolicy.CompleteInventory)
                 {
                     Status = status;
                     CandidateIdentity = candidateIdentity;
                     EntityLogicalName = entityLogicalName ??
                         EntityLogicalNameDiagnostic.Unverified("(unavailable)");
                     IsManaged = isManaged;
+                    PortableKey = portableKey;
+                    IdentityPath = identityPath;
+                    InventoryAbsencePolicy = inventoryAbsencePolicy;
                 }
 
                 public SystemFormCandidateStatus Status { get; private set; }
                 public string CandidateIdentity { get; }
                 public EntityLogicalNameDiagnostic EntityLogicalName { get; }
                 public bool? IsManaged { get; }
+                public string PortableKey { get; }
+                public string IdentityPath { get; }
+                public InventoryAbsencePolicy InventoryAbsencePolicy { get; }
 
                 public void MarkDuplicateCandidate()
                 {
                     Status = SystemFormCandidateStatus.DuplicateCandidate;
                 }
+
+                public SystemFormResolutionValue ToResolution(IEnumerable<string> evidence)
+                {
+                    if (Status == SystemFormCandidateStatus.DuplicateCandidate)
+                        return SystemFormResolutionValue.Ambiguous(
+                            "Multiple System Form records share the same portable identity.", evidence,
+                            PortableKey);
+                    if (Status == SystemFormCandidateStatus.CorrelationDuplicate)
+                        return SystemFormResolutionValue.Ambiguous(
+                            "Multiple systemform rows matched the component object ID.", evidence);
+                    if (!string.IsNullOrWhiteSpace(PortableKey) && IdentityPath != null)
+                        return SystemFormResolutionValue.Resolved(PortableKey, IdentityPath,
+                            InventoryAbsencePolicy, evidence);
+                    return SystemFormResolutionValue.Unresolved(
+                        "System Form identity evidence is incomplete or unavailable.", evidence);
+                }
+            }
+
+            private sealed class SystemFormResolutionValue
+            {
+                private SystemFormResolutionValue(IdentityResolutionStatus status, string key,
+                    string diagnostic, string identityPath, InventoryAbsencePolicy absencePolicy,
+                    IEnumerable<string> evidence, string blockerPortableIdentity = null)
+                {
+                    Status = status;
+                    Key = key;
+                    Diagnostic = diagnostic;
+                    IdentityPath = identityPath;
+                    AbsencePolicy = absencePolicy;
+                    Evidence = new List<string>(evidence ?? Enumerable.Empty<string>()).AsReadOnly();
+                    BlockerPortableIdentity = blockerPortableIdentity;
+                }
+
+                public IdentityResolutionStatus Status { get; }
+                public string Key { get; }
+                public string Diagnostic { get; }
+                public string IdentityPath { get; }
+                public InventoryAbsencePolicy AbsencePolicy { get; }
+                public IReadOnlyList<string> Evidence { get; }
+                public string BlockerPortableIdentity { get; }
+
+                public ComponentIdentity ToIdentity(SolutionComponentRecord record,
+                    IEnumerable<string> evidence = null) =>
+                    new ComponentIdentity(record, Status, Key, Diagnostic,
+                        ComponentSemanticKinds.SystemForm, ComponentSemanticKinds.SystemForm,
+                        diagnosticEvidence: evidence ?? Evidence,
+                        blockerPortableIdentity: BlockerPortableIdentity,
+                        inventoryAbsencePolicy: AbsencePolicy);
+
+                public static SystemFormResolutionValue Resolved(string key, string path,
+                    InventoryAbsencePolicy policy, IEnumerable<string> evidence) =>
+                    new SystemFormResolutionValue(IdentityResolutionStatus.Resolved, key,
+                        "System Form identity resolved through " + path + ".", path, policy, evidence);
+
+                public static SystemFormResolutionValue Unresolved(string diagnostic,
+                    IEnumerable<string> evidence = null) =>
+                    new SystemFormResolutionValue(IdentityResolutionStatus.Unresolved, null,
+                        diagnostic, null, InventoryAbsencePolicy.CompleteInventory, evidence);
+
+                public static SystemFormResolutionValue Ambiguous(string diagnostic,
+                    IEnumerable<string> evidence = null, string blockerPortableIdentity = null) =>
+                    new SystemFormResolutionValue(IdentityResolutionStatus.Ambiguous, null,
+                        diagnostic, null, InventoryAbsencePolicy.CompleteInventory, evidence,
+                        blockerPortableIdentity);
             }
 
             private enum CanvasAppCandidateStatus
