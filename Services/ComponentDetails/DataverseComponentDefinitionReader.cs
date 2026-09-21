@@ -38,7 +38,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.SiteMap,
                 ComponentSemanticKinds.Process,
                 ComponentSemanticKinds.AppSetting,
-                ComponentSemanticKinds.EntityKey
+                ComponentSemanticKinds.EntityKey,
+                ComponentSemanticKinds.SystemForm
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -125,6 +126,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 EntityDefinitionConfiguration.AppModule, results, cancellationToken);
             ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.SiteMap),
                 EntityDefinitionConfiguration.SiteMap, results, cancellationToken);
+            ReadSystemForms(context, Pending(membership, results, ComponentSemanticKinds.SystemForm),
+                results, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
             var ordered = membership.Components.Select(identity =>
@@ -410,6 +413,30 @@ namespace D365SolutionComparer.Services.ComponentDetails
             }
         }
 
+        private static void ReadSystemForms(DataverseReadContext context,
+            IReadOnlyList<ComponentIdentity> identities,
+            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken)
+        {
+            ReadEntityBacked(context, identities, EntityDefinitionConfiguration.SystemForm,
+                results, cancellationToken);
+            foreach (var identity in identities)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ComponentDefinition current;
+                if (!results.TryGetValue(identity.Record.SolutionComponentId, out current) ||
+                    current.Status != ComponentDefinitionReadStatus.Available) continue;
+                Entity row;
+                if (!context.MetadataCache.TryGetEntityRow("systemform",
+                    identity.Record.ObjectId.Value, out row) ||
+                    !(row.GetAttributeValue<object>("type") is OptionSetValue) ||
+                    !(row.GetAttributeValue<object>("formactivationstate") is OptionSetValue))
+                    Set(results, new ComponentDefinition(identity,
+                        ComponentDefinitionReadStatus.Unresolved,
+                        diagnostic: "System Form definition is missing type or formactivationstate.",
+                        diagnosticEvidence: current.DiagnosticEvidence));
+            }
+        }
+
         private static IReadOnlyList<ComponentIdentity> Pending(MembershipSnapshot membership,
             IDictionary<Guid, ComponentDefinition> results, string semanticKind) =>
             membership.Components.Where(item => item.Status == IdentityResolutionStatus.Resolved &&
@@ -680,6 +707,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 "navigationtype");
             public static readonly EntityDefinitionConfiguration SiteMap = Create("sitemap",
                 "sitemapid", "sitemapnameunique", "sitemapname", "isappaware", "sitemapxml");
+            public static readonly EntityDefinitionConfiguration SystemForm = Create("systemform",
+                "formid", "uniquename", "type", "formactivationstate");
 
             private static EntityDefinitionConfiguration Create(string entityName, string primaryId,
                 string identityColumn, params string[] comparableColumns)

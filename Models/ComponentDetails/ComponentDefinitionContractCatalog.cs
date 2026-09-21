@@ -51,7 +51,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 [ComponentSemanticKinds.AppSetting] = Contract(ComponentSemanticKinds.AppSetting,
                     "datatype", "isoverridable", "overridablelevel", "releaselevel"),
                 [ComponentSemanticKinds.EntityKey] = Contract(ComponentSemanticKinds.EntityKey,
-                    "EntityLogicalName", "LogicalName", "KeyAttributes")
+                    "EntityLogicalName", "LogicalName", "KeyAttributes"),
+                [ComponentSemanticKinds.SystemForm] = Contract(ComponentSemanticKinds.SystemForm,
+                    "type", "formactivationstate")
             };
 
         public static ComponentDefinitionContract For(string semanticKind)
@@ -73,6 +75,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                     "value", "defaultvalue", "ownerid", "createdon", "modifiedon", "solutionid" };
             if (string.Equals(kind, ComponentSemanticKinds.EntityKey, StringComparison.OrdinalIgnoreCase))
                 return new[] { "MetadataId", "SchemaName", "EntityKeyIndexStatus", "AsyncJob" };
+            if (string.Equals(kind, ComponentSemanticKinds.SystemForm, StringComparison.OrdinalIgnoreCase))
+                return new[] { "formid", "formidunique", "solutioncomponentid", "uniquename",
+                    "objecttypecode", "ismanaged", "name", "formxml", "componentstate" };
             if (string.Equals(kind, ComponentSemanticKinds.Table, StringComparison.OrdinalIgnoreCase))
                 return new[] { "MetadataId", "LogicalName", "IsManaged" };
             if (string.Equals(kind, ComponentSemanticKinds.Column, StringComparison.OrdinalIgnoreCase))

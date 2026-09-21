@@ -716,7 +716,7 @@ namespace D365SolutionComparer
                     {
                         try
                         {
-                            var operation = new DataverseComponentDefinitionOperation();
+                            var operation = CreateMembershipComparisonOperation();
                             var source = ReadDefinitionEnvironment(operation, sourceService, sourceName,
                                 solutionUniqueName, worker, cancellation, 2, 46);
                             ThrowIfMembershipCancelled(worker, cancellation);
@@ -772,6 +772,14 @@ namespace D365SolutionComparer
                         Color.Green);
                 }
             });
+        }
+
+        /// <summary>
+        /// Central composition point used by the XrmToolBox Compare Membership action.
+        /// </summary>
+        internal static DataverseComponentDefinitionOperation CreateMembershipComparisonOperation()
+        {
+            return new DataverseComponentDefinitionOperation();
         }
 
         private void CaptureAppSettingEvidence(MembershipComparisonPresentation presentation)

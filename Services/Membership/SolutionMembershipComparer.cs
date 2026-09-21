@@ -15,8 +15,10 @@ namespace D365SolutionComparer.Services.Membership
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (!string.Equals(source.SolutionUniqueName, target.SolutionUniqueName, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Membership snapshots must refer to the same solution Unique Name.");
-            var sourceItems = MarkDuplicates(GuardWorkflowAlternatives(source.Components, target.Components));
-            var targetItems = MarkDuplicates(GuardWorkflowAlternatives(target.Components, source.Components));
+            var sourceItems = MarkDuplicates(CollapseRepeatedSystemForms(
+                GuardWorkflowAlternatives(source.Components, target.Components)));
+            var targetItems = MarkDuplicates(CollapseRepeatedSystemForms(
+                GuardWorkflowAlternatives(target.Components, source.Components)));
             var sourceCoverage = IdentityCoverage.From(sourceItems);
             var targetCoverage = IdentityCoverage.From(targetItems);
             var targetLookup = targetItems.Where(IsResolved).ToDictionary(Key, StringComparer.OrdinalIgnoreCase);
@@ -74,7 +76,8 @@ namespace D365SolutionComparer.Services.Membership
             {
                 if (oppositeState == MembershipSnapshotState.SolutionAbsent)
                     evidence = MembershipAbsenceEvidence.OppositeSolutionAbsent;
-                else if (oppositeState == MembershipSnapshotState.Complete &&
+                else if (item.InventoryAbsencePolicy == InventoryAbsencePolicy.CompleteInventory &&
+                    oppositeState == MembershipSnapshotState.Complete &&
                     oppositeCoverage.CanEstablishAbsence(item))
                     evidence = MembershipAbsenceEvidence.CompleteResolvedInventory;
             }
@@ -100,6 +103,16 @@ namespace D365SolutionComparer.Services.Membership
                         ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind) : i).ToList().AsReadOnly();
         }
 
+        private static IReadOnlyList<ComponentIdentity> CollapseRepeatedSystemForms(
+            IReadOnlyList<ComponentIdentity> items)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return items.Where(item => item.Status != IdentityResolutionStatus.Resolved ||
+                item.SemanticKind != ComponentSemanticKinds.SystemForm ||
+                seen.Add(Key(item) + ":" + (item.Record.ObjectId?.ToString("D") ?? string.Empty)))
+                .ToList().AsReadOnly();
+        }
+
         private sealed class IdentityCoverage
         {
             private readonly bool blocksAllKinds;
@@ -122,6 +135,9 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var item in items)
                 {
                     if (string.IsNullOrWhiteSpace(item.SemanticKind)) blocksAll = true;
+                    else if (IsResolved(item) && item.InventoryAbsencePolicy ==
+                        InventoryAbsencePolicy.MatchOnly)
+                        incomplete.Add(item.SemanticKind);
                     else if (!IsResolved(item) && item.BlockerScope == ResolutionBlockerScope.SemanticKind)
                         incomplete.Add(item.SemanticKind);
                     if (!IsResolved(item) && item.BlockerScope == ResolutionBlockerScope.PortableIdentity &&

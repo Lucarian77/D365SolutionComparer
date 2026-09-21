@@ -22,6 +22,8 @@ namespace D365SolutionComparer.Models.Membership
         public const string AppSetting = "appsetting";
         /// <summary>Entity Key semantic family backed by grouped parent metadata.</summary>
         public const string EntityKey = "entitykey";
+        /// <summary>System Form semantic family.</summary>
+        public const string SystemForm = "systemform";
         internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
         internal const string ReportCandidateTypeKey = "report:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
@@ -69,6 +71,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 20: return SecurityRole;
                 case 29: return Process;
                 case 14: return EntityKey;
+                case 60: return SystemForm;
                 case 61: return WebResource;
                 case 62: return SiteMap;
                 case 80: return AppModule;
