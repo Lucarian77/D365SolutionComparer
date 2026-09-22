@@ -33,10 +33,10 @@ namespace D365SolutionComparer.Services.Membership
         {
             var rows = new List<MembershipCompareResult>();
             if (source != null)
-                rows.AddRange(MarkDuplicates(source.Components).Select(item =>
+                rows.AddRange(MarkDuplicates(CollapseRepeatedMembershipReferences(source.Components)).Select(item =>
                     new MembershipCompareResult(item, null, MembershipPresence.Indeterminate)));
             if (target != null)
-                rows.AddRange(MarkDuplicates(target.Components).Select(item =>
+                rows.AddRange(MarkDuplicates(CollapseRepeatedMembershipReferences(target.Components)).Select(item =>
                     new MembershipCompareResult(null, item, MembershipPresence.Indeterminate)));
             return rows.OrderBy(item => (item.Source ?? item.Target).ComponentTypeKey, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(item => (item.Source ?? item.Target).ComparisonKey, StringComparer.OrdinalIgnoreCase)
@@ -64,6 +64,17 @@ namespace D365SolutionComparer.Services.Membership
                     blockerScope: item.SemanticKind == ComponentSemanticKinds.Process
                         ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind)
                 : item);
+        }
+
+        private static IEnumerable<ComponentIdentity> CollapseRepeatedMembershipReferences(
+            IEnumerable<ComponentIdentity> components)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return components.Where(item => item.Status != IdentityResolutionStatus.Resolved ||
+                item.SemanticKind != ComponentSemanticKinds.SystemForm &&
+                item.SemanticKind != ComponentSemanticKinds.PluginAssembly ||
+                seen.Add(IdentityKey(item) + ":" +
+                    (item.Record.ObjectId?.ToString("D") ?? string.Empty)));
         }
 
         private static string IdentityKey(ComponentIdentity identity) => identity.ComponentTypeKey.Length + ":" +
@@ -101,6 +112,7 @@ namespace D365SolutionComparer.Services.Membership
                 case "appsetting": return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
+                case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -195,6 +207,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
+                case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
                 default: return DisplayKind(identity);
             }
         }

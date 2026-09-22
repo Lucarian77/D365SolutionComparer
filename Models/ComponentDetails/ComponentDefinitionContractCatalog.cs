@@ -53,7 +53,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
                 [ComponentSemanticKinds.EntityKey] = Contract(ComponentSemanticKinds.EntityKey,
                     "EntityLogicalName", "LogicalName", "KeyAttributes"),
                 [ComponentSemanticKinds.SystemForm] = Contract(ComponentSemanticKinds.SystemForm,
-                    "type", "formactivationstate")
+                    "type", "formactivationstate"),
+                [ComponentSemanticKinds.PluginAssembly] = Contract(ComponentSemanticKinds.PluginAssembly,
+                    "version", "isolationmode", "sourcetype")
             };
 
         public static ComponentDefinitionContract For(string semanticKind)
@@ -78,6 +80,9 @@ namespace D365SolutionComparer.Models.ComponentDetails
             if (string.Equals(kind, ComponentSemanticKinds.SystemForm, StringComparison.OrdinalIgnoreCase))
                 return new[] { "formid", "formidunique", "solutioncomponentid", "uniquename",
                     "objecttypecode", "ismanaged", "name", "formxml", "componentstate" };
+            if (string.Equals(kind, ComponentSemanticKinds.PluginAssembly, StringComparison.OrdinalIgnoreCase))
+                return new[] { "pluginassemblyid", "pluginassemblyidunique", "name", "publickeytoken",
+                    "culture", "ismanaged", "componentstate", "content" };
             if (string.Equals(kind, ComponentSemanticKinds.Table, StringComparison.OrdinalIgnoreCase))
                 return new[] { "MetadataId", "LogicalName", "IsManaged" };
             if (string.Equals(kind, ComponentSemanticKinds.Column, StringComparison.OrdinalIgnoreCase))

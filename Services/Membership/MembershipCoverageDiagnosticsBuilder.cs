@@ -25,7 +25,8 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.SiteMap,
             ComponentSemanticKinds.AppSetting,
             ComponentSemanticKinds.EntityKey,
-            ComponentSemanticKinds.SystemForm
+            ComponentSemanticKinds.SystemForm,
+            ComponentSemanticKinds.PluginAssembly
         };
 
         public MembershipCoverageDiagnostics Build(MembershipSnapshot snapshot)
@@ -171,6 +172,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
+                case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
             }
             const string prefix = "unsupported:componenttype:";
             if (semanticKind.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

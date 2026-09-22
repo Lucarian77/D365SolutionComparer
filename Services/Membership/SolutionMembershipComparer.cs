@@ -15,9 +15,9 @@ namespace D365SolutionComparer.Services.Membership
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (!string.Equals(source.SolutionUniqueName, target.SolutionUniqueName, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Membership snapshots must refer to the same solution Unique Name.");
-            var sourceItems = MarkDuplicates(CollapseRepeatedSystemForms(
+            var sourceItems = MarkDuplicates(CollapseRepeatedMembershipReferences(
                 GuardWorkflowAlternatives(source.Components, target.Components)));
-            var targetItems = MarkDuplicates(CollapseRepeatedSystemForms(
+            var targetItems = MarkDuplicates(CollapseRepeatedMembershipReferences(
                 GuardWorkflowAlternatives(target.Components, source.Components)));
             var sourceCoverage = IdentityCoverage.From(sourceItems);
             var targetCoverage = IdentityCoverage.From(targetItems);
@@ -103,12 +103,13 @@ namespace D365SolutionComparer.Services.Membership
                         ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind) : i).ToList().AsReadOnly();
         }
 
-        private static IReadOnlyList<ComponentIdentity> CollapseRepeatedSystemForms(
+        private static IReadOnlyList<ComponentIdentity> CollapseRepeatedMembershipReferences(
             IReadOnlyList<ComponentIdentity> items)
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             return items.Where(item => item.Status != IdentityResolutionStatus.Resolved ||
-                item.SemanticKind != ComponentSemanticKinds.SystemForm ||
+                item.SemanticKind != ComponentSemanticKinds.SystemForm &&
+                item.SemanticKind != ComponentSemanticKinds.PluginAssembly ||
                 seen.Add(Key(item) + ":" + (item.Record.ObjectId?.ToString("D") ?? string.Empty)))
                 .ToList().AsReadOnly();
         }
