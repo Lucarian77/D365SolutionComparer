@@ -3816,7 +3816,6 @@ namespace D365SolutionComparer.Tests
         [DataRow(3)]
         [DataRow(11)]
         [DataRow(12)]
-        [DataRow(91)]
         [DataRow(381)]
         public void KnownUnsupportedTypesNeverDiscoverOrLookupConnectionReferences(int type)
         {

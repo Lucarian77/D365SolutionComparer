@@ -66,6 +66,7 @@
     <Compile Include="AppSettingResolutionTests.cs" />
     <Compile Include="EntityKeyResolutionTests.cs" />
     <Compile Include="SystemFormResolutionTests.cs" />
+    <Compile Include="PluginAssemblyResolutionTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

@@ -39,7 +39,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 ComponentSemanticKinds.Process,
                 ComponentSemanticKinds.AppSetting,
                 ComponentSemanticKinds.EntityKey,
-                ComponentSemanticKinds.SystemForm
+                ComponentSemanticKinds.SystemForm,
+                ComponentSemanticKinds.PluginAssembly
             }, StringComparer.OrdinalIgnoreCase);
 
         public ComponentDefinitionSnapshot Read(IOrganizationService service,
@@ -127,6 +128,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
             ReadEntityBacked(context, Pending(membership, results, ComponentSemanticKinds.SiteMap),
                 EntityDefinitionConfiguration.SiteMap, results, cancellationToken);
             ReadSystemForms(context, Pending(membership, results, ComponentSemanticKinds.SystemForm),
+                results, cancellationToken);
+            ReadPluginAssemblies(context, Pending(membership, results, ComponentSemanticKinds.PluginAssembly),
                 results, cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -437,6 +440,32 @@ namespace D365SolutionComparer.Services.ComponentDetails
             }
         }
 
+        private static void ReadPluginAssemblies(DataverseReadContext context,
+            IReadOnlyList<ComponentIdentity> identities,
+            IDictionary<Guid, ComponentDefinition> results, CancellationToken cancellationToken)
+        {
+            ReadEntityBacked(context, identities, EntityDefinitionConfiguration.PluginAssembly,
+                results, cancellationToken);
+            foreach (var identity in identities)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ComponentDefinition current;
+                if (!results.TryGetValue(identity.Record.SolutionComponentId, out current) ||
+                    current.Status != ComponentDefinitionReadStatus.Available) continue;
+                Entity row;
+                object version;
+                if (!context.MetadataCache.TryGetEntityRow("pluginassembly",
+                    identity.Record.ObjectId.Value, out row) ||
+                    !row.Attributes.TryGetValue("version", out version) || !(version is string) ||
+                    !(row.GetAttributeValue<object>("isolationmode") is OptionSetValue) ||
+                    !(row.GetAttributeValue<object>("sourcetype") is OptionSetValue))
+                    Set(results, new ComponentDefinition(identity,
+                        ComponentDefinitionReadStatus.Unresolved,
+                        diagnostic: "Plug-in Assembly definition is missing version, isolationmode or sourcetype.",
+                        diagnosticEvidence: current.DiagnosticEvidence));
+            }
+        }
+
         private static IReadOnlyList<ComponentIdentity> Pending(MembershipSnapshot membership,
             IDictionary<Guid, ComponentDefinition> results, string semanticKind) =>
             membership.Components.Where(item => item.Status == IdentityResolutionStatus.Resolved &&
@@ -709,6 +738,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 "sitemapid", "sitemapnameunique", "sitemapname", "isappaware", "sitemapxml");
             public static readonly EntityDefinitionConfiguration SystemForm = Create("systemform",
                 "formid", "uniquename", "type", "formactivationstate");
+            public static readonly EntityDefinitionConfiguration PluginAssembly = Create("pluginassembly",
+                "pluginassemblyid", "name", "version", "isolationmode", "sourcetype");
 
             private static EntityDefinitionConfiguration Create(string entityName, string primaryId,
                 string identityColumn, params string[] comparableColumns)

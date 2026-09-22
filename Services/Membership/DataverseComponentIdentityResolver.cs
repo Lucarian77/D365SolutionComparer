@@ -87,6 +87,7 @@ namespace D365SolutionComparer.Services.Membership
             private const int AppModuleComponentType = 80;
             private const int CanvasAppComponentType = 300;
             private const int TeamTemplateComponentType = 511;
+            private const int PluginAssemblyComponentType = 91;
             private readonly DataverseReadContext context;
             private readonly bool entityKeyResolutionEnabled;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
@@ -165,7 +166,12 @@ namespace D365SolutionComparer.Services.Membership
                 ResolutionValue value;
                 if (!identityCache.TryGetValue(cacheKey, out value))
                 {
-                    value = ResolveOne(cacheKey, cancellationToken);
+                    if (cacheKey.Kind == ComponentSemanticKinds.PluginAssembly)
+                    {
+                        ResolvePluginAssemblyBatches(new[] { cacheKey }, cancellationToken);
+                        value = identityCache[cacheKey];
+                    }
+                    else value = ResolveOne(cacheKey, cancellationToken);
                     identityCache[cacheKey] = value;
                 }
                 return ToIdentity(value, record);
@@ -232,6 +238,8 @@ namespace D365SolutionComparer.Services.Membership
                         ResolveEntityKeyBatches(keys, cancellationToken);
                     else if (group.Key == ComponentSemanticKinds.AppModule)
                         ResolveAppModuleBatches(keys, cancellationToken);
+                    else if (group.Key == ComponentSemanticKinds.PluginAssembly)
+                        ResolvePluginAssemblyBatches(keys, cancellationToken);
                     else if (IsEntityBacked(group.Key)) ResolveEntityBatches(group.Key, keys, cancellationToken);
                     else if (group.Key == "table") ResolveTableBatches(keys, cancellationToken);
                     else if (group.Key == "column") ResolveColumnBatches(keys, cancellationToken);
@@ -254,6 +262,7 @@ namespace D365SolutionComparer.Services.Membership
                             results[index] = resolvedSettings[results[index].Record.SolutionComponentId];
                 }
                 ApplyEntityKeyDuplicateSafeguard(results);
+                ApplyPluginAssemblyDuplicateSafeguard(results);
                 return Array.AsReadOnly(results);
             }
 
@@ -277,6 +286,30 @@ namespace D365SolutionComparer.Services.Membership
                         semanticKind: ComponentSemanticKinds.EntityKey,
                         diagnosticEvidence: item.DiagnosticEvidence,
                         blockerPortableIdentity: item.ComparisonKey);
+                }
+            }
+
+            private static void ApplyPluginAssemblyDuplicateSafeguard(ComponentIdentity[] results)
+            {
+                var duplicateKeys = new HashSet<string>(results.Where(item => item != null &&
+                        item.SemanticKind == ComponentSemanticKinds.PluginAssembly &&
+                        item.Status == IdentityResolutionStatus.Resolved)
+                    .GroupBy(item => item.ComparisonKey, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Select(item => item.Record.ObjectId).Distinct().Count() > 1)
+                    .Select(group => group.Key), StringComparer.OrdinalIgnoreCase);
+                for (int index = 0; index < results.Length; index++)
+                {
+                    var item = results[index];
+                    if (item == null || item.SemanticKind != ComponentSemanticKinds.PluginAssembly ||
+                        item.Status != IdentityResolutionStatus.Resolved ||
+                        !duplicateKeys.Contains(item.ComparisonKey)) continue;
+                    results[index] = new ComponentIdentity(item.Record, IdentityResolutionStatus.Ambiguous,
+                        diagnostic: "Multiple Plug-in Assembly records share the same portable identity. Versions do not disambiguate membership identity.",
+                        componentTypeKey: ComponentSemanticKinds.PluginAssembly,
+                        semanticKind: ComponentSemanticKinds.PluginAssembly,
+                        diagnosticEvidence: item.DiagnosticEvidence,
+                        blockerPortableIdentity: item.ComparisonKey,
+                        blockerScope: ResolutionBlockerScope.PortableIdentity);
                 }
             }
 
@@ -334,6 +367,9 @@ namespace D365SolutionComparer.Services.Membership
                         return Unknown(record, IdentityResolutionStatus.Unsupported,
                             "No identity resolver supports this known component type.",
                             diagnosticEvidence: GetKnownComponentDiagnosticEvidence(record));
+                    case PluginAssemblyComponentType:
+                        kind = ComponentSemanticKinds.PluginAssembly;
+                        break;
                     case 29: kind = "process"; break;
                     case 20: kind = "securityrole"; break;
                     case 380: kind = "environmentvariabledefinition"; break;
@@ -431,6 +467,147 @@ namespace D365SolutionComparer.Services.Membership
                     .Select(value => value.Trim().ToLowerInvariant())
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(value => value, StringComparer.OrdinalIgnoreCase);
+            }
+
+            private void ResolvePluginAssemblyBatches(IReadOnlyList<LookupKey> keys,
+                CancellationToken cancellationToken)
+            {
+                foreach (var batch in Batch(keys.OrderBy(item => item.ObjectId).ToList()))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var query = new QueryExpression("pluginassembly")
+                        {
+                            ColumnSet = new ColumnSet("pluginassemblyid", "pluginassemblyidunique", "name",
+                                "publickeytoken", "culture", "version", "isolationmode", "sourcetype",
+                                "ismanaged", "componentstate")
+                        };
+                        query.Criteria.AddCondition(new ConditionExpression("pluginassemblyid",
+                            ConditionOperator.In, batch.Select(item => (object)item.ObjectId).ToArray()));
+                        var rows = context.Query(query);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (rows.MoreRecords)
+                        {
+                            SetPluginAssemblyResults(batch, IdentityResolutionStatus.Ambiguous,
+                                "The bounded Plug-in Assembly lookup returned an incomplete paged result.");
+                            continue;
+                        }
+                        var requested = new HashSet<Guid>(batch.Select(item => item.ObjectId));
+                        var valid = new List<KeyValuePair<Guid, Entity>>();
+                        bool conflicting = false;
+                        foreach (var row in rows.Entities)
+                        {
+                            var primaryId = row.GetAttributeValue<Guid>("pluginassemblyid");
+                            if (!string.Equals(row.LogicalName, "pluginassembly", StringComparison.OrdinalIgnoreCase) ||
+                                primaryId == Guid.Empty || !requested.Contains(primaryId) ||
+                                row.Id != Guid.Empty && row.Id != primaryId)
+                            {
+                                conflicting = true;
+                                break;
+                            }
+                            valid.Add(new KeyValuePair<Guid, Entity>(primaryId, row));
+                        }
+                        if (conflicting)
+                        {
+                            SetPluginAssemblyResults(batch, IdentityResolutionStatus.Ambiguous,
+                                "The Plug-in Assembly lookup returned conflicting primary-key data.");
+                            continue;
+                        }
+                        var grouped = valid.GroupBy(item => item.Key)
+                            .ToDictionary(group => group.Key, group => group.Select(item => item.Value).ToList());
+                        foreach (var key in batch)
+                        {
+                            List<Entity> matches;
+                            if (!grouped.TryGetValue(key.ObjectId, out matches))
+                            {
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "No pluginassembly row matched the component object ID.");
+                                continue;
+                            }
+                            if (matches.Count != 1)
+                            {
+                                identityCache[key] = ResolutionValue.Ambiguous(key.Kind,
+                                    "Multiple pluginassembly rows matched the component object ID.");
+                                continue;
+                            }
+                            var row = matches[0];
+                            context.MetadataCache.StoreEntityRow(row, key.ObjectId);
+                            var name = NormalizePluginAssemblyIdentityPart(row.GetAttributeValue<string>("name"));
+                            var token = NormalizePluginAssemblyIdentityPart(row.GetAttributeValue<string>("publickeytoken"));
+                            var culture = NormalizePluginAssemblyIdentityPart(row.GetAttributeValue<string>("culture"));
+                            var evidence = PluginAssemblyEvidence(row);
+                            if (name.Length == 0 || token.Length == 0 || culture.Length == 0)
+                            {
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "Plug-in Assembly portable identity requires nonblank name, publickeytoken and culture.",
+                                    evidence);
+                                continue;
+                            }
+                            identityCache[key] = ResolutionValue.FromKey(key.Kind,
+                                PluginAssemblyPortableKey(name, token, culture),
+                                diagnosticEvidence: evidence);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (FaultException ex)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        SetPluginAssemblyResults(batch, IdentityResolutionStatus.Unresolved,
+                            "Plug-in Assembly identity lookup failed: " + ex.Message);
+                    }
+                }
+            }
+
+            private void SetPluginAssemblyResults(IEnumerable<LookupKey> keys,
+                IdentityResolutionStatus status, string diagnostic)
+            {
+                foreach (var key in keys)
+                    identityCache[key] = status == IdentityResolutionStatus.Ambiguous
+                        ? ResolutionValue.Ambiguous(key.Kind, diagnostic)
+                        : ResolutionValue.Unresolved(key.Kind, diagnostic);
+            }
+
+            private static string NormalizePluginAssemblyIdentityPart(string value) =>
+                (value ?? string.Empty).Trim();
+
+            internal static string PluginAssemblyPortableKey(string name, string publicKeyToken,
+                string culture)
+            {
+                name = NormalizePluginAssemblyIdentityPart(name);
+                publicKeyToken = NormalizePluginAssemblyIdentityPart(publicKeyToken);
+                culture = NormalizePluginAssemblyIdentityPart(culture);
+                return "pluginassembly:v1:" + name.Length.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture) + ":" + name + ":" +
+                    publicKeyToken.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" +
+                    publicKeyToken + ":" + culture.Length.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) + ":" + culture;
+            }
+
+            private static IReadOnlyList<string> PluginAssemblyEvidence(Entity row) => new[]
+            {
+                "pluginassemblyid=" + FormatPluginAssemblyEvidenceValue(row, "pluginassemblyid"),
+                "pluginassemblyidunique=" + FormatPluginAssemblyEvidenceValue(row, "pluginassemblyidunique"),
+                "name=" + FormatPluginAssemblyEvidenceValue(row, "name"),
+                "publickeytoken=" + FormatPluginAssemblyEvidenceValue(row, "publickeytoken"),
+                "culture=" + FormatPluginAssemblyEvidenceValue(row, "culture"),
+                "version=" + FormatPluginAssemblyEvidenceValue(row, "version"),
+                "isolationmode=" + FormatPluginAssemblyEvidenceValue(row, "isolationmode"),
+                "sourcetype=" + FormatPluginAssemblyEvidenceValue(row, "sourcetype"),
+                "ismanaged=" + FormatPluginAssemblyEvidenceValue(row, "ismanaged"),
+                "componentstate=" + FormatPluginAssemblyEvidenceValue(row, "componentstate")
+            };
+
+            private static string FormatPluginAssemblyEvidenceValue(Entity row, string attribute)
+            {
+                object value;
+                if (!row.Attributes.TryGetValue(attribute, out value) || value == null) return "(not supplied)";
+                var option = value as OptionSetValue;
+                if (option != null) return option.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (value is Guid) return ((Guid)value).ToString("D");
+                if (value is bool) return ((bool)value).ToString();
+                return "'" + EscapeDiagnosticText(Convert.ToString(value,
+                    System.Globalization.CultureInfo.InvariantCulture)) + "'";
             }
 
             private ResolutionValue ResolveOne(LookupKey key, CancellationToken cancellationToken)
