@@ -57,8 +57,7 @@ namespace D365SolutionComparer
 
             var evidence = new TextBox
             {
-                Dock = DockStyle.Bottom,
-                Height = 130,
+                Dock = DockStyle.Fill,
                 Multiline = true,
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Vertical,
@@ -68,9 +67,32 @@ namespace D365SolutionComparer
                     "Target diagnostic evidence:" + Environment.NewLine + Evidence(detail.TargetEvidence)
             };
 
-            Controls.Add(grid);
-            Controls.Add(evidence);
+            var sections = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Horizontal,
+                FixedPanel = FixedPanel.None,
+                Panel1MinSize = 150,
+                Panel2MinSize = 130,
+                SplitterWidth = 7,
+                BackColor = Color.Gainsboro
+            };
+            sections.Panel1.Controls.Add(grid);
+            sections.Panel2.Controls.Add(evidence);
+
+            Controls.Add(sections);
             Controls.Add(header);
+
+            Shown += (sender, args) =>
+            {
+                var availableHeight = sections.ClientSize.Height - sections.SplitterWidth;
+                if (availableHeight >= sections.Panel1MinSize + sections.Panel2MinSize)
+                {
+                    sections.SplitterDistance = Math.Max(sections.Panel1MinSize,
+                        Math.Min(availableHeight - sections.Panel2MinSize,
+                            (int)Math.Round(availableHeight * 0.6)));
+                }
+            };
         }
 
         private static string Evidence(System.Collections.Generic.IEnumerable<string> values)

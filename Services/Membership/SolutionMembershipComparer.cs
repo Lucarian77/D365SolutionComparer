@@ -94,12 +94,16 @@ namespace D365SolutionComparer.Services.Membership
                 ? new ComponentIdentity(i.Record, IdentityResolutionStatus.Ambiguous,
                     diagnostic: i.SemanticKind == ComponentSemanticKinds.Process
                         ? "Duplicate Process / Workflow fallback candidates share this portable semantic identity. Only this identity is ambiguous; unrelated workflow identities remain eligible for definitive absence checks."
+                        : i.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep
+                        ? "Different backing SDK steps share this portable identity; only this identity is ambiguous."
                         : "Multiple membership records resolve to the same identity key: " + i.ComparisonKey,
                     componentTypeKey: i.ComponentTypeKey, semanticKind: i.SemanticKind,
                     diagnosticEvidence: i.DiagnosticEvidence,
                     workflowCandidateKey: i.WorkflowCandidateKey,
-                    blockerPortableIdentity: i.SemanticKind == ComponentSemanticKinds.Process ? i.ComparisonKey : null,
-                    blockerScope: i.SemanticKind == ComponentSemanticKinds.Process
+                    blockerPortableIdentity: i.SemanticKind == ComponentSemanticKinds.Process ||
+                        i.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep ? i.ComparisonKey : null,
+                    blockerScope: i.SemanticKind == ComponentSemanticKinds.Process ||
+                        i.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep
                         ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind) : i).ToList().AsReadOnly();
         }
 
@@ -109,7 +113,8 @@ namespace D365SolutionComparer.Services.Membership
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             return items.Where(item => item.Status != IdentityResolutionStatus.Resolved ||
                 item.SemanticKind != ComponentSemanticKinds.SystemForm &&
-                item.SemanticKind != ComponentSemanticKinds.PluginAssembly ||
+                item.SemanticKind != ComponentSemanticKinds.PluginAssembly &&
+                item.SemanticKind != ComponentSemanticKinds.SdkMessageProcessingStep ||
                 seen.Add(Key(item) + ":" + (item.Record.ObjectId?.ToString("D") ?? string.Empty)))
                 .ToList().AsReadOnly();
         }

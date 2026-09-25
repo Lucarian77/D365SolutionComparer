@@ -21,6 +21,8 @@ namespace D365SolutionComparer.Services.Membership
 
         internal ParentEntityMetadataInventory ParentMetadata { get; set; }
         internal AppSettingResolutionOperation AppSettings { get; set; }
+        // Shared with the coordinated definition operation; no repeat Type 92 reads.
+        internal Type92EnvironmentEvidence Type92Evidence { get; set; }
 
         public bool OptionSetCatalogAttempted { get; private set; }
         public OptionSetMetadataBase[] OptionSetCatalog { get; private set; }

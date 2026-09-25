@@ -26,6 +26,8 @@ namespace D365SolutionComparer.Models.Membership
         public const string SystemForm = "systemform";
         /// <summary>Plug-in Assembly semantic family.</summary>
         public const string PluginAssembly = "pluginassembly";
+        /// <summary>SDK Message Processing Step semantic family.</summary>
+        public const string SdkMessageProcessingStep = "sdkmessageprocessingstep";
         internal const string GlobalChoiceCandidateTypeKey = "globalchoice:candidate";
         internal const string ReportCandidateTypeKey = "report:candidate";
         internal const string RegisteredDefinitionPrefix = "registered:solutioncomponentdefinition:";
@@ -78,6 +80,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 62: return SiteMap;
                 case 80: return AppModule;
                 case 91: return PluginAssembly;
+                case 92: return SdkMessageProcessingStep;
                 case 380: return EnvironmentVariableDefinition;
                 default:
                     return IsKnownBuiltInType(componentType)

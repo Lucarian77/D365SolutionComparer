@@ -16,6 +16,9 @@ namespace D365SolutionComparer
         private readonly string targetSolutionVersion;
         private readonly ComboBox lifecycleOperation;
         private readonly Action captureAppSettingEvidence;
+#if DEBUG
+        private readonly Action captureType92Evidence;
+#endif
 
         public MembershipCoverageDetailsForm(string sourceName, MembershipCoverageDiagnostics source,
             string targetName, MembershipCoverageDiagnostics target,
@@ -23,7 +26,11 @@ namespace D365SolutionComparer
             string sourceSolutionVersion = null, string targetSolutionVersion = null,
             Microsoft.Xrm.Sdk.IOrganizationService sourceService = null,
             Microsoft.Xrm.Sdk.IOrganizationService targetService = null,
-            Action captureAppSettingEvidence = null)
+            Action captureAppSettingEvidence = null
+#if DEBUG
+            , Action captureType92Evidence = null
+#endif
+            )
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (target == null) throw new ArgumentNullException(nameof(target));
@@ -31,6 +38,9 @@ namespace D365SolutionComparer
             this.sourceSolutionVersion = sourceSolutionVersion ?? string.Empty;
             this.targetSolutionVersion = targetSolutionVersion ?? string.Empty;
             this.captureAppSettingEvidence = captureAppSettingEvidence;
+#if DEBUG
+            this.captureType92Evidence = captureType92Evidence;
+#endif
             Text = "Membership Coverage Details";
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(800, 480);
@@ -116,6 +126,18 @@ namespace D365SolutionComparer
             };
             buttons.Controls.Add(close);
             buttons.Controls.Add(appSetting);
+#if DEBUG
+            var type92 = new Button
+            {
+                Text = "Capture Type 92 Evidence...",
+                Width = 175,
+                Enabled = captureType92Evidence != null && sourceService != null && targetService != null &&
+                    presentation != null && presentation.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            type92.Click += (sender, args) => this.captureType92Evidence?.Invoke();
+            buttons.Controls.Add(type92);
+#endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);
             Controls.Add(tabs);

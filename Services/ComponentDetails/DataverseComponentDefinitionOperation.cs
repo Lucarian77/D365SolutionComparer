@@ -20,6 +20,7 @@ namespace D365SolutionComparer.Services.ComponentDetails
             new DataverseComponentIdentityResolver();
         private readonly DataverseComponentDefinitionReader definitionReader =
             new DataverseComponentDefinitionReader();
+        internal DataverseComponentDefinitionOperation() { }
 
         public ComponentDefinitionSnapshot ReadAndResolve(IOrganizationService service,
             SolutionIdentity solution, CancellationToken cancellationToken,
