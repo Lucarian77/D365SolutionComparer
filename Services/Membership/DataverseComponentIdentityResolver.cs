@@ -19,6 +19,9 @@ namespace D365SolutionComparer.Services.Membership
     /// <summary>Published identity metadata only. No display-name or environment-local GUID fallback.</summary>
     public sealed class DataverseComponentIdentityResolver : IComponentIdentityResolver
     {
+        // SDK-step handler identity reuses the established Type 91 encoding verbatim.
+        internal static string PluginAssemblyPortableKey(string name, string token, string culture) =>
+            ResolutionContext.PluginAssemblyPortableKey(name, token, culture);
         private const int BatchSize = 200;
         private readonly bool entityKeyResolutionEnabled;
 
@@ -38,9 +41,11 @@ namespace D365SolutionComparer.Services.Membership
             SolutionComponentRecord component, CancellationToken cancellationToken)
         {
             if (component == null) throw new ArgumentNullException(nameof(component));
-            return new ResolutionContext(new DataverseReadContext(service, environment, cancellationToken),
-                entityKeyResolutionEnabled)
-                .Resolve(component, cancellationToken);
+            var context = new DataverseReadContext(service, environment, cancellationToken);
+            return component.ComponentType == 92
+                ? new Type92MembershipResolver().Resolve(context, component, cancellationToken)
+                : new ResolutionContext(context, entityKeyResolutionEnabled)
+                    .Resolve(component, cancellationToken);
         }
 
         /// <summary>Bulk resolution caches identities and groups safe lookups within this snapshot operation.</summary>
@@ -72,7 +77,8 @@ namespace D365SolutionComparer.Services.Membership
             var resolved = new ResolutionContext(context, entityKeyResolutionEnabled)
                 .ResolveAll(snapshot.Components, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            return MembershipSnapshot.Complete(snapshot.Solution, resolved, snapshot.CapturedAt);
+            return new Type92MembershipResolver().Apply(context,
+                MembershipSnapshot.Complete(snapshot.Solution, resolved, snapshot.CapturedAt), cancellationToken);
         }
 
         private sealed class ResolutionContext

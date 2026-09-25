@@ -17,6 +17,9 @@ namespace D365SolutionComparer
         private readonly Action captureAppSettingEvidence;
         private readonly Microsoft.Xrm.Sdk.IOrganizationService sourceService;
         private readonly Microsoft.Xrm.Sdk.IOrganizationService targetService;
+#if DEBUG
+        internal Action CaptureType92Evidence { get; set; }
+#endif
 
         public MembershipResultsForm(MembershipComparisonPresentation presentation,
             string sourceSolutionVersion = null, string targetSolutionVersion = null,
@@ -137,7 +140,11 @@ namespace D365SolutionComparer
                 presentation.Source.Diagnostics.EnvironmentName, source,
                 presentation.Target.Diagnostics.EnvironmentName, target, presentation,
                 sourceSolutionVersion, targetSolutionVersion,
-                sourceService, targetService, captureAppSettingEvidence))
+                sourceService, targetService, captureAppSettingEvidence
+#if DEBUG
+                , CaptureType92Evidence
+#endif
+                ))
                 form.ShowDialog(this);
         }
 

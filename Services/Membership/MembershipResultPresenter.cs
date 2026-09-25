@@ -56,12 +56,16 @@ namespace D365SolutionComparer.Services.Membership
                 ? new ComponentIdentity(item.Record, IdentityResolutionStatus.Ambiguous,
                     diagnostic: item.SemanticKind == ComponentSemanticKinds.Process
                         ? "Duplicate Process / Workflow fallback candidates share this portable semantic identity. Only this identity is ambiguous; unrelated workflow identities remain eligible for definitive absence checks."
+                        : item.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep
+                        ? "Different backing SDK steps share this portable identity; only this identity is ambiguous."
                         : "Multiple membership records resolve to the same identity key: " + item.ComparisonKey,
                     componentTypeKey: item.ComponentTypeKey, semanticKind: item.SemanticKind,
                     diagnosticEvidence: item.DiagnosticEvidence,
                     workflowCandidateKey: item.WorkflowCandidateKey,
-                    blockerPortableIdentity: item.SemanticKind == ComponentSemanticKinds.Process ? item.ComparisonKey : null,
-                    blockerScope: item.SemanticKind == ComponentSemanticKinds.Process
+                    blockerPortableIdentity: item.SemanticKind == ComponentSemanticKinds.Process ||
+                        item.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep ? item.ComparisonKey : null,
+                    blockerScope: item.SemanticKind == ComponentSemanticKinds.Process ||
+                        item.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep
                         ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind)
                 : item);
         }
@@ -72,7 +76,8 @@ namespace D365SolutionComparer.Services.Membership
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             return components.Where(item => item.Status != IdentityResolutionStatus.Resolved ||
                 item.SemanticKind != ComponentSemanticKinds.SystemForm &&
-                item.SemanticKind != ComponentSemanticKinds.PluginAssembly ||
+                item.SemanticKind != ComponentSemanticKinds.PluginAssembly &&
+                item.SemanticKind != ComponentSemanticKinds.SdkMessageProcessingStep ||
                 seen.Add(IdentityKey(item) + ":" +
                     (item.Record.ObjectId?.ToString("D") ?? string.Empty)));
         }
@@ -113,6 +118,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
                 case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
+                case ComponentSemanticKinds.SdkMessageProcessingStep: return "SDK Message Processing Step";
                 default: return "Component Type " + identity.Record.ComponentType;
             }
         }
@@ -208,6 +214,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
                 case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
+                case ComponentSemanticKinds.SdkMessageProcessingStep: return "SDK Message Processing Step";
                 default: return DisplayKind(identity);
             }
         }

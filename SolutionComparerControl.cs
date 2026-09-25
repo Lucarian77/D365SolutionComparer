@@ -208,7 +208,7 @@ namespace D365SolutionComparer
 
             lblLegend = new Label
             {
-                Text = "Legend: Match=Green | Version=Orange | Publisher=Purple | Display Name=Blue | Package Type=Teal | Multiple=Magenta | Missing in Source=Red | Missing in Target=Brick Red",
+                Text = "Legend: Match | Version Mismatch | Publisher/Display Name Mismatch | Package Type Mismatch | Multiple Differences | Missing",
                 Dock = DockStyle.Top,
                 Height = 32,
                 Padding = new Padding(10, 0, 0, 0),
@@ -766,6 +766,10 @@ namespace D365SolutionComparer
                     var resultsForm = new MembershipResultsForm(presentation,
                         selected.SourceVersion, selected.TargetVersion,
                         () => CaptureAppSettingEvidence(presentation), sourceService, destinationService);
+#if DEBUG
+                    resultsForm.CaptureType92Evidence = () => CaptureType92Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion);
+#endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
                     SetStatusMessage("Membership comparison completed for " + presentation.SolutionUniqueName + ".",
@@ -860,6 +864,81 @@ namespace D365SolutionComparer
                 }
             });
         }
+
+#if DEBUG
+        private void CaptureType92Evidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion)
+        {
+            if (presentation?.Source.Snapshot?.State != MembershipSnapshotState.Complete ||
+                presentation.Target.Snapshot?.State != MembershipSnapshotState.Complete ||
+                sourceMembershipService == null || targetMembershipService == null)
+                return;
+            SetStatusMessage("Capturing read-only Type 92 evidence...", Color.DarkOrange);
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only Type 92 evidence...",
+                IsCancelable = true,
+                MessageWidth = 430,
+                MessageHeight = 150,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var collector = new Type92EvidenceCollector();
+                            var source = collector.Capture(sourceMembershipService, presentation.Source.Snapshot,
+                                sourceVersion, cancellation.Token, message => worker.ReportProgress(35,
+                                    new MembershipUiProgress("Source: " + message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            var target = collector.Capture(targetMembershipService, presentation.Target.Snapshot,
+                                targetVersion, cancellation.Token, message => worker.ReportProgress(70,
+                                    new MembershipUiProgress("Target: " + message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = Type92EvidenceReport.Build(source, target);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress == null) return;
+                    SetWorkingMessage(progress.Message, 430, 150);
+                    SetStatusMessage(progress.Message, Color.DarkOrange);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled)
+                    {
+                        SetStatusMessage("Type 92 evidence capture cancelled; no partial report was opened.",
+                            Color.DarkOrange);
+                        return;
+                    }
+                    if (args.Error != null)
+                    {
+                        SetStatusMessage("Type 92 evidence capture failed.", Color.Red);
+                        MessageBox.Show(this, "Type 92 evidence capture failed.\n\n" + args.Error.Message,
+                            "Type 92 Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    var report = args.Result as string;
+                    if (report == null) return;
+                    using (var form = new Type92EvidenceResultsForm(report))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                    SetStatusMessage("Type 92 evidence capture completed (read-only).", Color.Green);
+                }
+            });
+        }
+#endif
 
         private static DefinitionEnvironmentReadResult ReadDefinitionEnvironment(
             DataverseComponentDefinitionOperation operation, OrgService service, string environmentName,
@@ -1624,9 +1703,6 @@ namespace D365SolutionComparer
             var column = dgvResults.Columns[e.ColumnIndex];
             var dataPropertyName = column.DataPropertyName;
 
-            var rowData = dgvResults.Rows[e.RowIndex].DataBoundItem as CompareResult;
-            var packageTypeDifference = IsAnyPackageTypeDifference(rowData);
-
             if (e.Value == null)
             {
                 return;
@@ -1635,18 +1711,6 @@ namespace D365SolutionComparer
             var style = dgvResults.Rows[e.RowIndex].Cells[e.ColumnIndex].Style;
             style.SelectionBackColor = SystemColors.Highlight;
             style.SelectionForeColor = SystemColors.HighlightText;
-
-            if (dataPropertyName == "SourcePackageType" || dataPropertyName == "TargetPackageType")
-            {
-                if (packageTypeDifference)
-                {
-                    style.Font = new Font(dgvResults.Font, FontStyle.Bold);
-                    style.ForeColor = Color.Teal;
-                    style.BackColor = Color.LightCyan;
-                }
-
-                return;
-            }
 
             if (dataPropertyName != "Status" && dataPropertyName != "PackageTypeStatus")
             {
@@ -1659,49 +1723,43 @@ namespace D365SolutionComparer
                 return;
             }
 
-            style.Font = new Font(dgvResults.Font, FontStyle.Bold);
+            style.Font = dataPropertyName == "Status"
+                ? new Font(dgvResults.Font, FontStyle.Bold)
+                : dgvResults.Font;
 
             switch (status)
             {
                 case "Match":
-                    style.ForeColor = Color.Green;
-                    style.BackColor = Color.Honeydew;
+                    style.ForeColor = Color.FromArgb(47, 98, 69);
+                    style.BackColor = Color.FromArgb(243, 247, 244);
                     break;
 
                 case "Version Mismatch":
-                    style.ForeColor = Color.DarkOrange;
-                    style.BackColor = Color.Moccasin;
+                    style.ForeColor = Color.FromArgb(122, 87, 0);
+                    style.BackColor = Color.FromArgb(255, 247, 232);
                     break;
 
                 case "Publisher Mismatch":
-                    style.ForeColor = Color.DarkViolet;
-                    style.BackColor = Color.Lavender;
-                    break;
-
                 case "Display Name Mismatch":
-                    style.ForeColor = Color.SteelBlue;
-                    style.BackColor = Color.AliceBlue;
+                    style.ForeColor = Color.FromArgb(77, 93, 112);
+                    style.BackColor = Color.FromArgb(243, 245, 248);
                     break;
 
                 case "Package Type Mismatch":
                 case "Managed/Unmanaged Mismatch":
-                    style.ForeColor = Color.Teal;
-                    style.BackColor = Color.LightCyan;
+                    style.ForeColor = Color.FromArgb(122, 87, 0);
+                    style.BackColor = Color.FromArgb(255, 247, 232);
                     break;
 
                 case "Multiple Differences":
-                    style.ForeColor = Color.DarkMagenta;
-                    style.BackColor = Color.MistyRose;
+                    style.ForeColor = Color.FromArgb(81, 75, 97);
+                    style.BackColor = Color.FromArgb(242, 241, 245);
                     break;
 
                 case "Missing in Source":
-                    style.ForeColor = Color.Red;
-                    style.BackColor = Color.MistyRose;
-                    break;
-
                 case "Missing in Target":
-                    style.ForeColor = Color.Firebrick;
-                    style.BackColor = Color.Linen;
+                    style.ForeColor = Color.FromArgb(138, 63, 66);
+                    style.BackColor = Color.FromArgb(251, 239, 239);
                     break;
 
                 default:
