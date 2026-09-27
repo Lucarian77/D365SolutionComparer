@@ -36,7 +36,7 @@ namespace D365SolutionComparer
             tabs.TabPages.Add(Page("Backing Entity Metadata", FormatMetadata(comparison.Source, comparison.Target)));
             tabs.TabPages.Add(Page("Setting Definitions", FormatSettingDefinitions(comparison.Source, comparison.Target)));
             tabs.TabPages.Add(Page("Parent Apps", FormatParentApps(comparison.Source, comparison.Target)));
-            tabs.TabPages.Add(Page("DEV vs UAT", FormatComparison(comparison)));
+            tabs.TabPages.Add(Page("Source vs Target", FormatComparison(comparison)));
             tabs.TabPages.Add(Page("Request Counts", FormatRequests(comparison.Source, comparison.Target)));
             tabs.TabPages.Add(Page("Diagnostics", FormatDiagnostics(comparison.Source, comparison.Target)));
 
@@ -93,7 +93,7 @@ namespace D365SolutionComparer
             "\nBACKING ENTITY METADATA\n" + FormatMetadata(comparison.Source, comparison.Target) +
             "\nSETTING DEFINITIONS\n" + FormatSettingDefinitions(comparison.Source, comparison.Target) +
             "\nPARENT APPS\n" + FormatParentApps(comparison.Source, comparison.Target) +
-            "\nDEV VS UAT\n" + FormatComparison(comparison) +
+            "\nSOURCE / TARGET RECONCILIATION\n" + FormatComparison(comparison) +
             "\nREQUEST COUNTS\n" + FormatRequests(comparison.Source, comparison.Target) +
             "\nDIAGNOSTICS\n" + FormatDiagnostics(comparison.Source, comparison.Target);
 
@@ -253,12 +253,12 @@ namespace D365SolutionComparer
         {
             var text = new StringBuilder();
             text.AppendLine("Candidate identities are diagnostic only and compared case-insensitively.");
-            text.AppendLine("DEV candidate count: " + value.Source.Candidates.Count +
-                "  UAT candidate count: " + value.Target.Candidates.Count);
+            text.AppendLine("Source candidate count: " + value.Source.Candidates.Count +
+                "  Target candidate count: " + value.Target.Candidates.Count);
             if (value.Candidates.Count == 0) text.AppendLine("No complete composite candidates.");
             foreach (var item in value.Candidates)
-                text.AppendLine(item.Outcome + " | " + item.Identity + " | DEV=" + item.SourceCount +
-                    " | UAT=" + item.TargetCount);
+                text.AppendLine(item.Outcome + " | " + item.Identity + " | Source=" + item.SourceCount +
+                    " | Target=" + item.TargetCount);
             return text.ToString();
         }
 

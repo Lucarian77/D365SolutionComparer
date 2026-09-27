@@ -32,7 +32,7 @@ namespace D365SolutionComparer.Services.Membership
             var text = new StringBuilder("TYPE 92 EVIDENCE ONLY - NO MEMBERSHIP RESOLUTION\r\n");
             AppendEnvironment(text, source);
             AppendEnvironment(text, target);
-            text.AppendLine("DEV/UAT RECONCILIATION");
+            text.AppendLine("SOURCE / TARGET RECONCILIATION");
             var sourceCandidates = source.Steps.Where(item => item.Candidate != null)
                 .GroupBy(item => item.Candidate).ToDictionary(item => item.Key, item => item.ToList());
             var targetCandidates = target.Steps.Where(item => item.Candidate != null)
@@ -51,7 +51,7 @@ namespace D365SolutionComparer.Services.Membership
                 else if (hasLeft) sourceOnly++;
                 else targetOnly++;
                 text.AppendLine((ambiguous ? "Ambiguous identity group" : hasLeft && hasRight ? "Unique match" :
-                    hasLeft ? "DEV only" : "UAT only") + " | " + key);
+                    hasLeft ? "Source only" : "Target only") + " | " + key);
                 if (hasLeft && hasRight && !ambiguous)
                 {
                     var left = leftRows[0];
@@ -70,8 +70,8 @@ namespace D365SolutionComparer.Services.Membership
                     item.Candidate == null) ||
                 source.Raw.Any(item => !item.ObjectId.HasValue || item.ObjectId == Guid.Empty) ||
                 target.Raw.Any(item => !item.ObjectId.HasValue || item.ObjectId == Guid.Empty);
-            text.AppendLine("Candidate totals: matched=" + matched + "; DEV-only=" + sourceOnly +
-                "; UAT-only=" + targetOnly + "; ambiguous=" + ambiguousCount +
+            text.AppendLine("Candidate totals: matched=" + matched + "; Source-only=" + sourceOnly +
+                "; Target-only=" + targetOnly + "; ambiguous=" + ambiguousCount +
                 "; incomplete evidence=" + incomplete);
             text.AppendLine("CONCLUSION");
             if (incomplete)
