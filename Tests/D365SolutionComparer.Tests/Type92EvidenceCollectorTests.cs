@@ -617,7 +617,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(2, right.Steps.Select(item => item.StepId).Distinct().Count());
             Assert.IsTrue(right.Steps.All(item => item.CandidateStatus == "AmbiguousCandidate"));
             var report = Type92EvidenceReport.Build(left, right);
-            StringAssert.Contains(report, "Candidate totals: matched=0; DEV-only=0; UAT-only=0; ambiguous=1");
+            StringAssert.Contains(report, "Candidate totals: matched=0; Source-only=0; Target-only=0; ambiguous=1");
         }
 
         [TestMethod, TestCategory(Category)]
@@ -629,8 +629,8 @@ namespace D365SolutionComparer.Tests
             uat.AddCompleteStep(Guid.NewGuid(), typeName: "MOE.PCLookup.Plugin.GetToken");
             uat.AddCompleteStep(Guid.NewGuid(), typeName: "Moe.Plugin.TimeentryExcelGenerator");
             var report = Type92EvidenceReport.Build(dev.Capture(), uat.Capture());
-            StringAssert.Contains(report, "Candidate totals: matched=0; DEV-only=0; UAT-only=1; ambiguous=1");
-            StringAssert.Contains(report, "UAT only | handlerAssembly=");
+            StringAssert.Contains(report, "Candidate totals: matched=0; Source-only=0; Target-only=1; ambiguous=1");
+            StringAssert.Contains(report, "Target only | handlerAssembly=");
         }
 
         [TestMethod, TestCategory(Category)]
