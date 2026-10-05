@@ -114,6 +114,7 @@ namespace D365SolutionComparer.Services.Membership
                 new Dictionary<Guid, ReportResolutionValue>();
             private readonly Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>> weakIdentityDiagnostics =
                 new Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>>();
+            private DiagnosticQueryResult savedQueryRetrieval;
             private readonly HashSet<int> weakIdentityDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<int, Guid?> weakIdentitySummaryComponentIds =
                 new Dictionary<int, Guid?>();
@@ -193,6 +194,7 @@ namespace D365SolutionComparer.Services.Membership
                         diagnosticEvidence: value.DiagnosticEvidence,
                         workflowCandidateKey: WorkflowSemanticPolicy.Candidate(row, out reason),
                         blockerPortableIdentity: value.BlockerPortableIdentity)
+                        .WithWorkflowCategory(WorkflowSemanticPolicy.Option(row, "category"))
                     : value.ToIdentity(record);
             }
 
@@ -269,7 +271,58 @@ namespace D365SolutionComparer.Services.Membership
                 }
                 ApplyEntityKeyDuplicateSafeguard(results);
                 ApplyPluginAssemblyDuplicateSafeguard(results);
+                ApplyPrimaryIdDuplicateSafeguard(results);
                 return Array.AsReadOnly(results);
+            }
+
+            private static void ApplyPrimaryIdDuplicateSafeguard(ComponentIdentity[] results)
+            {
+                var duplicates = results.Where(item => item.Status == IdentityResolutionStatus.Resolved &&
+                    (item.SemanticKind == ComponentSemanticKinds.SavedQuery ||
+                     item.SemanticKind == ComponentSemanticKinds.Process && WorkflowSemanticPolicy.IsCloudFlowKey(item.ComparisonKey)))
+                    .GroupBy(item => item.ComponentTypeKey + item.ComparisonKey, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1).Select(group => group.Key);
+                var duplicateKeys = new HashSet<string>(duplicates, StringComparer.OrdinalIgnoreCase);
+                for (int index = 0; index < results.Length; index++)
+                {
+                    var item = results[index];
+                    if (item.Status != IdentityResolutionStatus.Resolved ||
+                        !duplicateKeys.Contains(item.ComponentTypeKey + item.ComparisonKey)) continue;
+                    results[index] = new ComponentIdentity(item.Record, IdentityResolutionStatus.Ambiguous,
+                        diagnostic: "Multiple membership records share this primary-ID portable identity.",
+                        componentTypeKey: item.ComponentTypeKey, semanticKind: item.SemanticKind,
+                        diagnosticEvidence: item.DiagnosticEvidence).WithWorkflowCategory(item.WorkflowCategory);
+                }
+            }
+
+            private ComponentIdentity ResolveSavedQuery(SolutionComponentRecord record)
+            {
+                var evidence = GetWeakIdentityDiagnosticEvidence(record);
+                var status = IdentityResolutionStatus.Unresolved;
+                string key = null;
+                string diagnostic = "Saved Query backing correlation is missing, conflicting or incomplete.";
+                if (record.ObjectId.HasValue && record.ObjectId.Value != Guid.Empty && savedQueryRetrieval != null)
+                {
+                    var correlation = savedQueryRetrieval.GetCorrelation(record.ObjectId.Value);
+                    if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
+                    {
+                        status = IdentityResolutionStatus.Ambiguous;
+                        diagnostic = "Multiple Saved Query rows correlate to this objectid.";
+                    }
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Unique)
+                    {
+                        var row = correlation.Rows[0];
+                        var primary = row.GetAttributeValue<object>("savedqueryid");
+                        if (primary is Guid && (Guid)primary != Guid.Empty && (Guid)primary == record.ObjectId && row.Id == (Guid)primary)
+                        {
+                            status = IdentityResolutionStatus.Resolved;
+                            key = "savedquery:v1:savedqueryid:36:" + ((Guid)primary).ToString("D");
+                            diagnostic = "Saved Query primary-ID identity; entity, query type, name and XML are diagnostic context only.";
+                        }
+                    }
+                }
+                return new ComponentIdentity(record, status, key, diagnostic, ComponentSemanticKinds.SavedQuery,
+                    diagnosticEvidence: evidence);
             }
 
             private static void ApplyEntityKeyDuplicateSafeguard(ComponentIdentity[] results)
@@ -377,6 +430,7 @@ namespace D365SolutionComparer.Services.Membership
                         kind = ComponentSemanticKinds.PluginAssembly;
                         break;
                     case 29: kind = "process"; break;
+                    case SavedQueryComponentType: return ResolveSavedQuery(record);
                     case 20: kind = "securityrole"; break;
                     case 380: kind = "environmentvariabledefinition"; break;
                     case 3:
@@ -859,8 +913,22 @@ namespace D365SolutionComparer.Services.Membership
                             batch.Select(item => (object)item.ObjectId).ToArray()));
                         var rows = context.Query(query);
                         cancellationToken.ThrowIfCancellationRequested();
-                        var grouped = GroupWorkflowRows(rows, batch.Select(item => item.ObjectId),
-                            "A grouped workflow lookup returned an unrequested object.");
+                        IDictionary<Guid, List<Entity>> grouped;
+                        try
+                        {
+                            grouped = GroupWorkflowRows(rows, batch.Select(item => item.ObjectId),
+                                "A grouped workflow lookup returned an unrequested object.");
+                        }
+                        catch (InvalidOperationException) when (rows.Entities.Any(row => row != null &&
+                            WorkflowSemanticPolicy.Option(row, "category") == 5))
+                        {
+                            // A defective bounded Cloud Flow response cannot prove a correlation or absence.
+                            workflowLookupIncomplete = true;
+                            foreach (var key in batch)
+                                identityCache[key] = ResolutionValue.Unresolved(key.Kind,
+                                    "Cloud Flow batch returned incomplete or conflicting correlation evidence.");
+                            continue;
+                        }
                         foreach (var key in batch)
                         {
                             List<Entity> matches;
@@ -879,6 +947,12 @@ namespace D365SolutionComparer.Services.Membership
                                 continue;
                             }
                             var row = matches[0];
+                            if (WorkflowSemanticPolicy.Option(row, "category") == 5)
+                            {
+                                context.MetadataCache.WorkflowDefinitions[key.ObjectId] = row;
+                                identityCache[key] = ResolveCloudFlow(row);
+                                continue;
+                            }
                             var uniqueName = row.GetAttributeValue<string>("uniquename");
                             if (!string.IsNullOrWhiteSpace(uniqueName))
                             {
@@ -943,10 +1017,12 @@ namespace D365SolutionComparer.Services.Membership
 
             private ResolutionValue ResolveWorkflowDefinition(Entity row, bool parent = false)
             {
+                if (WorkflowSemanticPolicy.Option(row, "category") == 5) return ResolveCloudFlow(row);
                 var evidence = WorkflowEvidence(row);
                 var uniqueName = WorkflowSemanticPolicy.Text(row, "uniquename");
                 if (!string.IsNullOrWhiteSpace(uniqueName))
-                    return uniqueName.StartsWith(WorkflowSemanticPolicy.Prefix, StringComparison.OrdinalIgnoreCase)
+                    return uniqueName.StartsWith(WorkflowSemanticPolicy.Prefix, StringComparison.OrdinalIgnoreCase) ||
+                        WorkflowSemanticPolicy.IsCloudFlowKey(uniqueName)
                         ? ResolutionValue.Unresolved("process", "Unique name collides with the reserved semantic-candidate namespace.", evidence)
                         : ResolutionValue.FromKey("process", uniqueName,
                             parent ? "Portable identity inherited from the parent workflow definition's uniquename." : null, evidence);
@@ -957,6 +1033,19 @@ namespace D365SolutionComparer.Services.Membership
                         " definition has a blank uniquename. " + reason, evidence)
                     : ResolutionValue.FromKey("process", candidate,
                         "Semantic fallback candidate: name, definition type, category, entity scope and applicable subtype. Not a Microsoft alternate key.", evidence);
+            }
+
+            private static ResolutionValue ResolveCloudFlow(Entity row)
+            {
+                var primary = row.GetAttributeValue<object>("workflowid");
+                var evidence = WorkflowEvidence(row).Concat(new[] {
+                    "workflowidAttribute=" + FormatWorkflowEvidence(row, "workflowid") });
+                return primary is Guid && (Guid)primary != Guid.Empty && row.Id == (Guid)primary
+                    ? ResolutionValue.FromKey(ComponentSemanticKinds.Process,
+                        WorkflowSemanticPolicy.CloudFlowPrefix + "36:" + ((Guid)primary).ToString("D"),
+                        "Solution-aware Cloud Flow workflowid identity; other workflow fields are audit evidence only.", evidence)
+                    : ResolutionValue.Unresolved(ComponentSemanticKinds.Process,
+                        "Cloud Flow workflowid is blank or correlation is incomplete.", evidence);
             }
 
             private void ValidateWorkflowCandidates(IReadOnlyList<LookupKey> keys)
@@ -1051,7 +1140,9 @@ namespace D365SolutionComparer.Services.Membership
                     throw new InvalidOperationException("A bounded workflow identity query unexpectedly returned more records.");
                 var requested = new HashSet<Guid>(requestedIds);
                 if (rows.Entities.Any(row => row == null || row.LogicalName != "workflow" ||
-                    (row.Contains("workflowid") && (!(row["workflowid"] is Guid) || (Guid)row["workflowid"] != row.Id))))
+                    (row.Contains("workflowid") &&
+                        !(WorkflowSemanticPolicy.Option(row, "category") == 5 && row["workflowid"] is Guid && (Guid)row["workflowid"] == Guid.Empty) &&
+                        (!(row["workflowid"] is Guid) || (Guid)row["workflowid"] != row.Id))))
                     throw new InvalidOperationException("Workflow lookup returned conflicting entity or primary-key evidence.");
                 var grouped = rows.Entities.GroupBy(item => item.Id)
                     .ToDictionary(item => item.Key, item => item.ToList());
@@ -1513,6 +1604,7 @@ namespace D365SolutionComparer.Services.Membership
                         " diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => configuration.DisplayName + " diagnostic lookup failed: " + ex.Message,
                     cancellationToken);
+                if (componentType == SavedQueryComponentType) savedQueryRetrieval = retrieval;
                 var objectIds = retrieval.ObjectIds;
                 int returnedCount = retrieval.ReturnedRowCount;
                 bool countUnavailable = !retrieval.CountsAvailable;
@@ -1615,7 +1707,9 @@ namespace D365SolutionComparer.Services.Membership
                         FormatWeakIdentityValue(row, attribute))) +
                     "; diagnosticContext='" + EscapeDiagnosticText(
                         DescribeWeakIdentityContext(configuration, row)) +
-                    "'. Diagnostic evidence only; no value is used for membership comparison.";
+                    (configuration.ComponentType == SavedQueryComponentType
+                        ? "'. Saved Query correlation evidence; savedqueryid supplies membership identity. Candidate A context remains diagnostic only."
+                        : "'. Diagnostic evidence only; no value is used for membership comparison.");
             }
 
             private static string DescribeWeakIdentityContext(WeakIdentityConfiguration configuration, Entity row)

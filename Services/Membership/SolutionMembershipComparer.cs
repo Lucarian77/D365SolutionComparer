@@ -48,10 +48,12 @@ namespace D365SolutionComparer.Services.Membership
         {
             return items.Select(item =>
             {
-                if (!IsResolved(item) || item.SemanticKind != ComponentSemanticKinds.Process) return item;
+                if (!IsResolved(item) || item.SemanticKind != ComponentSemanticKinds.Process ||
+                    WorkflowSemanticPolicy.IsCloudFlowKey(item.ComparisonKey)) return item;
                 bool fallback = item.WorkflowCandidateKey != null &&
                     StringComparer.OrdinalIgnoreCase.Equals(item.WorkflowCandidateKey, item.ComparisonKey);
                 bool uncertain = opposite.Where(other => IsResolved(other) && other.SemanticKind == ComponentSemanticKinds.Process &&
+                    !WorkflowSemanticPolicy.IsCloudFlowKey(other.ComparisonKey) &&
                     !StringComparer.OrdinalIgnoreCase.Equals(item.ComparisonKey, other.ComparisonKey)).Any(other =>
                 {
                     bool otherFallback = other.WorkflowCandidateKey != null &&
@@ -64,7 +66,7 @@ namespace D365SolutionComparer.Services.Membership
                     componentTypeKey: item.ComponentTypeKey, semanticKind: item.SemanticKind,
                     diagnosticEvidence: item.DiagnosticEvidence, workflowCandidateKey: item.WorkflowCandidateKey,
                     blockerPortableIdentity: item.WorkflowCandidateKey,
-                    blockerScope: ResolutionBlockerScope.PortableIdentity) : item;
+                    blockerScope: ResolutionBlockerScope.PortableIdentity).WithWorkflowCategory(item.WorkflowCategory) : item;
             }).ToList().AsReadOnly();
         }
 
@@ -104,7 +106,7 @@ namespace D365SolutionComparer.Services.Membership
                         i.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep ? i.ComparisonKey : null,
                     blockerScope: i.SemanticKind == ComponentSemanticKinds.Process ||
                         i.SemanticKind == ComponentSemanticKinds.SdkMessageProcessingStep
-                        ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind) : i).ToList().AsReadOnly();
+                        ? ResolutionBlockerScope.PortableIdentity : ResolutionBlockerScope.SemanticKind).WithWorkflowCategory(i.WorkflowCategory) : i).ToList().AsReadOnly();
         }
 
         private static IReadOnlyList<ComponentIdentity> CollapseRepeatedMembershipReferences(
@@ -122,12 +124,14 @@ namespace D365SolutionComparer.Services.Membership
         private sealed class IdentityCoverage
         {
             private readonly bool blocksAllKinds;
+            private readonly bool cloudFlowIncomplete;
             private readonly HashSet<string> incompleteKinds;
             private readonly Dictionary<string, HashSet<string>> identityBlockers;
 
             private IdentityCoverage(bool blocksAllKinds, HashSet<string> incompleteKinds,
-                Dictionary<string, HashSet<string>> identityBlockers)
+                Dictionary<string, HashSet<string>> identityBlockers, bool cloudFlowIncomplete)
             {
+                this.cloudFlowIncomplete = cloudFlowIncomplete;
                 this.blocksAllKinds = blocksAllKinds;
                 this.incompleteKinds = incompleteKinds;
                 this.identityBlockers = identityBlockers;
@@ -136,10 +140,16 @@ namespace D365SolutionComparer.Services.Membership
             public static IdentityCoverage From(IEnumerable<ComponentIdentity> items)
             {
                 bool blocksAll = false;
+                bool cloudFlowIncomplete = false;
                 var incomplete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var identityBlockers = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
                 foreach (var item in items)
                 {
+                    if (item.SemanticKind == ComponentSemanticKinds.Process &&
+                        (!IsResolved(item) || !item.WorkflowCategory.HasValue ||
+                         item.WorkflowCategory < 0 || item.WorkflowCategory > 7 ||
+                         item.InventoryAbsencePolicy != InventoryAbsencePolicy.CompleteInventory))
+                        cloudFlowIncomplete = true;
                     if (string.IsNullOrWhiteSpace(item.SemanticKind)) blocksAll = true;
                     else if (IsResolved(item) && item.InventoryAbsencePolicy ==
                         InventoryAbsencePolicy.MatchOnly)
@@ -161,13 +171,15 @@ namespace D365SolutionComparer.Services.Membership
                         ComponentSemanticKinds.IsReportCandidate(item.ComponentTypeKey))
                         incomplete.Add(ComponentSemanticKinds.Report);
                 }
-                return new IdentityCoverage(blocksAll, incomplete, identityBlockers);
+                return new IdentityCoverage(blocksAll, incomplete, identityBlockers, cloudFlowIncomplete);
             }
 
             public bool CanEstablishAbsence(ComponentIdentity identity)
             {
                 if (blocksAllKinds || identity == null || string.IsNullOrWhiteSpace(identity.SemanticKind) ||
-                    incompleteKinds.Contains(identity.SemanticKind)) return false;
+                    incompleteKinds.Contains(identity.SemanticKind) ||
+                    identity.SemanticKind == ComponentSemanticKinds.Process &&
+                    WorkflowSemanticPolicy.IsCloudFlowKey(identity.ComparisonKey) && cloudFlowIncomplete) return false;
                 HashSet<string> keys;
                 return !identityBlockers.TryGetValue(identity.SemanticKind, out keys) ||
                     string.IsNullOrWhiteSpace(identity.ComparisonKey) || !keys.Contains(identity.ComparisonKey);

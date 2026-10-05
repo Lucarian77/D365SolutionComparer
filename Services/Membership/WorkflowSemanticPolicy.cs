@@ -14,6 +14,9 @@ namespace D365SolutionComparer.Services.Membership
     /// </summary>
     internal static class WorkflowSemanticPolicy
     {
+        internal const string CloudFlowPrefix = "cloudflow:v1:workflowid:";
+        internal static bool IsCloudFlowKey(string key) => key != null &&
+            key.StartsWith(CloudFlowPrefix, StringComparison.OrdinalIgnoreCase);
         internal const string Prefix = "workflow-semantic:v1:";
         internal static readonly string[] Columns = { "workflowid", "uniquename", "name", "type",
             "category", "primaryentity", "mode", "parentworkflowid", "workflowidunique", "statecode",

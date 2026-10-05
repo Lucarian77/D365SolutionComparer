@@ -83,7 +83,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod, TestCategory(ProductionCategory)]
-        public void MatchedProductionStepHasUnsupportedDefinitionStatus()
+        public void MatchedProductionStepKeepsUnsupportedDefinitionModelAndDisplaysNotCompared()
         {
             var source = new Fixture(); source.AddCompleteStep(Guid.NewGuid());
             var target = new Fixture(); target.AddCompleteStep(Guid.NewGuid());
@@ -98,7 +98,9 @@ namespace D365SolutionComparer.Tests
             var presentation = new ComponentDefinitionResultPresenter().Apply(membership,
                 sourceDefinitions, targetDefinitions);
             Assert.AreEqual("Present in Both", presentation.Rows.Single().MembershipStatus);
-            Assert.AreEqual("Unsupported", presentation.Rows.Single().DefinitionStatus);
+            Assert.AreEqual("Not Compared", presentation.Rows.Single().DefinitionStatus);
+            Assert.IsTrue(sourceDefinitions.Definitions.Concat(targetDefinitions.Definitions)
+                .All(definition => definition.Status == ComponentDefinitionReadStatus.Unsupported));
             Assert.AreEqual(0, source.Service.WriteCalls);
             Assert.AreEqual(0, target.Service.WriteCalls);
         }

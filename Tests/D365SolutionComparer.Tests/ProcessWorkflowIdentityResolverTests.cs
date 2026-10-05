@@ -133,7 +133,7 @@ namespace D365SolutionComparer.Tests
 
             Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Status);
             Assert.IsNull(result.ComparisonKey);
-            StringAssert.StartsWith(result.Diagnostic, "Workflow definition has a blank uniquename.");
+            StringAssert.StartsWith(result.Diagnostic, "Cloud Flow workflowid is blank or correlation is incomplete.");
             StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "workflowid=" + definitionId.ToString("D"));
             StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "name='Diagnostic display name'");
             StringAssert.Contains(string.Join("; ", result.DiagnosticEvidence), "type=1");

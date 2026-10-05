@@ -72,6 +72,14 @@ namespace D365SolutionComparer.Models.Membership
         public string ComparisonKey { get; }
         /// <summary>Process-only semantic candidate evidence; never overrides an established uniquename.</summary>
         public string WorkflowCandidateKey { get; }
+        // Operation-local category evidence: an unknown category cannot prove Cloud Flow absence.
+        internal int? WorkflowCategory { get; private set; }
+        internal ComponentIdentity WithWorkflowCategory(int? category)
+        {
+            var copy = (ComponentIdentity)MemberwiseClone();
+            copy.WorkflowCategory = category;
+            return copy;
+        }
         public string BlockerPortableIdentity { get; }
         public ResolutionBlockerScope BlockerScope { get; }
         /// <summary>Controls whether an unmatched resolved identity can use complete inventory as absence proof.</summary>
