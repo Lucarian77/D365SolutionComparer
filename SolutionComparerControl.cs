@@ -65,6 +65,9 @@ namespace D365SolutionComparer
         private OrgService targetService;
         private OrgService sourceMembershipService;
         private OrgService targetMembershipService;
+#if DEBUG
+        private readonly UnsupportedInventorySession unsupportedInventorySession = new UnsupportedInventorySession();
+#endif
 
         private string sourceConnectionName = "Current XrmToolBox connection";
         private string targetConnectionName = "Not connected";
@@ -777,6 +780,13 @@ namespace D365SolutionComparer
                         selected.SourceVersion, selected.TargetVersion, false);
                     resultsForm.CaptureSavedQueryEvidence = () => CaptureProcessQueryEvidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, true);
+                    unsupportedInventorySession.Record(presentation.Source.Snapshot, presentation.Target.Snapshot,
+                        selected.SourceDisplayName, selected.SourceVersion, selected.TargetDisplayName, selected.TargetVersion);
+                    // Freeze the session scope for this result window; later environment changes cannot mix evidence.
+                    var inventorySource = unsupportedInventorySession.Source;
+                    var inventoryTarget = unsupportedInventorySession.Target;
+                    resultsForm.CaptureUnsupportedCoverageInventory = () =>
+                        CaptureUnsupportedCoverageInventory(inventorySource, inventoryTarget);
 #endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
@@ -793,6 +803,50 @@ namespace D365SolutionComparer
         {
             return new DataverseComponentDefinitionOperation();
         }
+
+#if DEBUG
+        private void CaptureUnsupportedCoverageInventory(InventoryCheckpoint[] source, InventoryCheckpoint[] target)
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Preparing local membership coverage inventory (no Dataverse requests)...",
+                IsCancelable = true,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            args.Result = UnsupportedCoverageInventory.Build(source, target, cancellation.Token).Text;
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled) return;
+                    if (args.Error != null)
+                    {
+                        MessageBox.Show(this, "Coverage inventory failed.\n\n" + args.Error.Message,
+                            "Unsupported Coverage Inventory", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    if (!(args.Result is string report)) return;
+                    using (var form = new UnsupportedCoverageInventoryResultsForm(report))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                }
+            });
+        }
+#endif
 
         private void CaptureAppSettingEvidence(MembershipComparisonPresentation presentation)
         {
