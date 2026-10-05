@@ -3985,9 +3985,9 @@ namespace D365SolutionComparer.Tests
             var result = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId), CancellationToken.None);
 
-            Assert.AreEqual(componentType == 26 ? IdentityResolutionStatus.Resolved : IdentityResolutionStatus.Unsupported, result.Status);
-            Assert.AreEqual(componentType == 26 ? ComponentSemanticKinds.SavedQuery : "unsupported:componenttype:" + componentType, result.SemanticKind);
-            if (componentType == 26) StringAssert.StartsWith(result.ComparisonKey, "savedquery:v1:savedqueryid:");
+            Assert.AreEqual((componentType == 26 || componentType == 59) ? IdentityResolutionStatus.Resolved : IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual(componentType == 59 ? ComponentSemanticKinds.SavedQueryVisualization : componentType == 26 ? ComponentSemanticKinds.SavedQuery : "unsupported:componenttype:" + componentType, result.SemanticKind);
+            if (componentType == 26 || componentType == 59) StringAssert.StartsWith(result.ComparisonKey, componentType == 59 ? "savedqueryvisualization:v1:savedqueryvisualizationid:" : "savedquery:v1:savedqueryid:");
             else
             {
                 Assert.IsNull(result.ComparisonKey);
@@ -3996,7 +3996,7 @@ namespace D365SolutionComparer.Tests
             var evidence = result.DiagnosticEvidence.First();
             foreach (var column in WeakIdentityColumns(componentType))
                 StringAssert.Contains(evidence, column + "=");
-            StringAssert.Contains(evidence, componentType == 26
+            StringAssert.Contains(evidence, componentType == 59 ? "savedqueryvisualizationid supplies membership identity." : componentType == 26
                 ? "Candidate A context remains diagnostic only."
                 : "Diagnostic evidence only; no value is used for membership comparison.");
             Assert.IsTrue(result.DiagnosticEvidence.Any(item => item.Contains("RawComponentCount=1") &&
@@ -4035,11 +4035,11 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(1, counter.GetExecuteCount("WhoAmI"));
             Assert.AreEqual(3, counter.TotalRequests);
             var bucket = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
-                item.SemanticKind == (componentType == 26 ? ComponentSemanticKinds.SavedQuery : "unsupported:componenttype:" + componentType));
-            Assert.AreEqual(componentType == 26 ? MembershipCoverageBucketType.SemanticKind : MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
+                item.SemanticKind == (componentType == 59 ? ComponentSemanticKinds.SavedQueryVisualization : componentType == 26 ? ComponentSemanticKinds.SavedQuery : "unsupported:componenttype:" + componentType));
+            Assert.AreEqual((componentType == 26 || componentType == 59) ? MembershipCoverageBucketType.SemanticKind : MembershipCoverageBucketType.KnownUnsupportedIsolatedType, bucket.BucketType);
             Assert.AreEqual(1, bucket.DiagnosticGroups.Count);
-            Assert.AreEqual(componentType == 26 ? 2 : 202, bucket.DiagnosticGroups.Single().Count);
-            if (componentType == 26)
+            Assert.AreEqual((componentType == 26 || componentType == 59) ? 2 : 202, bucket.DiagnosticGroups.Single().Count);
+            if (componentType == 26 || componentType == 59)
             {
                 Assert.AreEqual(200, bucket.Resolved);
                 Assert.AreEqual(2, bucket.Ambiguous);
@@ -4075,13 +4075,13 @@ namespace D365SolutionComparer.Tests
             StringAssert.Contains(summary, "MissingCount=1");
             StringAssert.Contains(summary, "NonUniqueObjectIdCount=1");
             StringAssert.Contains(summary, "BlankNameCount=1");
-            if (componentType == 26)
+            if (componentType == 26 || componentType == 59)
             {
                 Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Components[0].Status);
                 Assert.AreEqual(IdentityResolutionStatus.Ambiguous, result.Components[1].Status);
                 Assert.AreEqual(IdentityResolutionStatus.Resolved, result.Components[2].Status);
             }
-            else Assert.IsTrue(result.Components.All(item => item.Status == (componentType == 26 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported) &&
+            else Assert.IsTrue(result.Components.All(item => item.Status == ((componentType == 26 || componentType == 59) ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported) &&
                 item.ComparisonKey == null));
         }
 
@@ -4109,7 +4109,7 @@ namespace D365SolutionComparer.Tests
                 }), solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
                 CancellationToken.None);
             Assert.IsTrue(paged.DiagnosticEvidence.Any(item => item.Contains("incomplete result set")));
-            Assert.IsTrue(new[] { conflict, paged }.All(item => item.Status == (componentType == 26 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported) &&
+            Assert.IsTrue(new[] { conflict, paged }.All(item => item.Status == ((componentType == 26 || componentType == 59) ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported) &&
                 item.ComparisonKey == null));
         }
 
@@ -4124,7 +4124,7 @@ namespace D365SolutionComparer.Tests
                 WeakIdentityService(solution, componentType, query => throw new FaultException("Denied")),
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, objectId),
                 CancellationToken.None);
-            Assert.AreEqual(componentType == 26 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported, faulted.Status);
+            Assert.AreEqual((componentType == 26 || componentType == 59) ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported, faulted.Status);
             StringAssert.Contains(faulted.DiagnosticEvidence.First(), "Denied");
 
             using (var cancellation = new CancellationTokenSource())
@@ -4163,7 +4163,7 @@ namespace D365SolutionComparer.Tests
                 MembershipSnapshot.Complete(targetSolution, new[] { target }, DateTimeOffset.UtcNow));
 
             Assert.AreEqual(2, compared.Count);
-            if (componentType == 26)
+            if (componentType == 26 || componentType == 59)
             {
                 Assert.AreEqual(1, compared.Count(item => item.Presence == MembershipPresence.OnlyInSource));
                 Assert.AreEqual(1, compared.Count(item => item.Presence == MembershipPresence.OnlyInTarget));
@@ -4188,7 +4188,7 @@ namespace D365SolutionComparer.Tests
                 solution.Environment, new SolutionComponentRecord(Guid.NewGuid(), componentType, null),
                 CancellationToken.None);
             Assert.AreEqual(0, queryCount);
-            Assert.AreEqual(componentType == 26 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported, result.Status);
+            Assert.AreEqual((componentType == 26 || componentType == 59) ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported, result.Status);
             Assert.IsNull(result.ComparisonKey);
             StringAssert.Contains(result.DiagnosticEvidence.First(), "objectid is unavailable");
         }
@@ -4233,29 +4233,29 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(records.Count, result.Components.Count);
             Assert.IsTrue(result.Components.Select((item, index) => ReferenceEquals(item.Record,
                 records[index].Record)).All(item => item));
-            var expectedStatus = componentType == 26 || componentType == 31 || componentType == 60 || componentType == 62
+            var expectedStatus = componentType == 26 || componentType == 59 || componentType == 31 || componentType == 60 || componentType == 62
                 ? IdentityResolutionStatus.Unresolved : IdentityResolutionStatus.Unsupported;
             Assert.IsTrue(result.Components.All(item =>
                 item.Status == expectedStatus && item.ComparisonKey == null));
 
-            var expectedSemanticKind = componentType == 26 ? ComponentSemanticKinds.SavedQuery :
+            var expectedSemanticKind = componentType == 59 ? ComponentSemanticKinds.SavedQueryVisualization : componentType == 26 ? ComponentSemanticKinds.SavedQuery :
                 componentType == 60 ? ComponentSemanticKinds.SystemForm :
                 componentType == 62 ? ComponentSemanticKinds.SiteMap :
                 "unsupported:componenttype:" + componentType;
             var coverage = new MembershipCoverageDiagnosticsBuilder().Build(result).SemanticKinds.Single(item =>
                 item.SemanticKind == expectedSemanticKind);
             Assert.AreEqual(records.Count, coverage.TotalCandidates);
-            Assert.AreEqual(componentType == 26 || componentType == 31 || componentType == 60 || componentType == 62 ? 0 : records.Count,
+            Assert.AreEqual(componentType == 26 || componentType == 59 || componentType == 31 || componentType == 60 || componentType == 62 ? 0 : records.Count,
                 coverage.Unsupported);
             Assert.AreEqual(0, coverage.Resolved);
-            Assert.AreEqual(componentType == 26 || componentType == 31 || componentType == 60 || componentType == 62 ? records.Count : 0,
+            Assert.AreEqual(componentType == 26 || componentType == 59 || componentType == 31 || componentType == 60 || componentType == 62 ? records.Count : 0,
                 coverage.Unresolved);
             Assert.AreEqual(0, coverage.Ambiguous);
             Assert.AreEqual(1, coverage.DiagnosticGroups.Count);
             Assert.AreEqual(records.Count, coverage.DiagnosticGroups.Single().Count);
             Assert.AreEqual(expectedStatus,
                 coverage.DiagnosticGroups.Single().ResolutionStatus);
-            Assert.AreEqual(componentType == 26
+            Assert.AreEqual(componentType == 59 ? "Saved Query Visualization backing correlation is missing, conflicting or incomplete." : componentType == 26
                     ? "Saved Query backing correlation is missing, conflicting or incomplete."
                     : componentType == 31
                     ? "No report row matched the component object ID, so signed Report identity could not be verified."

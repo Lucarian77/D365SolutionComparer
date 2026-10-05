@@ -21,15 +21,15 @@ namespace D365SolutionComparer.Tests
         private const string Category = "Phase2G15B";
 
         [TestMethod, TestCategory(Category)]
-        public void PublicType59RemainsUnsupportedInBothBuildsAndReleaseExcludesCollectorAndWindow()
+        public void PublicType59RequiresPrimaryIdCorrelationAndReleaseExcludesCollectorAndWindow()
         {
-            Assert.AreEqual("unsupported:componenttype:59", ComponentSemanticKinds.FromRawComponentType(59));
-            Assert.IsNull(ComponentDefinitionContractCatalog.For("unsupported:componenttype:59"));
+            Assert.AreEqual(ComponentSemanticKinds.SavedQueryVisualization, ComponentSemanticKinds.FromRawComponentType(59));
+            Assert.IsNull(ComponentDefinitionContractCatalog.For(ComponentSemanticKinds.SavedQueryVisualization));
             var solution = MembershipTestData.Solution();
             var service = MembershipTestData.Service(solution, query => new EntityCollection());
             var identity = new DataverseComponentIdentityResolver().Resolve(service, solution.Environment,
                 new SolutionComponentRecord(Guid.NewGuid(), 59, Guid.NewGuid()), CancellationToken.None);
-            Assert.AreEqual(IdentityResolutionStatus.Unsupported, identity.Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, identity.Status);
             Assert.IsNull(identity.ComparisonKey);
             Assert.AreEqual(0, service.WriteCalls);
 #if !DEBUG
@@ -73,7 +73,7 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod, TestCategory(Category)]
-        public void BroadDiscovery201IdsUsesTwoLightweightBatchesAndCachesRepeatedMembershipAcrossSolutions()
+        public void BroadDiscovery201IdsUsesTwoDetailBatchesAndCachesRepeatedMembershipAcrossSolutions()
         {
             var pair = new Pair();
             for (int i = 0; i < 201; i++)
@@ -86,9 +86,13 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(201, report.Source.Charts.Count); Assert.AreEqual(402, report.Source.Raw.Count);
             Assert.AreEqual(2, report.Source.Count(Type59EvidenceCollector.EntityName));
             Assert.AreEqual(2, report.Target.Count(Type59EvidenceCollector.EntityName));
-            Assert.AreEqual(0, report.SelectedPairs.Count); Assert.AreEqual(0, report.Source.Details.Count);
+            Assert.AreEqual(0, report.SelectedPairs.Count); Assert.AreEqual(201, report.Source.Details.Count);
             Assert.IsTrue(pair.Source.Queries.Where(item => item.EntityName == Type59EvidenceCollector.EntityName)
-                .All(item => !item.ColumnSet.Columns.Contains("datadescription") && item.Criteria.Conditions.Single().Values.Count <= 200));
+                .All(item => item.ColumnSet.Columns.Contains("datadescription") && item.Criteria.Conditions.Single().Values.Count <= 200));
+            CollectionAssert.AreEquivalent(Type59EvidenceCollector.DetailColumns,
+                pair.Source.Queries.First(item => item.EntityName == Type59EvidenceCollector.EntityName).ColumnSet.Columns.ToArray());
+            Assert.AreEqual(402, report.Lifecycle.Count);
+            Assert.IsTrue(report.Lifecycle.All(item => item.Outcomes.Contains("SameDefinition")));
         }
 
         [TestMethod, TestCategory(Category)]
@@ -231,11 +235,11 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(0, report.SelectedPairs.Count);
             StringAssert.Contains(report.Build(), "Unique candidate match (B not approved)");
             Assert.IsTrue(pair.Source.Queries.Where(item => item.EntityName == Type59EvidenceCollector.EntityName)
-                .All(item => !item.ColumnSet.Columns.Contains("datadescription")));
+                .All(item => item.ColumnSet.Columns.Contains("datadescription")));
         }
 
         [TestMethod, TestCategory(Category)]
-        public void BroadDiscoveryDeduplicatesAcrossSolutionsAndNoDifferingIdsMeansNoXmlReads()
+        public void BroadDiscoveryDeduplicatesAcrossSolutionsAndIncludesOneSidedBackingEvidence()
         {
             var pair = new Pair(); var sharedId = Guid.NewGuid();
             foreach (var side in new[] { pair.Source, pair.Target })
@@ -245,12 +249,12 @@ namespace D365SolutionComparer.Tests
             }
             var report = pair.Capture(true);
             Assert.AreEqual(2, report.SharedSolutions.Count); Assert.AreEqual(2, report.Pairs.Count);
-            Assert.AreEqual(1, report.Source.Charts.Count); Assert.AreEqual(0, report.SelectedPairs.Count);
+            Assert.AreEqual(2, report.Source.Charts.Count); Assert.AreEqual(0, report.SelectedPairs.Count);
             foreach (var side in new[] { pair.Source, pair.Target })
             {
                 Assert.AreEqual(2, side.Queries.Count); var query = side.Queries.Single(item => item.EntityName == Type59EvidenceCollector.EntityName);
-                CollectionAssert.AreEquivalent(Type59EvidenceCollector.LightColumns, query.ColumnSet.Columns.ToArray());
-                Assert.AreEqual(1, query.Criteria.Conditions.Single().Values.Count);
+                CollectionAssert.AreEquivalent(Type59EvidenceCollector.DetailColumns, query.ColumnSet.Columns.ToArray());
+                Assert.AreEqual(2, query.Criteria.Conditions.Single().Values.Count);
                 Assert.AreEqual(0, side.Service.ExecuteCalls);
             }
             StringAssert.Contains(report.Build(), "Source-only solution unique names=[SourceExclusive]");
@@ -258,15 +262,15 @@ namespace D365SolutionComparer.Tests
         }
 
         [TestMethod, TestCategory(Category)]
-        public void DiscoveryWithNoSharedSolutionsNeverReadsBackingRows()
+        public void DiscoveryWithNoSharedSolutionsStillCapturesOneSidedEvidence()
         {
             var pair = new Pair(); pair.Source.Add("Chart", solution: "SourceOnly"); pair.Target.Add("Chart", solution: "TargetOnly");
             var report = pair.Capture(true); Assert.AreEqual(0, report.SharedSolutions.Count);
-            Assert.AreEqual(1, pair.Source.Service.Calls); Assert.AreEqual(1, pair.Target.Service.Calls);
+            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Target.Service.Calls);
         }
 
         [TestMethod, TestCategory(Category)]
-        public void DiscoverySelectsAtMostTwoDistinctDifferingIdPairsPrefersManagedTransportAndBatchesDetailReads()
+        public void DiscoverySelectsTwoPriorityExcerptsButCapturesAllPairsInOneDetailBatch()
         {
             var pair = new Pair();
             for (int i = 0; i < 4; i++)
@@ -276,13 +280,12 @@ namespace D365SolutionComparer.Tests
             }
             var report = pair.Capture(true);
             Assert.AreEqual(2, report.SelectedPairs.Count); Assert.IsTrue(report.SelectedPairs.All(item => item.UnmanagedToManaged));
-            Assert.AreEqual(2, report.Source.Details.Count); Assert.AreEqual(2, report.Target.Details.Count);
+            Assert.AreEqual(4, report.Source.Details.Count); Assert.AreEqual(4, report.Target.Details.Count);
             foreach (var side in new[] { pair.Source, pair.Target })
             {
                 var queries = side.Queries.Where(item => item.EntityName == Type59EvidenceCollector.EntityName).ToList();
-                Assert.AreEqual(2, queries.Count); Assert.IsFalse(queries[0].ColumnSet.Columns.Contains("datadescription"));
-                Assert.IsTrue(queries[1].ColumnSet.Columns.Contains("datadescription"));
-                Assert.AreEqual(2, queries[1].Criteria.Conditions.Single().Values.Count);
+                Assert.AreEqual(1, queries.Count); Assert.IsTrue(queries[0].ColumnSet.Columns.Contains("datadescription"));
+                Assert.AreEqual(4, queries[0].Criteria.Conditions.Single().Values.Count);
             }
             StringAssert.Contains(report.Build(), "selected pairs=2");
         }
@@ -429,7 +432,9 @@ namespace D365SolutionComparer.Tests
                     return pair.Source.DefaultQuery(query);
                 };
                 var report = pair.Capture(true);
-                StringAssert.Contains(report.Build(), "Incomplete or contradictory detailed correlation/identity evidence");
+                Assert.AreEqual(0, report.Pairs.Count);
+                if (fault) StringAssert.Contains(report.Build(), "Faulted backing retrieval");
+                else StringAssert.Contains(report.Build(), "OneSidedEvidence");
                 Assert.IsFalse(report.Build().Contains("First difference offset="));
             }
         }
@@ -446,6 +451,133 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(before.All(item => item == MembershipPresence.Indeterminate));
             StringAssert.Contains(report.Build(), "SOURCE / TARGET RECONCILIATION");
             Assert.IsFalse(report.Build().Contains("DEV/UAT")); Assert.IsFalse(report.Build().Contains("DEV VS UAT"));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleSamePrimaryDifferentUniqueIdsAndUnmanagedToManagedAreAuditCategoriesOnly()
+        {
+            var pair = new Pair(); var id = Guid.NewGuid();
+            pair.Source.Add("Chart", id: id); pair.Target.Add("CHART", managed: true, id: id);
+            var report = pair.Capture(); var item = report.Lifecycle.Single();
+            CollectionAssert.AreEquivalent(new[] { "SamePrimaryId", "DifferentUniqueId", "SameDefinition",
+                "ManagedTransition", "UnmanagedToManaged" }, item.Outcomes);
+            StringAssert.Contains(report.Build(), "SamePrimaryId=1");
+            StringAssert.Contains(report.Build(), "distinct pair DifferentUniqueId=1");
+            StringAssert.Contains(report.Build(), "No uniquely matched Candidate A pair with differing savedqueryvisualizationid");
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleDifferentPrimarySameSemanticAndUniqueIdReportsFullEvidenceWithoutExtraDetailRead()
+        {
+            var pair = new Pair(); var a = pair.Source.Add("Chart"); var b = pair.Target.Add("chart");
+            b["savedqueryvisualizationidunique"] = a["savedqueryvisualizationidunique"];
+            var report = pair.Capture(true);
+            CollectionAssert.AreEquivalent(new[] { "DifferentPrimaryId", "SameUniqueId", "SameDefinition" }, report.Lifecycle.Single().Outcomes);
+            Assert.AreEqual(1, report.Source.Count(Type59EvidenceCollector.EntityName));
+            Assert.AreEqual(1, report.Target.Count(Type59EvidenceCollector.EntityName));
+            StringAssert.Contains(report.Build(), "candidateUniqueness=UniqueWithinSolution");
+            StringAssert.Contains(report.Build(), "hashEquality=EqualObserved");
+            StringAssert.Contains(report.Build(), "Source id=" + a.Id);
+            StringAssert.Contains(report.Build(), "Target id=" + b.Id);
+            StringAssert.Contains(report.Build(), "Sufficiency: neither identity is established for production");
+        }
+
+        [DataTestMethod, TestCategory(Category)]
+        [DataRow("datadescription")] [DataRow("presentationdescription")]
+        public void LifecycleChangedDefinitionWithSamePrimaryDoesNotChangeSemanticPair(string field)
+        {
+            var pair = new Pair(); var id = Guid.NewGuid();
+            pair.Source.Add("Chart", id: id); var target = pair.Target.Add("Chart", id: id);
+            target[field] = "<changed/>";
+            var report = pair.Capture(); Assert.IsTrue(report.Pairs.Single().UniqueA);
+            Assert.IsTrue(report.Lifecycle.Single().Outcomes.Contains("SamePrimaryId"));
+            Assert.IsTrue(report.Lifecycle.Single().Outcomes.Contains("DifferentDefinition"));
+            Assert.IsFalse(report.Lifecycle.Single().Outcomes.Contains("SameDefinition"));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleDiscoveryIncludesOneSidedSolutionsAndDoesNotCrossSolutionBoundaries()
+        {
+            var pair = new Pair(); pair.Source.Add("Chart", solution: "SourceOnlySolution");
+            pair.Target.Add("Chart", solution: "TargetOnlySolution");
+            var report = pair.Capture(true);
+            Assert.AreEqual(0, report.Pairs.Count); Assert.AreEqual(2, report.Lifecycle.Count);
+            Assert.IsTrue(report.Lifecycle.All(item => item.Outcomes.SequenceEqual(new[] { "OneSidedEvidence" })));
+            Assert.AreEqual(1, report.Source.Charts.Count); Assert.AreEqual(1, report.Target.Charts.Count);
+            StringAssert.Contains(report.Build(), "OneSidedEvidence=2");
+        }
+
+        [DataTestMethod, TestCategory(Category)]
+        [DataRow(false)] [DataRow(true)]
+        public void LifecycleAmbiguousAAndBRemainSeparateAndNeverForcePairing(bool duplicateB)
+        {
+            var pair = new Pair(); pair.Source.Add("Chart"); var duplicate = pair.Source.Add("CHART");
+            if (!duplicateB) duplicate["type"] = new OptionSetValue(1);
+            pair.Target.Add("Chart");
+            var report = pair.Capture();
+            Assert.IsTrue(report.Pairs.All(item => !item.UniqueA));
+            CollectionAssert.AreEqual(new[] { "Ambiguous" }, report.Lifecycle.Single().Outcomes);
+            Assert.AreEqual(duplicateB ? 2 : 0, report.Source.Charts.Values.Count(item => item.StatusB == "Ambiguous"));
+            StringAssert.Contains(report.Build(), "ambiguous semantic identity groups=1");
+            Assert.IsFalse(report.Build().Contains("candidateUniqueness=UniqueWithinSolution"));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleSameCandidateInSeparateSolutionsIsNotAWithinSolutionCollision()
+        {
+            var pair = new Pair();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            { side.Add("Chart"); side.Add("Chart", solution: "OtherSolution"); }
+            var report = pair.Capture(true);
+            Assert.AreEqual(2, report.Pairs.Count); Assert.IsTrue(report.Pairs.All(item => item.UniqueA));
+            Assert.IsFalse(report.Lifecycle.Any(item => item.Outcomes.Contains("Ambiguous")));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleRepeatedMembershipDoesNotInflateDistinctPairsOrReadCounts()
+        {
+            var pair = new Pair();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            { var chart = side.Add("Chart"); side.Reference(chart.Id); side.Reference(chart.Id, "OtherSolution"); }
+            var report = pair.Capture(true);
+            Assert.AreEqual(2, report.Lifecycle.Count); Assert.AreEqual(2, report.Pairs.Count);
+            StringAssert.Contains(report.Build(), "unique semantic backing pairs=1; matched solution/candidate references=2");
+            Assert.AreEqual(1, report.Source.Count(Type59EvidenceCollector.EntityName));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleDuplicateBackingCorrelationIsIncompleteAndAmbiguousWithoutIdentity()
+        {
+            var pair = new Pair(); var a = pair.Source.Add("Chart"); pair.Source.Rows.Add(a); pair.Target.Add("Chart");
+            var report = pair.Capture(); Assert.AreEqual(0, report.Pairs.Count);
+            Assert.IsTrue(report.Lifecycle.Any(item => item.CandidateA == null &&
+                item.Outcomes.Contains("Incomplete") && item.Outcomes.Contains("Ambiguous")));
+            Assert.IsFalse(report.Lifecycle.Any(item => item.Outcomes.Contains("SamePrimaryId") || item.Outcomes.Contains("DifferentPrimaryId")));
+        }
+
+        [DataTestMethod, TestCategory(Category)]
+        [DataRow("primaryentitytypecode")] [DataRow("datadescription")] [DataRow("presentationdescription")]
+        [DataRow("savedqueryvisualizationidunique")] [DataRow("type")] [DataRow("charttype")] [DataRow("isdefault")]
+        public void LifecycleMissingMetadataOrDefinitionNeverClaimsCompleteDefinition(string field)
+        {
+            var pair = new Pair(); pair.Source.Add("Chart").Attributes.Remove(field); pair.Target.Add("Chart");
+            var report = pair.Capture();
+            Assert.IsTrue(report.Lifecycle.Any(item => item.Outcomes.Contains("Incomplete")));
+            if (field != "savedqueryvisualizationidunique")
+                Assert.IsFalse(report.Lifecycle.Any(item => item.Outcomes.Contains("SameDefinition")));
+        }
+
+        [TestMethod, TestCategory(Category)]
+        public void LifecycleMalformedXmlIsIncompleteAndReportNeverExportsFullXml()
+        {
+            var pair = new Pair(); pair.Source.Add("Chart")["datadescription"] = "<broken>"; pair.Target.Add("Chart");
+            var report = pair.Capture(true);
+            Assert.IsTrue(report.Lifecycle.Single().Outcomes.Contains("Incomplete"));
+            Assert.IsFalse(report.Lifecycle.Single().Outcomes.Contains("SameDefinition"));
+            Assert.IsFalse(report.Build().Contains("<broken>"));
+            StringAssert.Contains(report.Build(), "MalformedOrUnsafeXml");
+            Assert.AreEqual(report.Build(), report.Build());
         }
 
         private static EntityMetadata MetadataEntity(int code, string name)

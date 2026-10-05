@@ -115,6 +115,7 @@ namespace D365SolutionComparer.Services.Membership
             private readonly Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>> weakIdentityDiagnostics =
                 new Dictionary<int, Dictionary<Guid, IReadOnlyList<string>>>();
             private DiagnosticQueryResult savedQueryRetrieval;
+            private DiagnosticQueryResult savedQueryVisualizationRetrieval;
             private readonly HashSet<int> weakIdentityDiagnosticsLoaded = new HashSet<int>();
             private readonly Dictionary<int, Guid?> weakIdentitySummaryComponentIds =
                 new Dictionary<int, Guid?>();
@@ -279,6 +280,7 @@ namespace D365SolutionComparer.Services.Membership
             {
                 var duplicates = results.Where(item => item.Status == IdentityResolutionStatus.Resolved &&
                     (item.SemanticKind == ComponentSemanticKinds.SavedQuery ||
+                     item.SemanticKind == ComponentSemanticKinds.SavedQueryVisualization ||
                      item.SemanticKind == ComponentSemanticKinds.Process && WorkflowSemanticPolicy.IsCloudFlowKey(item.ComparisonKey)))
                     .GroupBy(item => item.ComponentTypeKey + item.ComparisonKey, StringComparer.OrdinalIgnoreCase)
                     .Where(group => group.Count() > 1).Select(group => group.Key);
@@ -322,6 +324,36 @@ namespace D365SolutionComparer.Services.Membership
                     }
                 }
                 return new ComponentIdentity(record, status, key, diagnostic, ComponentSemanticKinds.SavedQuery,
+                    diagnosticEvidence: evidence);
+            }
+
+            private ComponentIdentity ResolveSavedQueryVisualization(SolutionComponentRecord record)
+            {
+                var evidence = GetWeakIdentityDiagnosticEvidence(record);
+                var status = IdentityResolutionStatus.Unresolved;
+                string key = null;
+                string diagnostic = "Saved Query Visualization backing correlation is missing, conflicting or incomplete.";
+                if (record.ObjectId.HasValue && record.ObjectId.Value != Guid.Empty && savedQueryVisualizationRetrieval != null)
+                {
+                    var correlation = savedQueryVisualizationRetrieval.GetCorrelation(record.ObjectId.Value);
+                    if (correlation.Status == DiagnosticCorrelationStatus.Duplicate)
+                    {
+                        status = IdentityResolutionStatus.Ambiguous;
+                        diagnostic = "Multiple Saved Query Visualization rows correlate to this objectid.";
+                    }
+                    else if (correlation.Status == DiagnosticCorrelationStatus.Unique)
+                    {
+                        var row = correlation.Rows[0];
+                        var primary = row.GetAttributeValue<object>("savedqueryvisualizationid");
+                        if (primary is Guid && (Guid)primary != Guid.Empty && (Guid)primary == record.ObjectId && row.Id == (Guid)primary)
+                        {
+                            status = IdentityResolutionStatus.Resolved;
+                            key = "savedqueryvisualization:v1:savedqueryvisualizationid:36:" + ((Guid)primary).ToString("D");
+                            diagnostic = "Saved Query Visualization primary-ID identity; entity, name, chart classification and XML are diagnostic context only.";
+                        }
+                    }
+                }
+                return new ComponentIdentity(record, status, key, diagnostic, ComponentSemanticKinds.SavedQueryVisualization,
                     diagnosticEvidence: evidence);
             }
 
@@ -431,6 +463,7 @@ namespace D365SolutionComparer.Services.Membership
                         break;
                     case 29: kind = "process"; break;
                     case SavedQueryComponentType: return ResolveSavedQuery(record);
+                    case SavedQueryVisualizationComponentType: return ResolveSavedQueryVisualization(record);
                     case 20: kind = "securityrole"; break;
                     case 380: kind = "environmentvariabledefinition"; break;
                     case 3:
@@ -1605,6 +1638,7 @@ namespace D365SolutionComparer.Services.Membership
                     ex => configuration.DisplayName + " diagnostic lookup failed: " + ex.Message,
                     cancellationToken);
                 if (componentType == SavedQueryComponentType) savedQueryRetrieval = retrieval;
+                if (componentType == SavedQueryVisualizationComponentType) savedQueryVisualizationRetrieval = retrieval;
                 var objectIds = retrieval.ObjectIds;
                 int returnedCount = retrieval.ReturnedRowCount;
                 bool countUnavailable = !retrieval.CountsAvailable;
@@ -1709,6 +1743,8 @@ namespace D365SolutionComparer.Services.Membership
                         DescribeWeakIdentityContext(configuration, row)) +
                     (configuration.ComponentType == SavedQueryComponentType
                         ? "'. Saved Query correlation evidence; savedqueryid supplies membership identity. Candidate A context remains diagnostic only."
+                        : configuration.ComponentType == SavedQueryVisualizationComponentType
+                        ? "'. Saved Query Visualization correlation evidence; savedqueryvisualizationid supplies membership identity. Entity, name, chart classification and XML are diagnostic context only."
                         : "'. Diagnostic evidence only; no value is used for membership comparison.");
             }
 
