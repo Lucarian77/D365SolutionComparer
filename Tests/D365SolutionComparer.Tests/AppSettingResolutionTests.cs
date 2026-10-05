@@ -418,9 +418,10 @@ namespace D365SolutionComparer.Tests
             var fixture = new Fixture { DefinitionName = "AnotherFamily" }; fixture.Add();
             fixture.Records.Add(new SolutionComponentRecord(Guid.NewGuid(), 26, null));
             var result = fixture.Resolve();
-            Assert.IsTrue(result.Components.All(i => i.Status == IdentityResolutionStatus.Unsupported));
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, result.Components[0].Status);
+            Assert.AreEqual(IdentityResolutionStatus.Unresolved, result.Components[1].Status);
             Assert.IsNull(result.Components[0].ComparisonKey);
-            Assert.AreEqual("unsupported:componenttype:26", result.Components[1].SemanticKind);
+            Assert.AreEqual(ComponentSemanticKinds.SavedQuery, result.Components[1].SemanticKind);
             Assert.AreEqual(0, fixture.Counter.GetQueryCount("appsetting"));
         }
 

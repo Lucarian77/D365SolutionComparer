@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using D365SolutionComparer.Models.ComponentDetails;
 using D365SolutionComparer.Models.Membership;
+using D365SolutionComparer.Services.Membership;
 
 namespace D365SolutionComparer.Services.ComponentDetails
 {
@@ -33,7 +34,7 @@ namespace D365SolutionComparer.Services.ComponentDetails
             var rows = membership.Rows.Zip(details, (row, detail) =>
             {
                 var detailPresentation = CreateDetail(row, detail);
-                return row.WithDefinition(DisplayStatus(detail.Status),
+                return row.WithDefinition(DisplayStatus(detail),
                     DisplayChangedProperties(detail), detailPresentation);
             }).ToList();
             return new MembershipComparisonPresentation(membership.SolutionUniqueName,
@@ -85,7 +86,7 @@ namespace D365SolutionComparer.Services.ComponentDetails
                     PropertyStatus(detail.Status, changed.Contains(name))))
                 .ToList();
             return new ComponentDefinitionDetailPresentation(row.ComponentKind, row.PortableKey,
-                row.MembershipStatus, DisplayStatus(detail.Status), properties,
+                row.MembershipStatus, DisplayStatus(detail), properties,
                 BuildDiagnostic(detail), detail.Source?.DiagnosticEvidence,
                 detail.Target?.DiagnosticEvidence);
         }
@@ -120,8 +121,24 @@ namespace D365SolutionComparer.Services.ComponentDetails
             return "Not compared";
         }
 
-        private static string DisplayStatus(ComponentDetailComparisonStatus status)
+        private static string DisplayStatus(ComponentDetailCompareResult detail)
         {
+            var identities = new[] { detail.Membership.Source, detail.Membership.Target }
+                .Where(identity => identity != null).ToList();
+            // Presentation only: retain Unsupported in the comparison model while distinguishing
+            // a proven membership identity from an unimplemented definition comparison.
+            // Cloud Flow workflowid establishes membership independently of the legacy workflow
+            // configuration contract. Unavailable definition evidence is not an unresolved identity.
+            if (detail.Status == ComponentDetailComparisonStatus.Unresolved && identities.Count > 0 &&
+                identities.All(identity => identity.Status == IdentityResolutionStatus.Resolved &&
+                    identity.Record.ComponentType == 29 && identity.SemanticKind == ComponentSemanticKinds.Process &&
+                    WorkflowSemanticPolicy.IsCloudFlowKey(identity.ComparisonKey))) return "Not Compared";
+            if (identities.Count > 0 && identities.All(identity => identity.Status == IdentityResolutionStatus.Resolved &&
+                identity.SemanticKind == ComponentSemanticKinds.SavedQuery)) return "Not Compared";
+            if (detail.Status == ComponentDetailComparisonStatus.Unsupported && identities.Count > 0 &&
+                identities.All(identity => identity.Status == IdentityResolutionStatus.Resolved))
+                return "Not Compared";
+            var status = detail.Status;
             switch (status)
             {
                 case ComponentDetailComparisonStatus.SourceOnly: return "SourceOnly";

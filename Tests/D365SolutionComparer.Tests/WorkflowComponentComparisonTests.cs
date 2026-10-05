@@ -339,6 +339,10 @@ namespace D365SolutionComparer.Tests
             int category = field == "businessprocesstype" ? 4 : field == "modernflowtype" ? 5 : field == "uiflowtype" ? 6 : 2;
             var a = Workflow("Rule", category); var b = Workflow("Rule", category);
             a["uniquename"] = "new_Logical"; b["uniquename"] = "NEW_LOGICAL";
+            if (category == 5)
+            {
+                b.Id = a.Id; a["workflowid"] = a.Id; b["workflowid"] = a.Id;
+            }
             if (category >= 4) { a[field] = new OptionSetValue(0); b[field] = new OptionSetValue(1); }
             else b[field] = field == "category" ? (object)new OptionSetValue(0) : "contact";
             var result = Compare(new Fixture(a), new Fixture(b)).Single();

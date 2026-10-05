@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using D365SolutionComparer.Infrastructure;
@@ -106,6 +107,179 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(expectedDefinitionStatus, result.Rows.Single().DefinitionStatus);
             StringAssert.StartsWith(result.Rows.Single().MembershipStatus, "Indeterminate");
             Assert.AreEqual(0, result.Summary.SourceOnly);
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2")]
+        [DataRow(ComponentSemanticKinds.SdkMessageProcessingStep, 92)]
+        [DataRow(ComponentSemanticKinds.Report, 31)]
+        [DataRow(ComponentSemanticKinds.SavedQuery, 26)]
+        public void ResolvedIdentityWithoutDefinitionSupportDisplaysNotComparedOnly(string kind, int rawType)
+        {
+            var source = Identity(kind, "verified-portable-key", IdentityResolutionStatus.Resolved, rawType);
+            var target = Identity(kind, "VERIFIED-PORTABLE-KEY", IdentityResolutionStatus.Resolved, rawType);
+            var sourceSnapshot = Snapshot("Source", source); var targetSnapshot = Snapshot("Target", target);
+            var membership = Present(sourceSnapshot, targetSnapshot);
+            var sourceDefinition = new ComponentDefinition(source, ComponentDefinitionReadStatus.Unsupported);
+            var targetDefinition = new ComponentDefinition(target, ComponentDefinitionReadStatus.Unsupported);
+            var left = Definitions(sourceSnapshot, sourceDefinition); var right = Definitions(targetSnapshot, targetDefinition);
+            Assert.AreEqual(ComponentDetailComparisonStatus.Unsupported,
+                new ComponentDetailComparer().Compare(membership.Rows.Select(r => r.Comparison).ToList(), left, right).Single().Status);
+
+            var result = new ComponentDefinitionResultPresenter().Apply(membership, left, right);
+            var row = result.Rows.Single();
+            Assert.AreEqual("Not Compared", row.DefinitionStatus);
+            Assert.AreEqual("Not Compared", row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+            Assert.AreEqual("Resolved", row.SourceResolutionStatus); Assert.AreEqual("Resolved", row.TargetResolutionStatus);
+            Assert.AreEqual(membership.Summary.PresentInBoth, result.Summary.PresentInBoth);
+            Assert.AreSame(membership.Rows.Single().Comparison, row.Comparison);
+            Assert.AreEqual(ComponentDefinitionReadStatus.Unsupported, sourceDefinition.Status);
+            Assert.AreEqual(ComponentDefinitionReadStatus.Unsupported, targetDefinition.Status);
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        [DataRow((int)ComponentDefinitionReadStatus.Unresolved)]
+        [DataRow((int)ComponentDefinitionReadStatus.Unsupported)]
+        public void ResolvedCloudFlowUnavailableDefinitionDisplaysNotComparedWithoutChangingModel(
+            int definitionStatusValue)
+        {
+            var definitionStatus = (ComponentDefinitionReadStatus)definitionStatusValue;
+            var fixture = CloudFlowFixture();
+            var source = new ComponentDefinition(fixture.Source, definitionStatus,
+                diagnostic: "Cloud Flow definition comparison is unavailable.",
+                diagnosticEvidence: new[] { "Source audit evidence" });
+            var target = new ComponentDefinition(fixture.Target, definitionStatus,
+                diagnostic: "Target definition evidence remains unchanged.",
+                diagnosticEvidence: new[] { "Target audit evidence" });
+            var membership = Present(fixture.SourceSnapshot, fixture.TargetSnapshot);
+            var left = Definitions(fixture.SourceSnapshot, source);
+            var right = Definitions(fixture.TargetSnapshot, target);
+            var underlying = new ComponentDetailComparer().Compare(
+                membership.Rows.Select(item => item.Comparison).ToList(), left, right).Single();
+            Assert.AreEqual(definitionStatus == ComponentDefinitionReadStatus.Unresolved
+                ? ComponentDetailComparisonStatus.Unresolved : ComponentDetailComparisonStatus.Unsupported, underlying.Status);
+
+            var result = new ComponentDefinitionResultPresenter().Apply(membership, left, right);
+            var row = result.Rows.Single();
+            Assert.AreEqual("Not Compared", row.DefinitionStatus);
+            Assert.AreEqual("Not Compared", row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+            Assert.AreEqual("Resolved", row.SourceResolutionStatus);
+            Assert.AreEqual("Resolved", row.TargetResolutionStatus);
+            Assert.AreEqual(string.Empty, row.ChangedProperties);
+            Assert.AreEqual(membership.Summary.PresentInBoth, result.Summary.PresentInBoth);
+            Assert.AreEqual(membership.Summary.Unresolved, result.Summary.Unresolved);
+            Assert.AreSame(membership.Rows.Single().Comparison, row.Comparison);
+            Assert.AreEqual(definitionStatus, source.Status);
+            Assert.AreEqual(definitionStatus, target.Status);
+            StringAssert.Contains(row.DefinitionDetail.Diagnostic, source.Diagnostic);
+            CollectionAssert.AreEqual(source.DiagnosticEvidence.ToArray(), row.DefinitionDetail.SourceEvidence.ToArray());
+            CollectionAssert.AreEqual(target.DiagnosticEvidence.ToArray(), row.DefinitionDetail.TargetEvidence.ToArray());
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        [DataRow(true, false)]
+        [DataRow(false, true)]
+        [DataRow(false, false)]
+        public void ResolvedCloudFlowWithMissingDefinitionDisplaysNotCompared(bool sourceAvailable, bool targetAvailable)
+        {
+            var fixture = CloudFlowFixture();
+            var source = sourceAvailable ? new ComponentDefinition(fixture.Source, ComponentDefinitionReadStatus.Unresolved) : null;
+            var target = targetAvailable ? new ComponentDefinition(fixture.Target, ComponentDefinitionReadStatus.Unresolved) : null;
+            var row = Apply(fixture, source, target).Rows.Single();
+            Assert.AreEqual("Not Compared", row.DefinitionStatus);
+            Assert.AreEqual("Not Compared", row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        [DataRow(IdentityResolutionStatus.Unresolved, "Unresolved")]
+        [DataRow(IdentityResolutionStatus.Ambiguous, "Ambiguous")]
+        public void UncertainCloudFlowIdentityCannotBeRelabelledNotCompared(
+            IdentityResolutionStatus identityStatus, string expected)
+        {
+            var identity = Identity(ComponentSemanticKinds.Process, null, identityStatus, 29);
+            var snapshot = Snapshot("Source", identity);
+            var empty = EmptySnapshot(snapshot, "Target");
+            var definition = new ComponentDefinition(identity, identityStatus == IdentityResolutionStatus.Ambiguous
+                ? ComponentDefinitionReadStatus.Ambiguous : ComponentDefinitionReadStatus.Unresolved,
+                diagnosticEvidence: new[] { "category=5" });
+            var result = new ComponentDefinitionResultPresenter().Apply(Present(snapshot, empty),
+                Definitions(snapshot, definition), Definitions(empty));
+            var row = result.Rows.Single();
+            Assert.AreEqual(expected, row.DefinitionStatus);
+            Assert.AreEqual(expected, row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual(expected, row.SourceResolutionStatus);
+            StringAssert.StartsWith(row.MembershipStatus, "Indeterminate");
+            Assert.AreEqual(0, result.Summary.SourceOnly);
+            Assert.AreEqual(0, result.Summary.TargetOnly);
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        [DataRow("ava_caseprocess")]
+        [DataRow("workflow-semantic:v1:verified-candidate")]
+        public void BusinessProcessAndLegacyWorkflowUnavailableDefinitionRemainUnresolved(string key)
+        {
+            var source = Identity(ComponentSemanticKinds.Process, key, IdentityResolutionStatus.Resolved, 29);
+            var target = Identity(ComponentSemanticKinds.Process, key.ToUpperInvariant(), IdentityResolutionStatus.Resolved, 29);
+            var fixture = new FixtureData(source, target, Snapshot("Source", source), Snapshot("Target", target));
+            var row = Apply(fixture, new ComponentDefinition(source, ComponentDefinitionReadStatus.Unresolved),
+                new ComponentDefinition(target, ComponentDefinitionReadStatus.Unresolved)).Rows.Single();
+            Assert.AreEqual("Unresolved", row.DefinitionStatus);
+            Assert.AreEqual("Unresolved", row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+        }
+
+        [DataTestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        [DataRow(false, "Match")]
+        [DataRow(true, "Different")]
+        public void AvailableCloudFlowConfigurationComparisonIsNotRelabelled(bool different, string expected)
+        {
+            var fixture = CloudFlowFixture();
+            var row = Apply(fixture, Available(fixture.Source, "mode", "0"),
+                Available(fixture.Target, "mode", different ? "1" : "0")).Rows.Single();
+            Assert.AreEqual(expected, row.DefinitionStatus);
+            Assert.AreEqual(expected, row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual(different ? "mode" : string.Empty, row.ChangedProperties);
+        }
+
+        [TestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        public void AmbiguousCloudFlowDefinitionRemainsAmbiguous()
+        {
+            var fixture = CloudFlowFixture();
+            var row = Apply(fixture, new ComponentDefinition(fixture.Source, ComponentDefinitionReadStatus.Ambiguous),
+                new ComponentDefinition(fixture.Target, ComponentDefinitionReadStatus.Unresolved)).Rows.Single();
+            Assert.AreEqual("Ambiguous", row.DefinitionStatus);
+            Assert.AreEqual("Ambiguous", row.DefinitionDetail.DefinitionStatus);
+            Assert.AreEqual("Present in Both", row.MembershipStatus);
+        }
+
+        [TestMethod, TestCategory("Phase2G2"), TestCategory("CloudFlowPresentation")]
+        public void CloudFlowPresentationHardeningPreservesExistingCoverageCsvExport()
+        {
+            var fixture = CloudFlowFixture();
+            var membership = Present(fixture.SourceSnapshot, fixture.TargetSnapshot);
+            var presenter = new ComponentDefinitionResultPresenter();
+            var result = presenter.Apply(membership,
+                Definitions(fixture.SourceSnapshot, new ComponentDefinition(fixture.Source, ComponentDefinitionReadStatus.Unresolved)),
+                Definitions(fixture.TargetSnapshot, new ComponentDefinition(fixture.Target, ComponentDefinitionReadStatus.Unresolved)));
+            Assert.AreEqual("Not Compared", result.Rows.Single().DefinitionStatus);
+            var exporter = new MembershipCoverageCsvExporter();
+            var expected = exporter.CreateCsv(membership);
+            Assert.AreEqual(expected, exporter.CreateCsv(result));
+            // Coverage CSV exports authoritative membership evidence, not definition display labels.
+            var header = expected.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)[0];
+            Assert.IsFalse(header.Contains("DefinitionStatus"));
+            var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".csv");
+            try
+            {
+                exporter.WriteCsv(path, result);
+                Assert.AreEqual(expected, File.ReadAllText(path));
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
         }
 
         [TestMethod, TestCategory("Phase2G2")]
@@ -428,6 +602,14 @@ namespace D365SolutionComparer.Tests
         private static ComponentDefinitionSnapshot Definitions(MembershipSnapshot snapshot,
             params ComponentDefinition[] definitions) => new ComponentDefinitionSnapshot(snapshot,
                 definitions.Where(item => item != null));
+
+        private static FixtureData CloudFlowFixture()
+        {
+            var key = WorkflowSemanticPolicy.CloudFlowPrefix + "36:" + Guid.NewGuid().ToString("D");
+            var source = Identity(ComponentSemanticKinds.Process, key, IdentityResolutionStatus.Resolved, 29);
+            var target = Identity(ComponentSemanticKinds.Process, key.ToUpperInvariant(), IdentityResolutionStatus.Resolved, 29);
+            return new FixtureData(source, target, Snapshot("Source", source), Snapshot("Target", target));
+        }
 
         private static FixtureData Fixture(string kind, string key)
         {

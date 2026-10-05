@@ -19,6 +19,10 @@ namespace D365SolutionComparer
         private readonly Microsoft.Xrm.Sdk.IOrganizationService targetService;
 #if DEBUG
         internal Action CaptureType92Evidence { get; set; }
+        internal Action CaptureType59Evidence { get; set; }
+        internal Action DiscoverType59Evidence { get; set; }
+        internal Action CaptureCloudFlowEvidence { get; set; }
+        internal Action CaptureSavedQueryEvidence { get; set; }
 #endif
 
         public MembershipResultsForm(MembershipComparisonPresentation presentation,
@@ -98,7 +102,8 @@ namespace D365SolutionComparer
                 BackgroundColor = Color.White,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 MultiSelect = false,
-                RowHeadersVisible = false
+                RowHeadersVisible = false,
+                RowTemplate = new MembershipAccessibleRow()
             };
             AddColumn("ComponentKind", "Component Kind", 130);
             AddColumn("PortableKey", "Component Identity / Portable Key", 210);
@@ -142,7 +147,8 @@ namespace D365SolutionComparer
                 sourceSolutionVersion, targetSolutionVersion,
                 sourceService, targetService, captureAppSettingEvidence
 #if DEBUG
-                , CaptureType92Evidence
+                , CaptureType92Evidence, CaptureType59Evidence, DiscoverType59Evidence,
+                CaptureCloudFlowEvidence, CaptureSavedQueryEvidence
 #endif
                 ))
                 form.ShowDialog(this);
@@ -162,6 +168,38 @@ namespace D365SolutionComparer
                     ? new DataGridViewCellStyle { WrapMode = DataGridViewTriState.True }
                     : new DataGridViewCellStyle()
             });
+        }
+
+        private sealed class MembershipAccessibleRow : DataGridViewRow
+        {
+            protected override AccessibleObject CreateAccessibilityInstance() =>
+                new MembershipRowAccessibleObject(this);
+
+            private sealed class MembershipRowAccessibleObject : DataGridViewRowAccessibleObject
+            {
+                private readonly DataGridViewRow row;
+
+                public MembershipRowAccessibleObject(DataGridViewRow row) : base(row)
+                {
+                    this.row = row;
+                }
+
+                public override Rectangle Bounds
+                {
+                    get
+                    {
+                        var grid = row.DataGridView;
+                        if (grid == null || !grid.IsHandleCreated || row.Index < 0 || !row.Displayed)
+                            return Rectangle.Empty;
+
+                        // Framework row accessibility recursively asks preceding off-screen rows
+                        // for Bounds. Large membership inventories make accessibility clients stall
+                        // the UI thread. Obtain the visible bounds directly without that recursion.
+                        var bounds = grid.GetRowDisplayRectangle(row.Index, true);
+                        return bounds.IsEmpty ? Rectangle.Empty : grid.RectangleToScreen(bounds);
+                    }
+                }
+            }
         }
 
         private void ResultsGrid_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)

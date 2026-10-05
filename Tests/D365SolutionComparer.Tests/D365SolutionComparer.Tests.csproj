@@ -31,6 +31,9 @@
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="Accessibility" />
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.ServiceModel" />
     <Reference Include="System.Xml" />
@@ -56,6 +59,7 @@
     <Compile Include="MembershipPerformanceTests.cs" />
     <Compile Include="MembershipPresentationTests.cs" />
     <Compile Include="MembershipCoverageDiagnosticsTests.cs" />
+    <Compile Include="MembershipUiResponsivenessTests.cs" />
     <Compile Include="MembershipCoverageCsvExporterTests.cs" />
     <Compile Include="CanvasAppLifecycleCsvComparerTests.cs" />
     <Compile Include="ComponentDetailComparisonTests.cs" />
@@ -68,6 +72,9 @@
     <Compile Include="SystemFormResolutionTests.cs" />
     <Compile Include="PluginAssemblyResolutionTests.cs" />
     <Compile Include="Type92EvidenceCollectorTests.cs" />
+    <Compile Include="Type59EvidenceCollectorTests.cs" />
+    <Compile Include="CloudFlowSavedQueryEvidenceTests.cs" />
+    <Compile Include="PrimaryIdMembershipResolutionTests.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

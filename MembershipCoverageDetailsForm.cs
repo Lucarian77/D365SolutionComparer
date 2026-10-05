@@ -28,7 +28,9 @@ namespace D365SolutionComparer
             Microsoft.Xrm.Sdk.IOrganizationService targetService = null,
             Action captureAppSettingEvidence = null
 #if DEBUG
-            , Action captureType92Evidence = null
+            , Action captureType92Evidence = null, Action captureType59Evidence = null,
+            Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
+            Action captureSavedQueryEvidence = null
 #endif
             )
         {
@@ -127,6 +129,9 @@ namespace D365SolutionComparer
             buttons.Controls.Add(close);
             buttons.Controls.Add(appSetting);
 #if DEBUG
+            // Evidence actions may wrap on smaller windows; keep every action reachable.
+            buttons.AutoSize = true;
+            buttons.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             var type92 = new Button
             {
                 Text = "Capture Type 92 Evidence...",
@@ -137,6 +142,41 @@ namespace D365SolutionComparer
             };
             type92.Click += (sender, args) => this.captureType92Evidence?.Invoke();
             buttons.Controls.Add(type92);
+            var type59 = new Button
+            {
+                Text = "Capture Type 59 Evidence...",
+                Width = 175,
+                Enabled = captureType59Evidence != null && sourceService != null && targetService != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            var type59Menu = new ContextMenuStrip();
+            type59Menu.Items.Add("Capture selected solution", null, (sender, args) => captureType59Evidence?.Invoke());
+            var discovery = type59Menu.Items.Add("Scan shared solutions for portability candidates", null,
+                (sender, args) => discoverType59Evidence?.Invoke());
+            discovery.Enabled = discoverType59Evidence != null;
+            type59.Click += (sender, args) => type59Menu.Show(type59, new Point(0, type59.Height));
+            type59.Disposed += (sender, args) => type59Menu.Dispose();
+            buttons.Controls.Add(type59);
+            var processQuery = new Button
+            {
+                Text = "Flow / View Evidence...",
+                Width = 160,
+                Enabled = sourceService != null && targetService != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    (captureCloudFlowEvidence != null || captureSavedQueryEvidence != null)
+            };
+            var processQueryMenu = new ContextMenuStrip();
+            var flow = processQueryMenu.Items.Add("Capture Cloud Flow evidence (all Type 29)", null,
+                (sender, args) => captureCloudFlowEvidence?.Invoke());
+            flow.Enabled = captureCloudFlowEvidence != null;
+            var view = processQueryMenu.Items.Add("Capture Type 26 Saved Query evidence", null,
+                (sender, args) => captureSavedQueryEvidence?.Invoke());
+            view.Enabled = captureSavedQueryEvidence != null;
+            processQuery.Click += (sender, args) => processQueryMenu.Show(processQuery, new Point(0, processQuery.Height));
+            processQuery.Disposed += (sender, args) => processQueryMenu.Dispose();
+            buttons.Controls.Add(processQuery);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);

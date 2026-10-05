@@ -769,6 +769,14 @@ namespace D365SolutionComparer
 #if DEBUG
                     resultsForm.CaptureType92Evidence = () => CaptureType92Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion);
+                    resultsForm.CaptureType59Evidence = () => CaptureType59Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion);
+                    resultsForm.DiscoverType59Evidence = () => CaptureType59Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, true);
+                    resultsForm.CaptureCloudFlowEvidence = () => CaptureProcessQueryEvidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, false);
+                    resultsForm.CaptureSavedQueryEvidence = () => CaptureProcessQueryEvidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, true);
 #endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
@@ -935,6 +943,136 @@ namespace D365SolutionComparer
                         if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
                     }
                     SetStatusMessage("Type 92 evidence capture completed (read-only).", Color.Green);
+                }
+            });
+        }
+#endif
+
+#if DEBUG
+        private void CaptureType59Evidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion, bool discover = false)
+        {
+            if (presentation?.Source.Snapshot?.State != MembershipSnapshotState.Complete ||
+                presentation.Target.Snapshot?.State != MembershipSnapshotState.Complete ||
+                sourceMembershipService == null || targetMembershipService == null)
+                return;
+            SetStatusMessage("Capturing read-only Type 59 evidence...", Color.DarkOrange);
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only Type 59 evidence...",
+                IsCancelable = true,
+                MessageWidth = 430,
+                MessageHeight = 150,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var report = new Type59EvidenceCollector().Capture(sourceMembershipService,
+                                presentation.Source.Snapshot, sourceVersion, targetMembershipService,
+                                presentation.Target.Snapshot, targetVersion, cancellation.Token, discover,
+                                message => worker.ReportProgress(50, new MembershipUiProgress(message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            var evidence = report.Build();
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = evidence;
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress == null) return;
+                    SetWorkingMessage(progress.Message, 430, 150);
+                    SetStatusMessage(progress.Message, Color.DarkOrange);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled)
+                    {
+                        SetStatusMessage("Type 59 evidence capture cancelled; no partial report was opened.",
+                            Color.DarkOrange);
+                        return;
+                    }
+                    if (args.Error != null)
+                    {
+                        SetStatusMessage("Type 59 evidence capture failed.", Color.Red);
+                        MessageBox.Show(this, "Type 59 evidence capture failed.\n\n" + args.Error.Message,
+                            "Type 59 Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    var report = args.Result as string;
+                    if (report == null) return;
+                    using (var form = new Type59EvidenceResultsForm(report))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                    SetStatusMessage("Type 59 evidence capture completed (read-only).", Color.Green);
+                }
+            });
+        }
+#endif
+
+#if DEBUG
+        private void CaptureProcessQueryEvidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion, bool savedQuery)
+        {
+            if (presentation?.Source.Snapshot?.State != MembershipSnapshotState.Complete ||
+                presentation.Target.Snapshot?.State != MembershipSnapshotState.Complete ||
+                sourceMembershipService == null || targetMembershipService == null) return;
+            var title = savedQuery ? "Saved Query Evidence" : "Cloud Flow Evidence";
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only " + title + "...",
+                IsCancelable = true,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var report = new CloudFlowSavedQueryEvidenceCollector().Capture(sourceMembershipService,
+                                presentation.Source.Snapshot, sourceVersion, targetMembershipService,
+                                presentation.Target.Snapshot, targetVersion, savedQuery, cancellation.Token);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = report.Build();
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled)
+                    { SetStatusMessage(title + " cancelled; no partial report was opened.", Color.DarkOrange); return; }
+                    if (args.Error != null)
+                    {
+                        SetStatusMessage(title + " failed.", Color.Red);
+                        MessageBox.Show(this, title + " failed; server details withheld.", title,
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    var evidence = args.Result as string;
+                    if (evidence == null) return;
+                    using (var form = new ProcessQueryEvidenceResultsForm(evidence))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                    SetStatusMessage(title + " completed (read-only).", Color.Green);
                 }
             });
         }

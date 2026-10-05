@@ -107,6 +107,11 @@
     <Compile Include="Services\Membership\DataverseSolutionMembershipOperation.cs" />
     <Compile Include="Services\Membership\DataverseAppSettingEvidenceOperation.cs" />
     <Compile Include="Services\Membership\Type92EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Services\Membership\Type59EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Services\Membership\CloudFlowSavedQueryEvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="ProcessQueryEvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' ">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Services\Membership\Type92MembershipEvidenceReader.cs" />
     <Compile Include="Services\Membership\Type92MembershipResolver.cs" />
     <Compile Include="Services\Membership\AppSettingResolutionOperation.cs" />
@@ -137,6 +142,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Type92EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' ">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Type59EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' ">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="ComponentDefinitionDetailsForm.cs">
