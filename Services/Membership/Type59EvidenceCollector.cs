@@ -48,9 +48,10 @@ namespace D365SolutionComparer.Services.Membership
                     right.Evidence.Raw.Select(item => item.Solution), StringComparer.OrdinalIgnoreCase)
                     .OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToList();
                 report.SharedSolutions.AddRange(shared);
-                var sharedSet = new HashSet<string>(shared, StringComparer.OrdinalIgnoreCase);
-                left.Load(left.Evidence.Raw.Where(item => sharedSet.Contains(item.Solution)), false);
-                right.Load(right.Evidence.Raw.Where(item => sharedSet.Contains(item.Solution)), false);
+                // One deduplicated detail inventory per side, including one-sided solutions.
+                // Repeated solution references reuse the same backing row and XML hashes.
+                left.Load(left.Evidence.Raw, true);
+                right.Load(right.Evidence.Raw, true);
                 report.Analyze();
                 var selected = report.Pairs.Where(item => item.UniqueA && item.DifferentIds)
                     .OrderByDescending(item => item.UnmanagedToManaged)
@@ -306,6 +307,12 @@ namespace D365SolutionComparer.Services.Membership
         internal string StatusA = "Incomplete", StatusB = "Incomplete";
         internal int? ScopeCode;
         internal bool Detail;
+        private readonly Dictionary<string, Type59XmlEvidence> xml = new Dictionary<string, Type59XmlEvidence>();
+        internal Type59XmlEvidence Xml(string field)
+        {
+            if (!xml.TryGetValue(field, out var value)) xml[field] = value = Type59XmlEvidence.Create(Row, field);
+            return value;
+        }
         internal Entity Row => Correlation == "Unique" ? Rows[0] : null;
         internal void ConstructCandidates()
         {
@@ -341,10 +348,17 @@ namespace D365SolutionComparer.Services.Membership
     {
         internal string Solution;
         internal Type59ChartEvidence Source, Target;
-        internal bool UniqueA => Source.StatusA == "Unique" && Target.StatusA == "Unique";
+        internal bool UniqueInSolution;
+        internal bool UniqueA => UniqueInSolution;
         internal bool DifferentIds => Source.ObjectId != Target.ObjectId;
         internal bool UnmanagedToManaged => Type59EvidenceCollector.Boolean(Source.Row, "ismanaged") == false &&
             Type59EvidenceCollector.Boolean(Target.Row, "ismanaged") == true;
+    }
+    internal sealed class Type59LifecycleEvidence
+    {
+        internal string Solution, CandidateA;
+        internal Type59ChartEvidence Source, Target;
+        internal readonly List<string> Outcomes = new List<string>();
     }
     internal sealed class Type59EvidenceReport
     {
@@ -353,17 +367,92 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly List<string> SharedSolutions = new List<string>();
         internal readonly List<Type59PairEvidence> Pairs = new List<Type59PairEvidence>();
         internal readonly List<Type59PairEvidence> SelectedPairs = new List<Type59PairEvidence>();
+        internal readonly List<Type59LifecycleEvidence> Lifecycle = new List<Type59LifecycleEvidence>();
         internal int Population(string solution) => Source.Raw.Concat(Target.Raw).Count(item =>
             StringComparer.OrdinalIgnoreCase.Equals(item.Solution, solution));
         internal void Analyze()
         {
+            Pairs.Clear(); Lifecycle.Clear();
             foreach (var solution in SharedSolutions)
             {
                 var left = InSolution(Source, solution); var right = InSolution(Target, solution);
                 foreach (var chart in left.Where(item => item.CandidateA != null))
                     foreach (var match in right.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, chart.CandidateA)))
-                        Pairs.Add(new Type59PairEvidence { Solution = solution, Source = chart, Target = match });
+                        Pairs.Add(new Type59PairEvidence { Solution = solution, Source = chart, Target = match,
+                            UniqueInSolution = left.Count(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, chart.CandidateA)) == 1 &&
+                                right.Count(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, chart.CandidateA)) == 1 });
             }
+            foreach (var solution in Source.Raw.Concat(Target.Raw).Select(item => item.Solution)
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
+            {
+                var left = InSolution(Source, solution); var right = InSolution(Target, solution);
+                foreach (var key in left.Concat(right).Select(item => item.CandidateA).Where(item => item != null)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
+                {
+                    var a = left.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, key)).ToList();
+                    var b = right.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, key)).ToList();
+                    var evidence = new Type59LifecycleEvidence { Solution = solution, CandidateA = key,
+                        Source = a.Count == 1 ? a[0] : null, Target = b.Count == 1 ? b[0] : null };
+                    if (a.Count > 1 || b.Count > 1) evidence.Outcomes.Add("Ambiguous");
+                    else if (a.Count == 0 || b.Count == 0)
+                    {
+                        evidence.Outcomes.Add("OneSidedEvidence");
+                        if (!Source.Complete(solution) || !Target.Complete(solution)) evidence.Outcomes.Add("Incomplete");
+                    }
+                    else ClassifyPair(evidence);
+                    Lifecycle.Add(evidence);
+                }
+                foreach (var raw in Source.Raw.Concat(Target.Raw).Where(item =>
+                    StringComparer.OrdinalIgnoreCase.Equals(item.Solution, solution) &&
+                    (!item.Record.ObjectId.HasValue || item.Record.ObjectId == Guid.Empty)))
+                    Lifecycle.Add(Incomplete(solution));
+                foreach (var chart in left.Concat(right).Where(item => item.CandidateA == null))
+                {
+                    var evidence = Incomplete(solution);
+                    if (chart.Correlation == "Duplicate/Ambiguous") evidence.Outcomes.Add("Ambiguous");
+                    Lifecycle.Add(evidence);
+                }
+            }
+        }
+        private static Type59LifecycleEvidence Incomplete(string solution)
+        {
+            var evidence = new Type59LifecycleEvidence { Solution = solution };
+            evidence.Outcomes.Add("Incomplete"); return evidence;
+        }
+        private static void ClassifyPair(Type59LifecycleEvidence evidence)
+        {
+            var a = evidence.Source; var b = evidence.Target;
+            evidence.Outcomes.Add(a.ObjectId == b.ObjectId ? "SamePrimaryId" : "DifferentPrimaryId");
+            var uniqueA = Type59EvidenceCollector.Id(a.Row, "savedqueryvisualizationidunique");
+            var uniqueB = Type59EvidenceCollector.Id(b.Row, "savedqueryvisualizationidunique");
+            if (uniqueA.HasValue && uniqueB.HasValue)
+                evidence.Outcomes.Add(uniqueA == uniqueB ? "SameUniqueId" : "DifferentUniqueId");
+            else evidence.Outcomes.Add("Incomplete");
+            bool completeDefinition = true, sameDefinition = true;
+            foreach (var field in new[] { "datadescription", "presentationdescription" })
+            {
+                var x = a.Xml(field); var y = b.Xml(field);
+                completeDefinition &= x.Hash != null && y.Hash != null;
+                sameDefinition &= x.Hash == y.Hash;
+            }
+            foreach (var field in new[] { "type", "charttype" })
+            {
+                var x = Type59EvidenceCollector.Number(a.Row, field); var y = Type59EvidenceCollector.Number(b.Row, field);
+                completeDefinition &= x.HasValue && y.HasValue; sameDefinition &= x == y;
+            }
+            var defaultA = Type59EvidenceCollector.Boolean(a.Row, "isdefault");
+            var defaultB = Type59EvidenceCollector.Boolean(b.Row, "isdefault");
+            completeDefinition &= defaultA.HasValue && defaultB.HasValue; sameDefinition &= defaultA == defaultB;
+            if (completeDefinition) evidence.Outcomes.Add(sameDefinition ? "SameDefinition" : "DifferentDefinition");
+            else if (!evidence.Outcomes.Contains("Incomplete")) evidence.Outcomes.Add("Incomplete");
+            var managedA = Type59EvidenceCollector.Boolean(a.Row, "ismanaged");
+            var managedB = Type59EvidenceCollector.Boolean(b.Row, "ismanaged");
+            if (managedA.HasValue && managedB.HasValue)
+            {
+                if (managedA != managedB) evidence.Outcomes.Add("ManagedTransition");
+                if (managedA == false && managedB == true) evidence.Outcomes.Add("UnmanagedToManaged");
+            }
+            else if (!evidence.Outcomes.Contains("Incomplete")) evidence.Outcomes.Add("Incomplete");
         }
         private static List<Type59ChartEvidence> InSolution(Type59EnvironmentEvidence side, string solution) =>
             side.Raw.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.Solution, solution) && item.Record.ObjectId.HasValue)
@@ -371,7 +460,7 @@ namespace D365SolutionComparer.Services.Membership
 
         internal string Build()
         {
-            var output = new StringBuilder("TYPE 59 EVIDENCE ONLY - NO PRODUCTION IDENTITY OR DEFINITION CONTRACT\r\n");
+            var output = new StringBuilder("TYPE 59 EVIDENCE ONLY - NO PRODUCTION MEMBERSHIP DECISIONS OR DEFINITION CONTRACT\r\n");
             AppendSide(output, "Source", Source); AppendSide(output, "Target", Target);
             output.AppendLine("SHARED SOLUTION INVENTORY");
             foreach (var solution in SharedSolutions) output.AppendLine("  solution=" + Type59EvidenceCollector.Safe(solution) +
@@ -404,13 +493,14 @@ namespace D365SolutionComparer.Services.Membership
                     var a = left.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateB, key)).ToList();
                     var b = right.Where(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateB, key)).ToList();
                     output.AppendLine("  solution=" + Type59EvidenceCollector.Safe(solution) + "; CandidateB=" + Type59EvidenceCollector.Safe(key) +
-                        "; status=" + (a.Concat(b).Any(item => item.StatusB == "Ambiguous") ? "Ambiguous" : a.Count == 1 && b.Count == 1 ?
+                        "; status=" + (a.Count > 1 || b.Count > 1 ? "Ambiguous" : a.Count == 1 && b.Count == 1 ?
                             "Unique candidate match (B not approved)" : "One-sided Candidate B evidence only; no absence inference"));
                 }
             }
             output.AppendLine("Unique matched solution/candidate references=" + Pairs.Count(item => item.UniqueA) +
                 "; distinct differing-ID pairs=" + Pairs.Where(item => item.UniqueA && item.DifferentIds)
                     .Select(item => item.Source.ObjectId + ":" + item.Target.ObjectId).Distinct().Count());
+            AppendLifecycle(output);
             output.AppendLine("DETAILED XML EVIDENCE: selected pairs=" + SelectedPairs.Count);
             foreach (var pair in SelectedPairs)
             {
@@ -423,7 +513,7 @@ namespace D365SolutionComparer.Services.Membership
                 }
                 foreach (var field in new[] { "datadescription", "presentationdescription" })
                 {
-                    var a = Type59XmlEvidence.Create(left?.Row, field); var b = Type59XmlEvidence.Create(right?.Row, field);
+                    var a = left.Xml(field); var b = right.Xml(field);
                     output.AppendLine("  " + field + ": Source " + a.Summary + "; Target " + b.Summary);
                     if (a.Canonical != null && b.Canonical != null && a.Canonical != b.Canonical)
                         output.AppendLine("    " + Type59XmlEvidence.Difference(a.Canonical, b.Canonical));
@@ -434,8 +524,52 @@ namespace D365SolutionComparer.Services.Membership
             }
             output.AppendLine("Names are localizable and rename-sensitive; portability is unproven. Candidate B is evidence only, not approved identity.");
             output.AppendLine("Duplicate backing candidates remain Ambiguous. Incomplete correlation/scope/name evidence cannot prove absence. One-sided labels are evidence only, never membership results.");
-            output.AppendLine("Live Type 59 evidence required before guarded implementation can be considered.");
+            output.AppendLine("Live Type 59 observations require review independently of production primary-ID membership resolution.");
             return output.ToString();
+        }
+        private void AppendLifecycle(StringBuilder output)
+        {
+            output.AppendLine("LIFECYCLE CORRELATION MATRIX (per solution; overlapping diagnostic categories, not membership results)");
+            output.AppendLine("Definition evidence equality requires both canonical XML hashes, type, charttype and isdefault. Local IDs, componentstate and ismanaged are excluded.");
+            foreach (var item in Lifecycle)
+                output.AppendLine("  solution=" + Type59EvidenceCollector.Safe(item.Solution) + "; CandidateA=" +
+                    Type59EvidenceCollector.Safe(item.CandidateA) + "; outcomes=" + string.Join(",", item.Outcomes) +
+                    "; Source id=" + item.Source?.ObjectId + "; Target id=" + item.Target?.ObjectId +
+                    "; Source uniqueId=" + Type59EvidenceCollector.Id(item.Source?.Row, "savedqueryvisualizationidunique") +
+                    "; Target uniqueId=" + Type59EvidenceCollector.Id(item.Target?.Row, "savedqueryvisualizationidunique"));
+            foreach (var category in new[] { "SamePrimaryId", "DifferentPrimaryId", "SameUniqueId", "DifferentUniqueId",
+                "SameDefinition", "DifferentDefinition", "ManagedTransition", "UnmanagedToManaged", "OneSidedEvidence", "Ambiguous", "Incomplete" })
+                output.AppendLine("  " + category + "=" + Lifecycle.Count(item => item.Outcomes.Contains(category)));
+            var ambiguousB = Source.Raw.Concat(Target.Raw).Select(item => item.Solution)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Sum(solution => InSolution(Source, solution).Concat(InSolution(Target, solution))
+                    .Where(item => item.CandidateB != null).GroupBy(item => item.CandidateB, StringComparer.OrdinalIgnoreCase)
+                    .Count(group => InSolution(Source, solution).Count(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateB, group.Key)) > 1 ||
+                        InSolution(Target, solution).Count(item => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateB, group.Key)) > 1));
+            output.AppendLine("  CandidateB ambiguous solution/candidate groups=" + ambiguousB);
+            output.AppendLine("DIFFERING PRIMARY-ID SEMANTIC PAIRS");
+            var different = Pairs.Where(item => item.UniqueA && item.DifferentIds).ToList();
+            if (different.Count == 0) output.AppendLine("  No uniquely matched Candidate A pair with differing savedqueryvisualizationid was observed in this capture.");
+            foreach (var pair in different)
+            {
+                output.AppendLine("  solution=" + Type59EvidenceCollector.Safe(pair.Solution) + "; candidateUniqueness=UniqueWithinSolution; unmanagedSourceToManagedTarget=" + pair.UnmanagedToManaged);
+                AppendChart(output, pair.Source, "Source"); AppendChart(output, pair.Target, "Target");
+                foreach (var field in new[] { "datadescription", "presentationdescription" })
+                    output.AppendLine("  " + field + " hashEquality=" + (pair.Source.Xml(field).Hash == null || pair.Target.Xml(field).Hash == null
+                        ? "Incomplete" : pair.Source.Xml(field).Hash == pair.Target.Xml(field).Hash ? "EqualObserved" : "DifferentObserved"));
+            }
+            var uniquePairs = Lifecycle.Where(item => item.Outcomes.Contains("SamePrimaryId") || item.Outcomes.Contains("DifferentPrimaryId"))
+                .GroupBy(item => item.Source.ObjectId.ToString("D") + ":" + item.Target.ObjectId.ToString("D"))
+                .Select(item => item.First()).ToList();
+            output.AppendLine("PRIMARY-ID PORTABILITY ASSESSMENT");
+            output.AppendLine("  unique semantic backing pairs=" + uniquePairs.Count + "; matched solution/candidate references=" + Pairs.Count(item => item.UniqueA));
+            foreach (var category in new[] { "SamePrimaryId", "DifferentPrimaryId", "DifferentUniqueId", "DifferentDefinition" })
+                output.AppendLine("  distinct pair " + category + "=" + uniquePairs.Count(item => item.Outcomes.Contains(category)));
+            output.AppendLine("  ambiguous semantic identity groups=" + Lifecycle.Count(item => item.CandidateA != null && item.Outcomes.Contains("Ambiguous")));
+            output.AppendLine("  ambiguous Candidate B groups=" + ambiguousB);
+            output.AppendLine("  Candidate B ambiguity is reported independently in SOURCE / TARGET RECONCILIATION; it never disambiguates Candidate A.");
+            output.AppendLine("  Primary-ID identity: same-ID observations demonstrate retention only; differing-ID semantic pairs must be reviewed before concluding continuity or recreation.");
+            output.AppendLine("  Semantic identity: unique name-based matches are observations, not proof of continued identity; names remain localizable/rename-sensitive and collision-prone.");
+            output.AppendLine("  Sufficiency: neither identity is established for production by this capture alone. Lifecycle operation provenance and duplicate/incomplete cases require review; this report cannot override the independent production primary-ID resolver.");
         }
         private static bool ConsistentDetail(Type59ChartEvidence initial, Type59ChartEvidence detail) =>
             detail?.Row != null && initial.Row != null && new[] { "primaryentitytypecode", "name" }.All(field =>
@@ -449,7 +583,8 @@ namespace D365SolutionComparer.Services.Membership
             foreach (var chart in InSolution(side, solution).Where(item => item.CandidateA != null &&
                 !opposite.Any(row => StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, row.CandidateA))))
                 text.AppendLine("  solution=" + Type59EvidenceCollector.Safe(solution) + "; " + label + " candidate=" +
-                    Type59EvidenceCollector.Safe(chart.CandidateA) + "; status=" + (chart.StatusA == "Ambiguous" ? "Ambiguous" :
+                    Type59EvidenceCollector.Safe(chart.CandidateA) + "; status=" + (InSolution(side, solution).Count(item =>
+                        StringComparer.OrdinalIgnoreCase.Equals(item.CandidateA, chart.CandidateA)) > 1 ? "Ambiguous" :
                         side.Complete(solution) && other.Complete(solution) ? label + "-only evidence" : "Indeterminate: incomplete inventory evidence"));
         }
         private static void AppendSide(StringBuilder output, string label, Type59EnvironmentEvidence side)
@@ -468,7 +603,7 @@ namespace D365SolutionComparer.Services.Membership
                 .GroupBy(item => item.Record.ObjectId.Value).Where(item => item.Count() > 1).OrderBy(item => item.Key))
                 output.AppendLine("  repeated raw membership objectid=" + group.Key + "; raw references=" + group.Count() + "; not duplicate backing records");
             foreach (var chart in side.Charts.Values.OrderBy(item => item.ObjectId)) AppendChart(output, chart, "backing");
-            foreach (var chart in side.Details.Values.OrderBy(item => item.ObjectId)) AppendChart(output, chart, "detail audit");
+            foreach (var chart in side.Details.Values.Where(item => !side.Charts.ContainsKey(item.ObjectId)).OrderBy(item => item.ObjectId)) AppendChart(output, chart, "detail audit");
             output.AppendLine(label + " SUMMARY: retrieved distinct IDs=" + side.Charts.Count +
                 "; unique correlations=" + side.Charts.Values.Count(item => item.Correlation == "Unique") +
                 "; missing correlations=" + side.Charts.Values.Count(item => item.Correlation == "Missing") +
@@ -496,7 +631,7 @@ namespace D365SolutionComparer.Services.Membership
                         ? value is OptionSetValue ? ((OptionSetValue)value).Value.ToString(CultureInfo.InvariantCulture) : Convert.ToString(value, CultureInfo.InvariantCulture) : null))));
                 if (chart.Detail)
                     foreach (var field in new[] { "datadescription", "presentationdescription" })
-                        output.AppendLine("    " + field + " audit: " + Type59XmlEvidence.Create(row, field).Summary);
+                        output.AppendLine("    " + field + " audit: " + (chart.Row == row ? chart.Xml(field) : Type59XmlEvidence.Create(row, field)).Summary);
             }
         }
     }

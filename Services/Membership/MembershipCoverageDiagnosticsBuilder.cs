@@ -27,6 +27,7 @@ namespace D365SolutionComparer.Services.Membership
             ComponentSemanticKinds.EntityKey,
             ComponentSemanticKinds.SystemForm,
             ComponentSemanticKinds.SavedQuery,
+            ComponentSemanticKinds.SavedQueryVisualization,
             ComponentSemanticKinds.PluginAssembly,
             ComponentSemanticKinds.SdkMessageProcessingStep
         };
@@ -174,6 +175,7 @@ namespace D365SolutionComparer.Services.Membership
                 case ComponentSemanticKinds.AppSetting: return "App Setting";
                 case ComponentSemanticKinds.EntityKey: return "Entity Key";
                 case ComponentSemanticKinds.SavedQuery: return "Saved Query / System View";
+                case ComponentSemanticKinds.SavedQueryVisualization: return "Saved Query Visualization";
                 case ComponentSemanticKinds.SystemForm: return "System Form";
                 case ComponentSemanticKinds.PluginAssembly: return "Plug-in Assembly";
                 case ComponentSemanticKinds.SdkMessageProcessingStep: return "SDK Message Processing Step";

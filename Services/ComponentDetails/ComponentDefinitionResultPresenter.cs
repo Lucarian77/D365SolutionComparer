@@ -134,7 +134,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                     identity.Record.ComponentType == 29 && identity.SemanticKind == ComponentSemanticKinds.Process &&
                     WorkflowSemanticPolicy.IsCloudFlowKey(identity.ComparisonKey))) return "Not Compared";
             if (identities.Count > 0 && identities.All(identity => identity.Status == IdentityResolutionStatus.Resolved &&
-                identity.SemanticKind == ComponentSemanticKinds.SavedQuery)) return "Not Compared";
+                (identity.SemanticKind == ComponentSemanticKinds.SavedQuery ||
+                 identity.SemanticKind == ComponentSemanticKinds.SavedQueryVisualization))) return "Not Compared";
             if (detail.Status == ComponentDetailComparisonStatus.Unsupported && identities.Count > 0 &&
                 identities.All(identity => identity.Status == IdentityResolutionStatus.Resolved))
                 return "Not Compared";

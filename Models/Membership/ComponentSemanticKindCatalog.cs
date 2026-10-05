@@ -12,6 +12,7 @@ namespace D365SolutionComparer.Models.Membership
         public const string WebResource = "webresource";
         public const string Process = "process";
         public const string SavedQuery = "savedquery";
+        public const string SavedQueryVisualization = "savedqueryvisualization";
         public const string SecurityRole = "securityrole";
         public const string EnvironmentVariableDefinition = "environmentvariabledefinition";
         public const string ConnectionReference = "connectionreference";
@@ -76,6 +77,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 20: return SecurityRole;
                 case 29: return Process;
                 case 26: return SavedQuery;
+                case 59: return SavedQueryVisualization;
                 case 14: return EntityKey;
                 case 60: return SystemForm;
                 case 61: return WebResource;
