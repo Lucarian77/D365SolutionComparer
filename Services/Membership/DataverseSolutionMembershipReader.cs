@@ -105,6 +105,10 @@ namespace D365SolutionComparer.Services.Membership
                 var record = new SolutionComponentRecord(entity.Id, type.Value, entity.GetAttributeValue<Guid?>("objectid"),
                     entity.GetAttributeValue<OptionSetValue>("rootcomponentbehavior")?.Value,
                     entity.GetAttributeValue<Guid?>("rootsolutioncomponentid"), entity.GetAttributeValue<bool?>("ismetadata"));
+#if DEBUG
+                if (entity.FormattedValues.TryGetValue("componenttype", out var formattedLabel))
+                    InventoryFormattedLabels.Capture(record, formattedLabel);
+#endif
                 components.Add(new ComponentIdentity(record, IdentityResolutionStatus.Unresolved, diagnostic: "Identity resolution has not run."));
             }
             cancellationToken.ThrowIfCancellationRequested();

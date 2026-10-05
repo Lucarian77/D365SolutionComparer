@@ -30,7 +30,7 @@ namespace D365SolutionComparer
 #if DEBUG
             , Action captureType92Evidence = null, Action captureType59Evidence = null,
             Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
-            Action captureSavedQueryEvidence = null
+            Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null
 #endif
             )
         {
@@ -177,6 +177,14 @@ namespace D365SolutionComparer
             processQuery.Click += (sender, args) => processQueryMenu.Show(processQuery, new Point(0, processQuery.Height));
             processQuery.Disposed += (sender, args) => processQueryMenu.Dispose();
             buttons.Controls.Add(processQuery);
+            var inventory = new Button
+            {
+                Text = "Unsupported Coverage Inventory...",
+                Width = 225,
+                Enabled = captureUnsupportedCoverageInventory != null
+            };
+            inventory.Click += (sender, args) => captureUnsupportedCoverageInventory?.Invoke();
+            buttons.Controls.Add(inventory);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);
