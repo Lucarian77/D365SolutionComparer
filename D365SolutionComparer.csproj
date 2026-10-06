@@ -110,6 +110,10 @@
     <Compile Include="Services\Membership\Type59EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
     <Compile Include="Services\Membership\UnsupportedCoverageInventory.cs" Condition=" '$(Configuration)' == 'Debug' " />
     <Compile Include="Services\Membership\Type36EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Services\Membership\Type31EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Type31EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' ">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Type36EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' ">
       <SubType>Form</SubType>
     </Compile>
