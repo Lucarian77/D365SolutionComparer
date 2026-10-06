@@ -30,7 +30,8 @@ namespace D365SolutionComparer
 #if DEBUG
             , Action captureType92Evidence = null, Action captureType59Evidence = null,
             Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
-            Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null
+            Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null,
+            Action captureType36Evidence = null
 #endif
             )
         {
@@ -185,6 +186,16 @@ namespace D365SolutionComparer
             };
             inventory.Click += (sender, args) => captureUnsupportedCoverageInventory?.Invoke();
             buttons.Controls.Add(inventory);
+            var type36 = new Button
+            {
+                Text = "Capture Type 36 Email Template Evidence...",
+                Width = 285,
+                Enabled = captureType36Evidence != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            type36.Click += (sender, args) => captureType36Evidence?.Invoke();
+            buttons.Controls.Add(type36);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);

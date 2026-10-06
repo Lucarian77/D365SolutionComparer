@@ -75,6 +75,7 @@
     <Compile Include="Type59EvidenceCollectorTests.cs" />
     <Compile Include="Type59MembershipResolutionTests.cs" />
     <Compile Include="UnsupportedCoverageInventoryTests.cs" />
+    <Compile Include="Type36EvidenceCollectorTests.cs" />
     <Compile Include="CloudFlowSavedQueryEvidenceTests.cs" />
     <Compile Include="PrimaryIdMembershipResolutionTests.cs" />
   </ItemGroup>
