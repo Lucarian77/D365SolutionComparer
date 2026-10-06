@@ -787,6 +787,8 @@ namespace D365SolutionComparer
                     var inventoryTarget = unsupportedInventorySession.Target;
                     resultsForm.CaptureUnsupportedCoverageInventory = () =>
                         CaptureUnsupportedCoverageInventory(inventorySource, inventoryTarget);
+                    resultsForm.CaptureType36Evidence = () => CaptureType36Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
 #endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
@@ -805,6 +807,58 @@ namespace D365SolutionComparer
         }
 
 #if DEBUG
+        private void CaptureType36Evidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only Type 36 Email Template evidence...",
+                IsCancelable = true,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var report = new Type36EvidenceCollector().Capture(sourceService, presentation.Source.Snapshot,
+                                sourceVersion, destinationService, presentation.Target.Snapshot, targetVersion, cancellation.Token,
+                                message => worker.ReportProgress(50, new MembershipUiProgress(message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = report.Build();
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress != null) SetWorkingMessage(progress.Message, 430, 150);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled) return;
+                    if (args.Error != null)
+                    {
+                        MessageBox.Show(this, "Type 36 evidence capture failed; server details withheld.",
+                            "Email Template Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    if (!(args.Result is string evidence)) return;
+                    using (var form = new Type36EvidenceResultsForm(evidence))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                }
+            });
+        }
+
         private void CaptureUnsupportedCoverageInventory(InventoryCheckpoint[] source, InventoryCheckpoint[] target)
         {
             WorkAsync(new WorkAsyncInfo
