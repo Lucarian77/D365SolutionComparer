@@ -789,6 +789,8 @@ namespace D365SolutionComparer
                         CaptureUnsupportedCoverageInventory(inventorySource, inventoryTarget);
                     resultsForm.CaptureType36Evidence = () => CaptureType36Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
+                    resultsForm.CaptureType31Evidence = () => CaptureType31Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
 #endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
@@ -807,6 +809,58 @@ namespace D365SolutionComparer
         }
 
 #if DEBUG
+        private void CaptureType31Evidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only Type 31 Report evidence...",
+                IsCancelable = true,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var report = new Type31EvidenceCollector().Capture(sourceService, presentation.Source.Snapshot,
+                                sourceVersion, destinationService, presentation.Target.Snapshot, targetVersion, cancellation.Token,
+                                message => worker.ReportProgress(50, new MembershipUiProgress(message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = report.Build();
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress != null) SetWorkingMessage(progress.Message, 430, 150);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled) return;
+                    if (args.Error != null)
+                    {
+                        MessageBox.Show(this, "Type 31 evidence capture failed; server details withheld.",
+                            "Report Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    if (!(args.Result is string evidence)) return;
+                    using (var form = new Type31EvidenceResultsForm(evidence))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                }
+            });
+        }
+
         private void CaptureType36Evidence(MembershipComparisonPresentation presentation,
             string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
         {

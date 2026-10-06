@@ -31,7 +31,7 @@ namespace D365SolutionComparer
             , Action captureType92Evidence = null, Action captureType59Evidence = null,
             Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
             Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null,
-            Action captureType36Evidence = null
+            Action captureType36Evidence = null, Action captureType31Evidence = null
 #endif
             )
         {
@@ -196,6 +196,16 @@ namespace D365SolutionComparer
             };
             type36.Click += (sender, args) => captureType36Evidence?.Invoke();
             buttons.Controls.Add(type36);
+            var type31 = new Button
+            {
+                Text = "Capture Type 31 Report Evidence...",
+                Width = 255,
+                Enabled = captureType31Evidence != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            type31.Click += (sender, args) => captureType31Evidence?.Invoke();
+            buttons.Controls.Add(type31);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);
