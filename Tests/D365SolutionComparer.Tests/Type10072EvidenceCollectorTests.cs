@@ -519,6 +519,198 @@ namespace D365SolutionComparer.Tests
         private static FaultException<OrganizationServiceFault> SdkFault() => new FaultException<OrganizationServiceFault>(
             new OrganizationServiceFault { ErrorCode = unchecked((int)0x80040216), Message = Secret + " https://private.service Bearer TOKEN", TraceText = "STACK-TRACE " + Secret },
             new FaultReason(Secret));
+        [TestMethod]
+        public void DependencyOnlyCanvasAppsCorrelateExplicitIdsAndCompleteDiagnosticAppElementPair()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(); var right = pair.Target.AddCanvas();
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right);
+            var report = pair.Capture(); var matched = report.Pairs.Single();
+            Assert.AreNotEqual(left.Id, right.Id); Assert.AreEqual("SemanticPair", matched.Outcome);
+            Assert.AreEqual("VerifiedDependencyOnlyCanvasAppIdentity", matched.Source.CanvasDependencyState);
+            Assert.AreEqual("VerifiedDependencyOnlyCanvasAppIdentity", matched.Target.CanvasDependencyState);
+            Assert.IsNotNull(matched.Source.CandidateA); Assert.AreNotEqual(matched.Source.PrimaryId, matched.Target.PrimaryId);
+            Assert.AreEqual(0, report.Source.CanvasDependencies.Raw.Count); Assert.AreEqual(left.Id, report.Source.CanvasDependencies.Rows.Single().Value.PrimaryId);
+            var canvasQueries = pair.Source.Queries.Where(q => q.EntityName == "canvasapp").ToArray(); Assert.AreEqual(2, canvasQueries.Length);
+            Assert.IsTrue(canvasQueries.All(q => q.Criteria.Conditions.Single().Values.Cast<Guid>().SequenceEqual(new[] { left.Id })));
+            Assert.IsTrue(pair.Source.Raw.Concat(pair.Target.Raw).All(c => c.Status == IdentityResolutionStatus.Unsupported && c.ComparisonKey == null));
+        }
+        [DataTestMethod, DataRow(true), DataRow(false)]
+        public void VerifiedCanvasReferenceRequiresIndependentExplicitElementType(bool hasType)
+        {
+            var pair = new Pair();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                var row = side.AddCanvasElement(side.AddCanvas()); row.Attributes.Remove("elementtype");
+                side.Attributes.Add(Attribute("objectidtype", new PicklistAttributeMetadata()));
+                if (hasType) row["objectidtype"] = new OptionSetValue(300);
+            }
+            var report = pair.Capture();
+            foreach (var row in report.Source.Rows.Values.Concat(report.Target.Rows.Values))
+            {
+                Assert.AreEqual("VerifiedDependencyOnlyCanvasAppIdentity", row.CanvasDependencyState);
+                Assert.IsTrue(row.ParentIdentityComplete); Assert.IsTrue(row.ReferencedComponentIdentityComplete);
+                Assert.AreEqual(hasType, row.ElementTypeComplete); Assert.AreEqual(hasType, row.CompleteA);
+                Assert.IsNotNull(row.CandidateB); // Descriptive B cannot repair an absent explicit type.
+                if (hasType) { Assert.AreEqual("objectidtype", row.ElementTypeField); Assert.AreEqual("None", row.CandidateABlockingReason); }
+                else { Assert.IsNull(row.CandidateA); StringAssert.Contains(row.CandidateABlockingReason, "objectidtype are blank or unavailable"); }
+            }
+            StringAssert.Contains(report.Build(), "ParentIdentityComplete=True");
+            StringAssert.Contains(report.Build(), "ReferencedComponentIdentityComplete=True");
+            StringAssert.Contains(report.Build(), "ElementTypeComplete=" + hasType);
+            StringAssert.Contains(report.Build(), "CompleteA=" + hasType);
+            StringAssert.Contains(report.Build(), "BlockingReason=");
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void OrganizationReferenceIsAuditOnlyAndDoesNotBlockVerifiedCanvasCandidate(bool guidRelationship)
+        {
+            var pair = new Pair();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                var row = side.AddCanvasElement(side.AddCanvas());
+                side.Attributes.Add(Attribute("organizationid", guidRelationship ? (AttributeMetadata)new UniqueIdentifierAttributeMetadata()
+                    : new LookupAttributeMetadata { Targets = new[] { "organization" } }));
+                row["organizationid"] = guidRelationship ? (object)Guid.NewGuid() : new EntityReference("organization", Guid.NewGuid());
+                if (guidRelationship) side.Relationships = new[] { new OneToManyRelationshipMetadata {
+                    ReferencingEntity = "appelement", ReferencingAttribute = "organizationid", ReferencedEntity = "organization", ReferencedAttribute = "organizationid" } };
+            }
+            var report = pair.Capture(); Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome);
+            foreach (var row in report.Source.Rows.Values.Concat(report.Target.Rows.Values))
+            {
+                Assert.IsNotNull(row.Get("organizationid")); Assert.IsFalse(row.ReferenceUncertain);
+                Assert.AreEqual("Unique", row.ReferenceStatus); Assert.IsTrue(row.CompleteA);
+                Assert.IsTrue(row.ParentIdentityComplete && row.ElementTypeComplete && row.ReferencedComponentIdentityComplete);
+            }
+            Assert.IsFalse(report.Build().Contains("Reference organization has no already-verified snapshot identity mapping"));
+            Assert.IsTrue(pair.Source.Queries.Concat(pair.Target.Queries).All(q => q.EntityName != "organization"));
+        }
+        [TestMethod]
+        public void VerifiedCanvasDependencyDoesNotRepairIncompleteParentIdentity()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvasElement(pair.Source.AddCanvas()); pair.Target.AddCanvasElement(pair.Target.AddCanvas());
+            left.Attributes.Remove("appmoduleid"); var row = pair.Capture().Source.Rows.Values.Single();
+            Assert.AreEqual("VerifiedDependencyOnlyCanvasAppIdentity", row.CanvasDependencyState);
+            Assert.IsFalse(row.ParentIdentityComplete); Assert.IsTrue(row.ElementTypeComplete && row.ReferencedComponentIdentityComplete);
+            Assert.IsFalse(row.CompleteA); StringAssert.Contains(row.CandidateABlockingReason, "Parent AppModule identity incomplete");
+        }
+        [TestMethod]
+        public void CompletedMemberEvidenceAndDependencyOnlyEvidenceCompleteBothDistinctPairsWithoutMemberRequery()
+        {
+            var pair = TwoCanvasPairs(); var cached = pair.CaptureMembers(); int before = pair.Source.Queries.Count;
+            var report = pair.Capture(cached: cached); Assert.AreEqual(2, report.Pairs.Count(p => p.Outcome == "SemanticPair"));
+            Assert.AreEqual(1, report.Source.Rows.Values.Count(r => r.CanvasDependencyState == "VerifiedType300SemanticIdentity"));
+            Assert.AreEqual(1, report.Source.Rows.Values.Count(r => r.CanvasDependencyState == "VerifiedDependencyOnlyCanvasAppIdentity"));
+            Assert.IsTrue(report.Source.Rows.Values.All(r => r.CandidateA != null && !r.DuplicateA));
+            Assert.IsTrue(report.Source.Rows.Values.Concat(report.Target.Rows.Values).All(r => r.ParentIdentityComplete &&
+                r.ElementTypeComplete && r.ReferencedComponentIdentityComplete && r.CompleteA && r.CandidateABlockingReason == "None"));
+            var memberId = pair.Source.Context.Single(c => c.Record.ComponentType == 300).Record.ObjectId.Value;
+            Assert.IsTrue(pair.Source.Queries.Skip(before).Where(q => q.EntityName == "canvasapp").All(q => !q.Criteria.Conditions.Single().Values.Contains(memberId)));
+            Assert.AreEqual(2, report.Source.Requests.Count(r => r.StartsWith("RetrieveMultiple canvasapp;")));
+            Assert.IsFalse(report.Source.Requests.Any(r => r.StartsWith("Execute RetrieveEntity(canvasapp,")));
+            StringAssert.Contains(report.Build(), "UniqueDifferingPrimaryIdPairs=2"); StringAssert.Contains(report.Build(), "CanvasCandidateACollisionGroups=0");
+            Assert.IsFalse(cached.Source.Rows.Values.Any(r => r.DuplicateA)); Assert.IsFalse(cached.Target.Rows.Values.Any(r => r.DuplicateA));
+        }
+        [TestMethod]
+        public void DifferentDependencyCandidateCannotPairThroughIdenticalCandidateBOrHash()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(name: "left"); var right = pair.Target.AddCanvas(name: "right");
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right);
+            var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.Concat(report.Target.Rows.Values).All(r => r.CandidateA == null && r.CanvasDependencyState == "Incomplete"));
+            Assert.AreEqual(report.Source.CanvasDependencies.Rows.Single().Value.CandidateB, report.Target.CanvasDependencies.Rows.Single().Value.CandidateB);
+        }
+        [TestMethod]
+        public void MissingDependencyCanvasRowDoesNotBecomeProductionMissingOrOneSidedIdentity()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(); var right = pair.Target.AddCanvas();
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right); pair.Target.CanvasRows.Clear();
+            var report = pair.Capture(); Assert.AreEqual("Missing", report.Target.Rows.Values.Single().CanvasDependencyState);
+            Assert.IsNull(report.Source.Rows.Values.Single().CandidateA); Assert.IsNull(report.Target.Rows.Values.Single().CandidateA);
+            Assert.IsTrue(report.Pairs.All(p => p.Outcome == "Incomplete"));
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void DuplicateOrConflictingDependencyBackingRowsStayAmbiguous(bool conflict)
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(); var right = pair.Target.AddCanvas();
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right);
+            pair.Source.CanvasPage = q => { var row = left; var copy = new Entity("canvasapp", row.Id);
+                foreach (var field in q.ColumnSet.Columns) if (row.Contains(field)) copy[field] = row[field];
+                var extra = new Entity("canvasapp", row.Id); foreach (var field in copy.Attributes) extra[field.Key] = field.Value;
+                if (conflict) extra["name"] = "conflict"; return Rows(copy, extra); };
+            var report = pair.Capture(); Assert.AreEqual("Ambiguous", report.Source.Rows.Values.Single().CanvasDependencyState);
+            Assert.IsNull(report.Source.Rows.Values.Single().CandidateA); Assert.IsNull(report.Target.Rows.Values.Single().CandidateA);
+        }
+        [TestMethod]
+        public void MemberDependencyCandidateCollisionBlocksBothAndCandidateBNeverRepairsIt()
+        {
+            var pair = TwoCanvasPairs(); foreach (var row in pair.Source.CanvasRows.Concat(pair.Target.CanvasRows)) row["name"] = "collision";
+            foreach (var side in new[] { pair.Source, pair.Target }) side.CanvasRows[1]["displayname"] = "Different descriptive B";
+            var cached = pair.CaptureMembers(); var report = pair.Capture(cached: cached);
+            Assert.IsTrue(report.Source.Rows.Values.Concat(report.Target.Rows.Values).All(r => r.CanvasDependencyState == "Ambiguous" && r.CandidateA == null));
+            StringAssert.Contains(report.Build(), "CanvasCandidateACollisionGroups=2");
+            Assert.IsTrue(cached.Source.Rows.Values.All(r => !r.DuplicateA));
+        }
+        [DataTestMethod, DataRow("configuration", true), DataRow("name", false)]
+        public void RuntimeDependencyColumnFaultUsesExistingIsolationAndPreservesCriticalSafeguards(string field, bool complete)
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(); var right = pair.Target.AddCanvas();
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right);
+            var normal = pair.Source.Service.RetrievePage;
+            pair.Source.Service.RetrievePage = q => { var rows = normal(q); if (q.EntityName == "canvasapp" && q.ColumnSet.Columns.Contains(field)) throw SdkFault(); return rows; };
+            var report = pair.Capture(); Assert.AreEqual(complete, report.Source.Rows.Values.Single().CandidateA != null);
+            Assert.AreEqual(complete, report.Target.Rows.Values.Single().CandidateA != null);
+            StringAssert.Contains(report.Build(), "Attribute faulted: " + field); Assert.IsFalse(report.Build().Contains(Secret));
+        }
+        [TestMethod]
+        public void DependencyPrimaryFaultIsReportedFaultedWithoutFallbackIdentity()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvas(); var right = pair.Target.AddCanvas();
+            pair.Source.AddCanvasElement(left); pair.Target.AddCanvasElement(right);
+            var normal = pair.Source.Service.RetrievePage; pair.Source.Service.RetrievePage = q => { var rows = normal(q); if (q.EntityName == "canvasapp") throw SdkFault(); return rows; };
+            var report = pair.Capture(); Assert.AreEqual("Faulted", report.Source.Rows.Values.Single().CanvasDependencyState); Assert.IsNull(report.Source.Rows.Values.Single().CandidateA);
+        }
+        [DataTestMethod, DataRow(""), DataRow("9c363a41-5f5b-4245-9b66-c16a5d837348")]
+        public void BlankOrGuidOnlyDependencyInternalIdentifierStaysIncomplete(string name)
+        {
+            var pair = new Pair(); pair.Source.AddCanvasElement(pair.Source.AddCanvas(name: name)); pair.Target.AddCanvasElement(pair.Target.AddCanvas(name: name));
+            Assert.IsTrue(pair.Capture().Source.Rows.Values.All(r => r.CandidateA == null && r.CanvasDependencyState == "Incomplete"));
+        }
+        [TestMethod]
+        public void CanvasVerificationCannotBypassUncertainOtherComponentReference()
+        {
+            var pair = new Pair(); var left = pair.Source.AddCanvasElement(pair.Source.AddCanvas()); pair.Target.AddCanvasElement(pair.Target.AddCanvas());
+            left["componentid"] = new EntityReference("webresource", Guid.NewGuid()); var report = pair.Capture();
+            Assert.AreEqual("VerifiedDependencyOnlyCanvasAppIdentity", report.Source.Rows.Values.Single().CanvasDependencyState);
+            Assert.IsNull(report.Source.Rows.Values.Single().CandidateA); Assert.IsTrue(report.Source.Rows.Values.Single().ReferenceUncertain);
+        }
+        [TestMethod]
+        public void MemberCacheMustBelongToExactSnapshotsAndCannotBeGuessedOrRequeried()
+        {
+            var pair = TwoCanvasPairs(); var cached = pair.CaptureMembers();
+            var report = new Type10072EvidenceCollector().Capture(pair.Source.Service, pair.Source.Snapshot(), "1", pair.Target.Service, pair.Target.Snapshot(), "2", CancellationToken.None, completedType300Evidence: cached);
+            Assert.AreEqual(1, report.Source.Rows.Values.Count(r => r.CanvasDependencyState == "Incomplete"));
+            Assert.AreEqual(1, report.Source.Rows.Values.Count(r => r.CanvasDependencyState == "VerifiedDependencyOnlyCanvasAppIdentity"));
+        }
+        [TestMethod]
+        public void CancellationDuringDependencyRetrievalDoesNotContinueOrChangeMembership()
+        {
+            var pair = new Pair(); pair.Source.AddCanvasElement(pair.Source.AddCanvas()); pair.Target.AddCanvasElement(pair.Target.AddCanvas());
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var normal = pair.Source.Service.RetrievePage; pair.Source.Service.RetrievePage = q => { if (q.EntityName == "canvasapp") cancellation.Cancel(); return normal(q); };
+                Assert.ThrowsException<OperationCanceledException>(() => pair.Capture(cancellation.Token));
+                Assert.IsFalse(pair.Target.Queries.Any(q => q.EntityName == "canvasapp"));
+                Assert.IsTrue(pair.Source.Raw.All(c => c.Status == IdentityResolutionStatus.Unsupported && c.ComparisonKey == null));
+                Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+            }
+        }
+        private static Pair TwoCanvasPairs()
+        {
+            var pair = new Pair(); foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                side.AddCanvasElement(side.AddCanvas(member: true, name: "ava_casemanagementsystemdefaultcommandlibrary_d992b"), "first");
+                side.AddCanvasElement(side.AddCanvas(name: "publisher_dependency_only_canvas"), "second");
+            }
+            return pair;
+        }
         private static readonly string[] ShadowFields = { "canvasappidname", "createdbyname", "createdbyyominame", "createdonbehalfbyname", "createdonbehalfbyyominame",
             "modifiedbyname", "modifiedbyyominame", "modifiedonbehalfbyname", "modifiedonbehalfbyyominame", "organizationidname", "parentappmoduleidname" };
         private static void AddLookupShadows(Fixture side)
@@ -551,12 +743,17 @@ namespace D365SolutionComparer.Tests
         private sealed class Pair
         {
             internal readonly Fixture Source = new Fixture(), Target = new Fixture();
-            internal AppElementEvidenceReport Capture(CancellationToken token = default(CancellationToken)) => new Type10072EvidenceCollector().Capture(Source.Service, Source.Snapshot(), "1", Target.Service, Target.Snapshot(), "2", token);
+            internal AppElementEvidenceReport Capture(CancellationToken token = default(CancellationToken), CanvasAppEvidenceReport cached = null) =>
+                new Type10072EvidenceCollector().Capture(Source.Service, cached?.Source.Snapshot ?? Source.Snapshot(), "1", Target.Service, cached?.Target.Snapshot ?? Target.Snapshot(), "2", token, completedType300Evidence: cached);
+            internal CanvasAppEvidenceReport CaptureMembers() => new Type300EvidenceCollector().Capture(Source.Service, Source.Snapshot(), "1", Target.Service, Target.Snapshot(), "2", CancellationToken.None);
         }
         private sealed class Fixture
         {
             internal readonly FakeOrganizationService Service;
             internal readonly List<Entity> Rows = new List<Entity>(), ParentRows = new List<Entity>();
+            internal readonly List<Entity> CanvasRows = new List<Entity>();
+            internal readonly List<AttributeMetadata> CanvasAttributes = new List<AttributeMetadata>();
+            internal Func<QueryExpression, EntityCollection> CanvasPage;
             internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>(), Context = new List<ComponentIdentity>();
             internal readonly List<QueryExpression> Queries = new List<QueryExpression>();
             internal readonly List<AttributeMetadata> Attributes = new List<AttributeMetadata>(), ParentAttributes = new List<AttributeMetadata>();
@@ -567,6 +764,9 @@ namespace D365SolutionComparer.Tests
             private readonly D365SolutionComparer.Models.Identity.SolutionIdentity solution = Solution();
             internal Fixture()
             {
+                CanvasAttributes.Add(Attribute("canvasappid", new UniqueIdentifierAttributeMetadata()));
+                foreach (var field in new[] { "name", "displayname", "uniquecanvasappid" }) CanvasAttributes.Add(Attribute(field, new StringAttributeMetadata()));
+                CanvasAttributes.Add(Attribute("configuration", new MemoAttributeMetadata())); CanvasAttributes.Add(Attribute("appcomponenttype", new PicklistAttributeMetadata()));
                 Attributes.Add(Attribute("appelementid", new UniqueIdentifierAttributeMetadata()));
                 Attributes.Add(Attribute("appelementidunique", new UniqueIdentifierAttributeMetadata()));
                 foreach (var field in new[] { "name", "uniquename", "logicalname", "displayname" }) Attributes.Add(Attribute(field, new StringAttributeMetadata()));
@@ -585,7 +785,7 @@ namespace D365SolutionComparer.Tests
                         Assert.IsInstanceOfType(request, typeof(RetrieveEntityRequest)); var req = (RetrieveEntityRequest)request;
                         Assert.AreEqual(EntityFilters.Attributes | EntityFilters.Relationships, req.EntityFilters); Assert.IsFalse(req.RetrieveAsIfPublished);
                         var metadata = new EntityMetadata { LogicalName = req.LogicalName }; Set(metadata, "PrimaryIdAttribute", req.LogicalName + "id");
-                        Set(metadata, "Attributes", (req.LogicalName == "appelement" ? Attributes : ParentAttributes).ToArray());
+                        Set(metadata, "Attributes", (req.LogicalName == "appelement" ? Attributes : req.LogicalName == "canvasapp" ? CanvasAttributes : ParentAttributes).ToArray());
                         Set(metadata, "ManyToOneRelationships", req.LogicalName == "appelement" ? Relationships : new OneToManyRelationshipMetadata[0]);
                         var response = new RetrieveEntityResponse(); response.Results["EntityMetadata"] = metadata; return response;
                     },
@@ -594,7 +794,8 @@ namespace D365SolutionComparer.Tests
                         Queries.Add(query); var condition = query.Criteria.Conditions.Single(); Assert.AreEqual(ConditionOperator.In, condition.Operator);
                         Assert.IsTrue(condition.Values.Count <= 200); var ids = condition.Values.Cast<Guid>().ToArray();
                         if (query.EntityName == "appelement" && Page != null) return Page(query);
-                        return new EntityCollection((query.EntityName == "appelement" ? Rows : ParentRows).Where(r => ids.Contains(r.Id)).Select(r =>
+                        if (query.EntityName == "canvasapp" && CanvasPage != null) return CanvasPage(query);
+                        return new EntityCollection((query.EntityName == "appelement" ? Rows : query.EntityName == "canvasapp" ? CanvasRows : ParentRows).Where(r => ids.Contains(r.Id)).Select(r =>
                         { var copy = new Entity(r.LogicalName, r.Id); foreach (var field in query.ColumnSet.Columns) if (r.Contains(field)) copy[field] = r[field]; return copy; }).ToList());
                     }
                 };
@@ -614,6 +815,19 @@ namespace D365SolutionComparer.Tests
             }
             internal void Reference(Guid id) => Raw.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 10072, id), IdentityResolutionStatus.Unsupported,
                 registeredDefinition: new SolutionComponentDefinitionIdentity(10072, "AppElement", "appelement")));
+            internal Entity AddCanvas(bool member = false, string name = "publisher_dependency_canvas")
+            {
+                var row = new Entity("canvasapp", Guid.NewGuid()) { ["name"] = name, ["displayname"] = "Descriptive canvas",
+                    ["uniquecanvasappid"] = Guid.NewGuid().ToString("D"), ["configuration"] = Secret, ["appcomponenttype"] = new OptionSetValue(1) };
+                row["canvasappid"] = row.Id; CanvasRows.Add(row);
+                if (member) Context.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 300, row.Id), IdentityResolutionStatus.Unsupported));
+                return row;
+            }
+            internal Entity AddCanvasElement(Entity canvas, string unique = "canvas_element")
+            {
+                if (!Attributes.Any(a => a.LogicalName == "canvasappid")) Attributes.Add(Attribute("canvasappid", new LookupAttributeMetadata { Targets = new[] { "canvasapp" } }));
+                var row = Add(unique: unique); row.Attributes.Remove("componentid"); row["canvasappid"] = new EntityReference("canvasapp", canvas.Id); return row;
+            }
             internal MembershipSnapshot Snapshot() => MembershipSnapshot.Complete(solution, Raw.Concat(Context), DateTimeOffset.UtcNow);
         }
 #endif

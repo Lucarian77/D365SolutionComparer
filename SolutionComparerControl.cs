@@ -791,10 +791,11 @@ namespace D365SolutionComparer
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
                     resultsForm.CaptureType31Evidence = () => CaptureType31Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
+                    CanvasAppEvidenceReport completedType300Evidence = null;
                     resultsForm.CaptureType10072Evidence = () => CaptureType10072Evidence(presentation,
-                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
+                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService, completedType300Evidence);
                     resultsForm.CaptureType300Evidence = () => CaptureType300Evidence(presentation,
-                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
+                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService, evidence => completedType300Evidence = evidence);
 #endif
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
@@ -866,7 +867,7 @@ namespace D365SolutionComparer
         }
 
         private void CaptureType10072Evidence(MembershipComparisonPresentation presentation,
-            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
+            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService, CanvasAppEvidenceReport completedType300Evidence = null)
         {
             WorkAsync(new WorkAsyncInfo
             {
@@ -885,7 +886,7 @@ namespace D365SolutionComparer
                         {
                             var report = new Type10072EvidenceCollector().Capture(sourceService, presentation.Source.Snapshot,
                                 sourceVersion, destinationService, presentation.Target.Snapshot, targetVersion, cancellation.Token,
-                                message => worker.ReportProgress(50, new MembershipUiProgress(message)));
+                                message => worker.ReportProgress(50, new MembershipUiProgress(message)), completedType300Evidence);
                             ThrowIfMembershipCancelled(worker, cancellation);
                             args.Result = report.Build();
                             ThrowIfMembershipCancelled(worker, cancellation);
@@ -918,7 +919,7 @@ namespace D365SolutionComparer
         }
 
         private void CaptureType300Evidence(MembershipComparisonPresentation presentation,
-            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
+            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService, Action<CanvasAppEvidenceReport> completed = null)
         {
             WorkAsync(new WorkAsyncInfo
             {
@@ -939,7 +940,7 @@ namespace D365SolutionComparer
                                 sourceVersion, destinationService, presentation.Target.Snapshot, targetVersion, cancellation.Token,
                                 message => worker.ReportProgress(50, new MembershipUiProgress(message)));
                             ThrowIfMembershipCancelled(worker, cancellation);
-                            args.Result = report.Build();
+                            args.Result = Tuple.Create(report, report.Build());
                             ThrowIfMembershipCancelled(worker, cancellation);
                         }
                         catch (OperationCanceledException) { args.Cancel = true; }
@@ -959,7 +960,9 @@ namespace D365SolutionComparer
                             "Canvas App Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
-                    if (!(args.Result is string evidence)) return;
+                    if (!(args.Result is Tuple<CanvasAppEvidenceReport, string> result)) return;
+                    completed?.Invoke(result.Item1);
+                    var evidence = result.Item2;
                     using (var form = new Type300EvidenceResultsForm(evidence))
                     {
                         var owner = FindForm();

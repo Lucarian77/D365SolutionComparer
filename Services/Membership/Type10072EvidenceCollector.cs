@@ -22,7 +22,7 @@ namespace D365SolutionComparer.Services.Membership
         private static readonly string[] MinimalColumns = { "appelementid", "parentappmoduleid", "objectid", "objectidtype", "name",
             "uniquename", "componentidunique", "componentstate", "ismanaged", "canvasappid" };
         private static readonly string[] TextEvidence = { "name", "uniquename", "schemaname", "logicalname", "displayname",
-            "entitylogicalname", "entityname", "primaryentity", "objecttypecode" };
+            "entitylogicalname", "entityname", "primaryentity", "objecttypecode", "objectidtype" };
         private static readonly string[] ScalarEvidence = { "type", "elementtype", "componenttype", "objecttypecode", "objectidtype", "ismanaged", "componentstate", "statecode", "statuscode" };
         // Lookup display shadows can be marked readable by metadata yet rejected by RetrieveMultiple (0x8004023B).
         // Retain the actual lookups; these virtual display values provide no identity evidence.
@@ -30,9 +30,14 @@ namespace D365SolutionComparer.Services.Membership
             "canvasappidname", "createdbyname", "createdbyyominame", "createdonbehalfbyname", "createdonbehalfbyyominame",
             "modifiedbyname", "modifiedbyyominame", "modifiedonbehalfbyname", "modifiedonbehalfbyyominame",
             "organizationidname", "parentappmoduleidname" }, StringComparer.OrdinalIgnoreCase);
+        // Installation/ownership references are retained as audit evidence, not Candidate A component dependencies.
+        private static readonly HashSet<string> AuditReferences = new HashSet<string>(new[] {
+            "createdby", "modifiedby", "createdonbehalfby", "modifiedonbehalfby", "ownerid", "owninguser",
+            "owningteam", "owningbusinessunit", "organizationid" }, StringComparer.OrdinalIgnoreCase);
 
         internal AppElementEvidenceReport Capture(IOrganizationService sourceService, MembershipSnapshot source, string sourceVersion,
-            IOrganizationService targetService, MembershipSnapshot target, string targetVersion, CancellationToken token, Action<string> progress = null)
+            IOrganizationService targetService, MembershipSnapshot target, string targetVersion, CancellationToken token, Action<string> progress = null,
+            CanvasAppEvidenceReport completedType300Evidence = null)
         {
             if (source?.State != MembershipSnapshotState.Complete || target?.State != MembershipSnapshotState.Complete ||
                 !StringComparer.OrdinalIgnoreCase.Equals(source.SolutionUniqueName, target.SolutionUniqueName))
@@ -43,6 +48,7 @@ namespace D365SolutionComparer.Services.Membership
                 Source = Read(sourceService, source, sourceVersion, token, progress),
                 Target = Read(targetService, target, targetVersion, token, progress)
             };
+            CompleteCanvasReferences(sourceService, targetService, report, completedType300Evidence, token, progress);
             foreach (var side in new[] { report.Source, report.Target })
                 foreach (var group in side.Rows.Values.Where(r => r.Status == "Unique" && r.CandidateA != null)
                     .GroupBy(r => r.CandidateA, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
@@ -117,7 +123,7 @@ namespace D365SolutionComparer.Services.Membership
                         if (reference.Id != Guid.Empty && ValidName(reference.LogicalName)) row.References[column] = reference;
                     }
                     // Untyped GUIDs need a metadata-proven PK relationship before reference interpretation.
-                    else if (raw is Guid && (Guid)raw != Guid.Empty)
+                    else if (raw is Guid && (Guid)raw != Guid.Empty && !AuditReferences.Contains(column))
                     {
                         var links = (metadata.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0])
                             .Where(r => r != null && r.ReferencingEntity == "appelement" && r.ReferencingAttribute == column &&
@@ -220,15 +226,22 @@ namespace D365SolutionComparer.Services.Membership
                 if (!row.RelationshipAmbiguous && row.ParentIds.Count == 1 && parents.TryGetValue(row.ParentIds.Single(), out var parent))
                 { row.ParentStatus = parent.Status; row.ParentKey = parent.Key; row.Context.Add(parent.Reason); }
                 var referenceKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var audit in row.References.Keys.Where(AuditReferences.Contains))
+                    row.Context.Add(audit + " retained as audit evidence only; excluded from Candidate A referenced-component identity");
                 foreach (var reference in row.References.Where(r => r.Value.LogicalName != "appmodule" &&
-                    !new[] { "createdby", "modifiedby", "createdonbehalfby", "modifiedonbehalfby", "ownerid", "owninguser", "owningteam", "owningbusinessunit" }.Contains(r.Key)))
+                    !AuditReferences.Contains(r.Key)))
                 {
                     var lookup = metadata.Attributes.OfType<LookupAttributeMetadata>().SingleOrDefault(a => a.LogicalName == reference.Key);
                     if (lookup?.Targets?.Contains(reference.Value.LogicalName) != true) { row.ReferenceUncertain = true; continue; }
+                    if (reference.Key == "canvasappid" && reference.Value.LogicalName == "canvasapp")
+                    { row.CanvasReferenceId = reference.Value.Id; continue; }
                     ResolveSnapshotReference(side, row, reference.Value.Id, reference.Value.LogicalName, null, referenceKeys);
                 }
-                foreach (var link in row.GuidLinks.Values.Where(v => v.Item1 != "appmodule"))
+                foreach (var entry in row.GuidLinks.Where(v => v.Value.Item1 != "appmodule" && !AuditReferences.Contains(v.Key)))
                 {
+                    var link = entry.Value;
+                    if (entry.Key == "canvasappid" && link.Item1 == "canvasapp" && link.Item2 == "canvasappid")
+                    { row.CanvasReferenceId = link.Item3; continue; }
                     // Only snapshot identities with the corresponding known PK are eligible; no local alternate-ID guesses.
                     if (PrimaryFor(link.Item1) == link.Item2) ResolveSnapshotReference(side, row, link.Item3, link.Item1, null, referenceKeys);
                     else { row.ReferenceUncertain = true; row.Context.Add("Reference alternate key unavailable as verified portable identity"); }
@@ -239,12 +252,11 @@ namespace D365SolutionComparer.Services.Membership
                     row.ReferenceUncertain = true;
                     row.Context.Add("Untyped objectid/componenttype values are audit evidence only; no referenced table/identity relationship assumed");
                 }
-                row.ReferenceStatus = row.ReferenceUncertain || referenceKeys.Count > 1 ? "AmbiguousOrIncomplete" : referenceKeys.Count == 1 ? "Unique" : "Incomplete";
+                row.OtherReferenceKeys.UnionWith(referenceKeys);
+                row.ReferenceStatus = row.CanvasReferenceId.HasValue || row.ReferenceUncertain || referenceKeys.Count > 1 ? "AmbiguousOrIncomplete" : referenceKeys.Count == 1 ? "Unique" : "Incomplete";
                 row.ReferenceKey = row.ReferenceStatus == "Unique" ? referenceKeys.Single() : null;
-                string type = row.Get("elementtype") ?? row.Get("componenttype") ?? row.Get("type");
                 string unique = row.Get("uniquename") ?? row.Get("schemaname");
-                if (row.CriticalComplete && row.ParentStatus == "Unique" && !string.IsNullOrWhiteSpace(type) && row.ReferenceStatus == "Unique")
-                    row.CandidateA = "appelement-candidate-a:" + Type31EvidenceCollector.Frame(row.ParentKey, type, row.ReferenceKey);
+                UpdateCandidateA(row);
                 if (row.CriticalComplete && row.ParentStatus == "Unique" && !string.IsNullOrWhiteSpace(unique))
                     row.CandidateB = "appelement-candidate-b:" + Type31EvidenceCollector.Frame(row.ParentKey, unique.Trim());
             }
@@ -275,6 +287,79 @@ namespace D365SolutionComparer.Services.Membership
                 case "environmentvariabledefinition": return 380; default: return null; }
         }
         private static string PrimaryFor(string entity) => RawTypeFor(entity).HasValue ? entity == "systemform" ? "formid" : entity + "id" : null;
+
+        private static void UpdateCandidateA(AppElementRecordEvidence row)
+        {
+            // A proven Canvas App reference satisfies only the component-reference gate; it does not invent an element type.
+            row.CandidateA = row.Status == "Unique" && row.CriticalComplete && row.ParentIdentityComplete &&
+                row.ElementTypeComplete && row.ReferencedComponentIdentityComplete
+                ? "appelement-candidate-a:" + Type31EvidenceCollector.Frame(row.ParentKey, row.ElementType, row.ReferenceKey) : null;
+        }
+
+        private static void CompleteCanvasReferences(IOrganizationService sourceService, IOrganizationService targetService,
+            AppElementEvidenceReport report, CanvasAppEvidenceReport cached, CancellationToken token, Action<string> progress)
+        {
+            var sides = new[] { report.Source, report.Target }; var services = new[] { sourceService, targetService };
+            var cachedSides = new[] { cached?.Source, cached?.Target };
+            for (int i = 0; i < sides.Length; i++)
+            {
+                token.ThrowIfCancellationRequested(); var side = sides[i]; var prior = cachedSides[i];
+                // Cache lifetime is one completed membership presentation. Do not reuse data across organizations or snapshots.
+                if (prior != null && !ReferenceEquals(prior.Snapshot, side.Snapshot)) prior = null;
+                var refs = side.Rows.Values.Where(r => r.Status == "Unique" && r.CanvasReferenceId.HasValue)
+                    .Select(r => r.CanvasReferenceId.Value).Distinct().OrderBy(id => id).ToArray();
+                if (refs.Length == 0) continue;
+                var memberIds = side.Snapshot.Components.Where(c => c.Record.ComponentType == 300 && c.Record.ObjectId.HasValue)
+                    .Select(c => c.Record.ObjectId.Value).ToHashSet();
+                foreach (var id in refs.Where(memberIds.Contains))
+                {
+                    CanvasAppRecordEvidence row = null; prior?.Rows.TryGetValue(id, out row);
+                    if (row != null) side.CanvasReferenceRows[id] = row; // Read-only reuse; Analyze never mutates this cached report.
+                    else side.CanvasReferenceRows[id] = new CanvasAppRecordEvidence { ObjectId = id, Status = "Incomplete",
+                        Reason = "Capture Type 300 evidence first for this completed comparison; member evidence is not guessed or re-queried" };
+                }
+                var dependencyIds = refs.Where(id => !memberIds.Contains(id)).ToArray();
+                side.CanvasDependencies = Type300EvidenceCollector.ReadReferenced(services[i], side.Snapshot, side.Version,
+                    dependencyIds, prior?.Metadata, token, progress);
+                foreach (var row in side.CanvasDependencies.Rows) side.CanvasReferenceRows[row.Key] = row.Value;
+                side.Requests.AddRange(side.CanvasDependencies.Requests);
+                side.RetrievalDiagnostics.AddRange(side.CanvasDependencies.RetrievalDiagnostics);
+                side.Pages.AddRange(side.CanvasDependencies.Pages);
+                side.Schema.AddRange(side.CanvasDependencies.Schema); side.Relationships.AddRange(side.CanvasDependencies.Relationships);
+                side.CanvasMemberIds.UnionWith(memberIds);
+            }
+            foreach (var side in sides)
+            {
+                var other = side == report.Source ? report.Target : report.Source;
+                foreach (var row in side.Rows.Values.Where(r => r.CanvasReferenceId.HasValue))
+                {
+                    token.ThrowIfCancellationRequested();
+                    var state = "Incomplete"; CanvasAppRecordEvidence canvas = null;
+                    side.CanvasReferenceRows.TryGetValue(row.CanvasReferenceId.Value, out canvas);
+                    if (canvas?.Status == "Missing") state = "Missing";
+                    else if (canvas?.Status == "Faulted") state = "Faulted";
+                    else if (canvas?.Status == "Duplicate" || canvas?.DuplicateA == true) state = "Ambiguous";
+                    else if (canvas?.Status == "Unique" && canvas.PrimaryId == row.CanvasReferenceId && canvas.ObjectId == row.CanvasReferenceId &&
+                        canvas.CriticalComplete && canvas.CandidateA != null)
+                    {
+                        var local = side.CanvasReferenceRows.Values.Where(c => StringComparer.OrdinalIgnoreCase.Equals(c.CandidateA, canvas.CandidateA)).ToArray();
+                        var opposite = other.CanvasReferenceRows.Values.Where(c => StringComparer.OrdinalIgnoreCase.Equals(c.CandidateA, canvas.CandidateA)).ToArray();
+                        if (local.Length != 1 || opposite.Length > 1 || opposite.Any(c => c.DuplicateA || c.Status == "Duplicate")) state = "Ambiguous";
+                        else if (opposite.Length == 1 && opposite[0].Status == "Unique" && opposite[0].PrimaryId == opposite[0].ObjectId && opposite[0].CriticalComplete)
+                            state = side.CanvasMemberIds.Contains(row.CanvasReferenceId.Value) ? "VerifiedType300SemanticIdentity" : "VerifiedDependencyOnlyCanvasAppIdentity";
+                    }
+                    row.CanvasDependencyState = state;
+                    row.Context.Add("Canvas App dependency=" + state + "; localReference=" + row.CanvasReferenceId + "; backingPrimaryId=" + canvas?.PrimaryId +
+                        "; CandidateA=" + canvas?.CandidateA + "; CandidateB=" + canvas?.CandidateB + "; evidence only; no production identity/absence proof");
+                    row.CanvasCandidateA = canvas?.CandidateA; row.CanvasCandidateB = canvas?.CandidateB;
+                    if (!state.StartsWith("Verified", StringComparison.Ordinal)) continue;
+                    var keys = new HashSet<string>(row.OtherReferenceKeys, StringComparer.OrdinalIgnoreCase) { Type31EvidenceCollector.Frame("canvasapp-evidence-only", canvas.CandidateA) };
+                    row.ReferenceStatus = row.ReferenceUncertain || keys.Count != 1 ? "AmbiguousOrIncomplete" : "Unique";
+                    row.ReferenceKey = row.ReferenceStatus == "Unique" ? keys.Single() : null;
+                    UpdateCandidateA(row);
+                }
+            }
+        }
 
         private static Dictionary<Guid, LookupEvidence> RetrieveAppElements(IOrganizationService service, string primary, string[] columns,
             Guid[] ids, AppElementSideEvidence side, CancellationToken token, Action<string> progress)
@@ -454,6 +539,9 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly SortedDictionary<Guid, AppElementRecordEvidence> Rows = new SortedDictionary<Guid, AppElementRecordEvidence>();
         internal readonly List<string> Schema = new List<string>(), Relationships = new List<string>(), Requests = new List<string>(), Pages = new List<string>();
         internal readonly List<string> RetrievalDiagnostics = new List<string>();
+        internal CanvasAppSideEvidence CanvasDependencies;
+        internal readonly SortedDictionary<Guid, CanvasAppRecordEvidence> CanvasReferenceRows = new SortedDictionary<Guid, CanvasAppRecordEvidence>();
+        internal readonly HashSet<Guid> CanvasMemberIds = new HashSet<Guid>();
         internal bool Complete => Raw.All(r => r.Record.ObjectId.HasValue && r.Record.ObjectId != Guid.Empty) && Rows.Values.All(r => r.Status == "Unique" && r.CandidateA != null && !r.DuplicateA);
     }
     internal sealed class AppElementRecordEvidence
@@ -462,6 +550,9 @@ namespace D365SolutionComparer.Services.Membership
         internal string Status, Reason, ParentKey, ParentStatus, ReferenceKey, ReferenceStatus, CandidateA, CandidateB;
         internal bool DuplicateA, DuplicateB, RelationshipAmbiguous, ReferenceUncertain;
         internal bool CriticalComplete = true;
+        internal Guid? CanvasReferenceId;
+        internal string CanvasDependencyState = "Incomplete", CanvasCandidateA, CanvasCandidateB;
+        internal readonly HashSet<string> OtherReferenceKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal readonly HashSet<Guid> ParentIds = new HashSet<Guid>();
         internal readonly SortedDictionary<string, string> Fields = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal readonly SortedDictionary<string, Type31ContentFingerprint> Content = new SortedDictionary<string, Type31ContentFingerprint>(StringComparer.Ordinal);
@@ -469,6 +560,28 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly Dictionary<string, Tuple<string, string, Guid>> GuidLinks = new Dictionary<string, Tuple<string, string, Guid>>();
         internal readonly List<string> Context = new List<string>();
         internal string Get(string field) => Fields.TryGetValue(field, out var value) ? value : null;
+        internal string ElementTypeField => new[] { "elementtype", "componenttype", "type", "objectidtype" }
+            .FirstOrDefault(field => !string.IsNullOrWhiteSpace(Get(field)));
+        internal string ElementType => ElementTypeField == null ? null : Get(ElementTypeField).Trim();
+        internal bool ParentIdentityComplete => ParentStatus == "Unique" && !string.IsNullOrWhiteSpace(ParentKey);
+        internal bool ElementTypeComplete => ElementType != null;
+        internal bool ReferencedComponentIdentityComplete => ReferenceStatus == "Unique" && !string.IsNullOrWhiteSpace(ReferenceKey);
+        internal bool CompleteA => CandidateA != null && !DuplicateA;
+        internal string CandidateABlockingReason
+        {
+            get
+            {
+                var reasons = new List<string>();
+                if (Status != "Unique") reasons.Add("Backing AppElement correlation=" + Status + ": " + Reason);
+                if (!CriticalComplete) reasons.Add("Identity-critical AppElement fields unavailable");
+                if (!ParentIdentityComplete) reasons.Add("Parent AppModule identity incomplete; ParentStatus=" + ParentStatus);
+                if (!ElementTypeComplete) reasons.Add("Element/component type unavailable: elementtype, componenttype, type and objectidtype are blank or unavailable; Canvas App relationship does not supply an element type");
+                if (!ReferencedComponentIdentityComplete) reasons.Add("Referenced component identity incomplete; ReferenceStatus=" + ReferenceStatus +
+                    "; CanvasDependencyState=" + CanvasDependencyState + "; AdditionalReferenceUncertain=" + ReferenceUncertain);
+                if (DuplicateA) reasons.Add("Duplicate canonical Candidate A");
+                return reasons.Count == 0 ? "None" : string.Join("; ", reasons);
+            }
+        }
         internal string Evidence(string field) => Content.TryGetValue(field, out var hash) ? hash.Known ? hash.Evidence : null : Get(field);
     }
     internal sealed class AppElementPairEvidence
@@ -503,7 +616,7 @@ namespace D365SolutionComparer.Services.Membership
             {
                 foreach (var row in side.Rows.Values.Where(r => r.CandidateA == null))
                     Pairs.Add(new AppElementPairEvidence { Source = side == Source ? row : null, Target = side == Target ? row : null,
-                        Outcome = row.Status == "Duplicate" || row.ParentStatus == "Ambiguous" ? "Ambiguous" : "Incomplete", Basis = row.Reason });
+                        Outcome = row.Status == "Duplicate" || row.ParentStatus == "Ambiguous" || row.CanvasDependencyState == "Ambiguous" ? "Ambiguous" : "Incomplete", Basis = row.Reason });
                 foreach (var raw in side.Raw.Where(r => !r.Record.ObjectId.HasValue || r.Record.ObjectId == Guid.Empty))
                     Pairs.Add(new AppElementPairEvidence { Outcome = "Incomplete", Basis = (side == Source ? "Source" : "Target") + " blank ObjectId; no query/candidate" });
             }
@@ -530,7 +643,7 @@ namespace D365SolutionComparer.Services.Membership
             var text = new StringBuilder();
             text.AppendLine("TYPE 10072 APPELEMENT EVIDENCE - DEBUG ONLY");
             text.AppendLine("Type 10072 remains Unsupported / Indeterminate. No production identity, matching, definition contract or absence inference. No display-name/GUID/content-hash fallback.");
-            text.AppendLine("Candidate A hypothesis: parent appmodule.uniquename + element/component type + already-verified referenced component semantic identity. Candidate B hypothesis: parent appmodule.uniquename + element uniquename/schemaname. Trim + ordinal case-insensitive; B never repairs A ambiguity. Neither is approved portable identity.");
+            text.AppendLine("Candidate A hypothesis: parent appmodule.uniquename + element/component type + verified snapshot identity or independently paired Canvas App diagnostic Candidate A. Candidate B hypothesis: parent appmodule.uniquename + element uniquename/schemaname. Trim + ordinal case-insensitive; B never repairs A ambiguity. Neither is approved portable identity.");
             text.AppendLine("RAW TYPE 10072 MEMBERSHIP");
             foreach (var side in new[] { Source, Target })
             {
@@ -602,6 +715,45 @@ namespace D365SolutionComparer.Services.Membership
             if (differing.Length == 0) text.AppendLine("No unique differing-primary-ID Candidate A pair observed.");
             foreach (var pair in differing) Line(text, Source.Snapshot.SolutionUniqueName, pair.Source.PrimaryId, pair.Target.PrimaryId,
                 "Basis=Unique Candidate A only", pair.Source.CandidateA, "SourceManaged=" + pair.Source.Managed, "TargetManaged=" + pair.Target.Managed);
+            text.AppendLine("DEPENDENCY-ONLY CANVAS APP BACKING CORRELATION");
+            foreach (var side in new[] { Source, Target })
+            {
+                var label = side == Source ? "Source" : "Target";
+                foreach (var app in side.CanvasReferenceRows.Values)
+                    Line(text, label, app.ObjectId, "BackingPrimaryId=" + app.PrimaryId, "ExactLocalCorrelation=" + (app.PrimaryId == app.ObjectId),
+                        app.Status, app.Reason, "EvidenceOrigin=" + (side.CanvasMemberIds.Contains(app.ObjectId) ? "CompletedType300Capture" : "DependencyOnlySelectedIds"));
+            }
+            text.AppendLine("DEPENDENCY CANVAS APP RUNTIME-READABLE / FAULTED COLUMNS");
+            foreach (var side in new[] { Source, Target })
+            {
+                foreach (var item in side.CanvasDependencies?.RetrievalDiagnostics ?? Enumerable.Empty<string>()) Line(text, side == Source ? "Source" : "Target", item);
+                foreach (var app in side.CanvasReferenceRows.Values) Line(text, side == Source ? "Source" : "Target", app.ObjectId,
+                    "SucceededColumns=[" + string.Join(",", app.RuntimeColumns) + "]", "CriticalComplete=" + app.CriticalComplete);
+            }
+            text.AppendLine("DEPENDENCY CANVAS APP CANDIDATE A/B");
+            foreach (var side in new[] { Source, Target }) foreach (var app in side.CanvasReferenceRows.Values)
+            {
+                Line(text, side == Source ? "Source" : "Target", app.ObjectId, "CandidateA=" + (app.CandidateA ?? "Incomplete"), "CandidateB=" + (app.CandidateB ?? "NotAvailable"));
+                foreach (var field in app.Fields.Keys.Union(app.Content.Keys).OrderBy(f => f, StringComparer.Ordinal))
+                    Line(text, side == Source ? "Source" : "Target", app.ObjectId, field, app.Evidence(field) ?? "Unavailable");
+            }
+            text.AppendLine("CROSS-ENVIRONMENT DEPENDENCY SEMANTIC PAIRING");
+            foreach (var side in new[] { Source, Target }) foreach (var row in side.Rows.Values.Where(r => r.CanvasReferenceId.HasValue))
+                Line(text, side == Source ? "Source" : "Target", row.ObjectId, row.CanvasReferenceId, row.CanvasDependencyState,
+                    "CandidateA=" + (row.CanvasCandidateA ?? "Incomplete"), "CandidateB=" + (row.CanvasCandidateB ?? "NotAvailable"), "Evidence only; not production membership");
+            text.AppendLine("UPDATED TYPE 10072 CANDIDATE A COMPLETENESS");
+            foreach (var side in new[] { Source, Target }) foreach (var row in side.Rows.Values)
+                Line(text, side == Source ? "Source" : "Target", row.ObjectId, "ParentIdentityComplete=" + row.ParentIdentityComplete,
+                    "ElementTypeComplete=" + row.ElementTypeComplete, "ElementTypeField=" + row.ElementTypeField, "ElementType=" + row.ElementType,
+                    "ReferencedComponentIdentityComplete=" + row.ReferencedComponentIdentityComplete, "CompleteA=" + row.CompleteA,
+                    "BlockingReason=" + row.CandidateABlockingReason,
+                    "DuplicateA=" + row.DuplicateA, "ParentStatus=" + row.ParentStatus, "ReferenceStatus=" + row.ReferenceStatus, row.CanvasDependencyState);
+            text.AppendLine("UPDATED TYPE 10072 DIFFERING-PRIMARY-ID SEMANTIC PAIRS");
+            foreach (var pair in differing) Line(text, pair.Source.ObjectId, pair.Target.ObjectId, pair.Source.CandidateA,
+                "BothCompleteAndUnique=True; DifferentPrimaryIds=True; no GUID/B/hash pairing");
+            Line(text, "UniqueDifferingPrimaryIdPairs=" + differing.Length, "CanvasCandidateACollisionGroups=" +
+                new[] { Source, Target }.Sum(side => side.CanvasReferenceRows.Values.Where(r => r.CandidateA != null)
+                    .GroupBy(r => r.CandidateA, StringComparer.OrdinalIgnoreCase).Count(g => g.Count() > 1 || g.Any(r => r.DuplicateA))));
             text.AppendLine("PORTABILITY ASSESSMENT");
             Line(text, "UniqueSemanticPairs=" + Pairs.Count(p => p.Outcome == "SemanticPair"), "DifferingPrimaryIdSemanticPairs=" + differing.Length,
                 "SourceEvidenceComplete=" + Source.Complete, "TargetEvidenceComplete=" + Target.Complete);
@@ -615,7 +767,9 @@ namespace D365SolutionComparer.Services.Membership
                     "AppElementQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple appelement;", StringComparison.Ordinal)),
                     "ParentAppModuleSchemaRequests=" + side.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(appmodule,", StringComparison.Ordinal)),
                     "ParentAppModuleQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple appmodule;", StringComparison.Ordinal)),
-                    "ReferencedComponentQueries=0; existing snapshot portable identities only");
+                    "CanvasAppDependencySchemaRequests=" + side.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(canvasapp,", StringComparison.Ordinal)),
+                    "CanvasAppDependencyQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple canvasapp;", StringComparison.Ordinal)),
+                    "CanvasApp Type300 member rows/metadata reuse requires a completed capture from this exact snapshot; no member re-query");
                 for (int i = 0; i < side.Requests.Count; i++) Line(text, label, i + 1, side.Requests[i]);
             }
             return text.ToString();
