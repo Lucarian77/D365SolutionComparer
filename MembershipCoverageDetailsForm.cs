@@ -31,7 +31,7 @@ namespace D365SolutionComparer
             , Action captureType92Evidence = null, Action captureType59Evidence = null,
             Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
             Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null,
-            Action captureType36Evidence = null, Action captureType31Evidence = null, Action captureType10072Evidence = null, Action captureType300Evidence = null, Action captureType74Evidence = null
+            Action captureType36Evidence = null, Action captureType31Evidence = null, Action captureType10072Evidence = null, Action captureType300Evidence = null, Action captureType74Evidence = null, Action captureType511Evidence = null
 #endif
             )
         {
@@ -236,6 +236,16 @@ namespace D365SolutionComparer
             };
             type74.Click += (sender, args) => captureType74Evidence?.Invoke();
             buttons.Controls.Add(type74);
+            var type511 = new Button
+            {
+                Text = "Capture Type 511 Team Template Evidence...",
+                Width = 255,
+                Enabled = captureType511Evidence != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            type511.Click += (sender, args) => captureType511Evidence?.Invoke();
+            buttons.Controls.Add(type511);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);

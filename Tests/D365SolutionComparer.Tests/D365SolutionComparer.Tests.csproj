@@ -80,6 +80,7 @@
     <Compile Include="Type10072EvidenceCollectorTests.cs" />
     <Compile Include="Type300EvidenceCollectorTests.cs" />
     <Compile Include="Type74EvidenceCollectorTests.cs" />
+    <Compile Include="Type511EvidenceCollectorTests.cs" />
     <Compile Include="CloudFlowSavedQueryEvidenceTests.cs" />
     <Compile Include="PrimaryIdMembershipResolutionTests.cs" />
   </ItemGroup>
