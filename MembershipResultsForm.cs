@@ -28,6 +28,7 @@ namespace D365SolutionComparer
         internal Action CaptureType31Evidence { get; set; }
         internal Action CaptureType10072Evidence { get; set; }
         internal Action CaptureType300Evidence { get; set; }
+        internal Action CaptureType74Evidence { get; set; }
 #endif
 
         public MembershipResultsForm(MembershipComparisonPresentation presentation,
@@ -153,7 +154,7 @@ namespace D365SolutionComparer
                 sourceService, targetService, captureAppSettingEvidence
 #if DEBUG
                 , CaptureType92Evidence, CaptureType59Evidence, DiscoverType59Evidence,
-                CaptureCloudFlowEvidence, CaptureSavedQueryEvidence, CaptureUnsupportedCoverageInventory, CaptureType36Evidence, CaptureType31Evidence, CaptureType10072Evidence, CaptureType300Evidence
+                CaptureCloudFlowEvidence, CaptureSavedQueryEvidence, CaptureUnsupportedCoverageInventory, CaptureType36Evidence, CaptureType31Evidence, CaptureType10072Evidence, CaptureType300Evidence, CaptureType74Evidence
 #endif
                 ))
                 form.ShowDialog(this);

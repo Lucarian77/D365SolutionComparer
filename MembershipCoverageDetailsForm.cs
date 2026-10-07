@@ -31,7 +31,7 @@ namespace D365SolutionComparer
             , Action captureType92Evidence = null, Action captureType59Evidence = null,
             Action discoverType59Evidence = null, Action captureCloudFlowEvidence = null,
             Action captureSavedQueryEvidence = null, Action captureUnsupportedCoverageInventory = null,
-            Action captureType36Evidence = null, Action captureType31Evidence = null, Action captureType10072Evidence = null, Action captureType300Evidence = null
+            Action captureType36Evidence = null, Action captureType31Evidence = null, Action captureType10072Evidence = null, Action captureType300Evidence = null, Action captureType74Evidence = null
 #endif
             )
         {
@@ -226,6 +226,16 @@ namespace D365SolutionComparer
             };
             type300.Click += (sender, args) => captureType300Evidence?.Invoke();
             buttons.Controls.Add(type300);
+            var type74 = new Button
+            {
+                Text = "Capture Type 74 MaskingRule Evidence...",
+                Width = 255,
+                Enabled = captureType74Evidence != null &&
+                    presentation?.Source.Snapshot?.State == MembershipSnapshotState.Complete &&
+                    presentation.Target.Snapshot?.State == MembershipSnapshotState.Complete
+            };
+            type74.Click += (sender, args) => captureType74Evidence?.Invoke();
+            buttons.Controls.Add(type74);
 #endif
             buttons.Controls.Add(export);
             buttons.Controls.Add(compare);
