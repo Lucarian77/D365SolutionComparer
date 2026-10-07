@@ -35,20 +35,23 @@ namespace D365SolutionComparer.Services.Membership
         }
 
         private static CanvasAppSideEvidence Read(IOrganizationService service, MembershipSnapshot snapshot, string version,
-            CancellationToken token, Action<string> progress)
+            CancellationToken token, Action<string> progress, Guid[] referencedIds = null, EntityMetadata reusedMetadata = null)
         {
             if (service == null) throw new ArgumentNullException(nameof(service));
             token.ThrowIfCancellationRequested();
             var side = new CanvasAppSideEvidence { Snapshot = snapshot, Version = version };
-            side.Raw.AddRange(snapshot.Components.Where(c => c.Record.ComponentType == 300));
-            var ids = side.Raw.Where(c => c.Record.ObjectId.HasValue && c.Record.ObjectId != Guid.Empty)
-                .Select(c => c.Record.ObjectId.Value).Distinct().OrderBy(id => id).ToArray();
+            side.Raw.AddRange(snapshot.Components.Where(c => c.Record.ComponentType == 300 &&
+                (referencedIds == null || c.Record.ObjectId.HasValue && referencedIds.Contains(c.Record.ObjectId.Value))));
+            var ids = (referencedIds ?? side.Raw.Where(c => c.Record.ObjectId.HasValue && c.Record.ObjectId != Guid.Empty)
+                .Select(c => c.Record.ObjectId.Value).ToArray()).Where(id => id != Guid.Empty).Distinct().OrderBy(id => id).ToArray();
             foreach (var id in ids) side.Rows[id] = new CanvasAppRecordEvidence { ObjectId = id, Status = "Incomplete", Reason = "Schema not verified" };
             if (ids.Length == 0) return side;
-            var metadata = Schema(service, "canvasapp", side, token);
+            var metadata = reusedMetadata ?? Schema(service, "canvasapp", side, token);
             if (metadata == null)
             { foreach (var row in side.Rows.Values) { row.Status = side.SchemaFailure; row.Reason = "Canvas App schema unavailable; no guessed columns"; } return side; }
             side.PrimaryId = metadata.PrimaryIdAttribute;
+            side.Metadata = metadata;
+            if (reusedMetadata != null) side.RetrievalDiagnostics.Add("Canvas App metadata reused from completed Type 300 evidence for the same snapshot");
             var columns = new List<string>(); var hashes = new HashSet<string>(StringComparer.Ordinal);
             foreach (var a in metadata.Attributes.OrderBy(a => a.LogicalName, StringComparer.Ordinal))
             {
@@ -102,8 +105,16 @@ namespace D365SolutionComparer.Services.Membership
                 if (!string.IsNullOrWhiteSpace(row.Get("displayname")) && !string.IsNullOrWhiteSpace(row.Get("appcomponenttype")))
                     row.CandidateB = "canvasapp-candidate-b:" + Type31EvidenceCollector.Frame(row.Get("displayname"), row.Get("appcomponenttype"));
             }
-            CaptureAppElementLinks(service, side, token, progress);
+            if (referencedIds == null) CaptureAppElementLinks(service, side, token, progress);
             return side;
+        }
+
+        // Dependency scope is supplied only by uniquely correlated AppElement references, never an environment-wide scan.
+        internal static CanvasAppSideEvidence ReadReferenced(IOrganizationService service, MembershipSnapshot snapshot, string version,
+            Guid[] referencedIds, EntityMetadata reusedMetadata, CancellationToken token, Action<string> progress)
+        {
+            if (referencedIds == null) throw new ArgumentNullException(nameof(referencedIds));
+            return Read(service, snapshot, version, token, progress, referencedIds, reusedMetadata);
         }
 
         private static void CaptureAppElementLinks(IOrganizationService service, CanvasAppSideEvidence side, CancellationToken token, Action<string> progress)
@@ -335,6 +346,7 @@ namespace D365SolutionComparer.Services.Membership
     {
         internal MembershipSnapshot Snapshot;
         internal string Version, PrimaryId, CandidateField, SchemaFailure;
+        internal EntityMetadata Metadata;
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, CanvasAppRecordEvidence> Rows = new SortedDictionary<Guid, CanvasAppRecordEvidence>();
         internal readonly List<CanvasAppDependencyEvidence> Links = new List<CanvasAppDependencyEvidence>();
