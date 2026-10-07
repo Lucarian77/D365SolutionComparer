@@ -77,6 +77,7 @@
     <Compile Include="UnsupportedCoverageInventoryTests.cs" />
     <Compile Include="Type36EvidenceCollectorTests.cs" />
     <Compile Include="Type31EvidenceCollectorTests.cs" />
+    <Compile Include="Type10072EvidenceCollectorTests.cs" />
     <Compile Include="CloudFlowSavedQueryEvidenceTests.cs" />
     <Compile Include="PrimaryIdMembershipResolutionTests.cs" />
   </ItemGroup>
