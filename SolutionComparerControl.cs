@@ -791,6 +791,8 @@ namespace D365SolutionComparer
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
                     resultsForm.CaptureType31Evidence = () => CaptureType31Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
+                    resultsForm.CaptureType74Evidence = () => CaptureType74Evidence(presentation,
+                        selected.SourceVersion, selected.TargetVersion, sourceService, destinationService);
                     CanvasAppEvidenceReport completedType300Evidence = null;
                     resultsForm.CaptureType10072Evidence = () => CaptureType10072Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService, completedType300Evidence);
@@ -858,6 +860,58 @@ namespace D365SolutionComparer
                     }
                     if (!(args.Result is string evidence)) return;
                     using (var form = new Type31EvidenceResultsForm(evidence))
+                    {
+                        var owner = FindForm();
+                        if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);
+                    }
+                }
+            });
+        }
+
+        private void CaptureType74Evidence(MembershipComparisonPresentation presentation,
+            string sourceVersion, string targetVersion, OrgService sourceService, OrgService destinationService)
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Capturing read-only Type 74 MaskingRule evidence...",
+                IsCancelable = true,
+                Work = (worker, args) =>
+                {
+                    using (var cancellation = new CancellationTokenSource())
+                    using (var watcher = new System.Threading.Timer(_ =>
+                    {
+                        try { if (worker.CancellationPending) cancellation.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    }, null, 0, 100))
+                    {
+                        try
+                        {
+                            var report = new Type74EvidenceCollector().Capture(sourceService, presentation.Source.Snapshot,
+                                sourceVersion, destinationService, presentation.Target.Snapshot, targetVersion, cancellation.Token,
+                                message => worker.ReportProgress(50, new MembershipUiProgress(message)));
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = report.Build();
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                        }
+                        catch (OperationCanceledException) { args.Cancel = true; }
+                    }
+                },
+                ProgressChanged = args =>
+                {
+                    var progress = args.UserState as MembershipUiProgress;
+                    if (progress != null) SetWorkingMessage(progress.Message, 430, 150);
+                },
+                PostWorkCallBack = args =>
+                {
+                    if (args.Cancelled) return;
+                    if (args.Error != null)
+                    {
+                        MessageBox.Show(this, "Type 74 evidence capture failed; server details withheld.",
+                            "MaskingRule Evidence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    if (!(args.Result is string evidence)) return;
+                    using (var form = new Type74EvidenceResultsForm(evidence))
                     {
                         var owner = FindForm();
                         if (owner == null) form.ShowDialog(); else form.ShowDialog(owner);

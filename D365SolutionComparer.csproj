@@ -112,6 +112,8 @@
     <Compile Include="Services\Membership\Type36EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
     <Compile Include="Services\Membership\Type31EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
     <Compile Include="Services\Membership\Type10072EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Services\Membership\Type74EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
+    <Compile Include="Type74EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' "><SubType>Form</SubType></Compile>
     <Compile Include="Services\Membership\Type300EvidenceCollector.cs" Condition=" '$(Configuration)' == 'Debug' " />
     <Compile Include="Type300EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' "><SubType>Form</SubType></Compile>
     <Compile Include="Type10072EvidenceResultsForm.cs" Condition=" '$(Configuration)' == 'Debug' "><SubType>Form</SubType></Compile>
