@@ -13,6 +13,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Metadata.Query;
 using Microsoft.Xrm.Sdk.Query;
 using static D365SolutionComparer.Tests.MembershipTestData;
 
@@ -128,7 +129,7 @@ namespace D365SolutionComparer.Tests
             var pair = new Pair();
             for (int i = 0; i < count; i++) { var row = pair.Source.Add(title: "Template " + i); pair.Source.Reference(row.Id); }
             var report = pair.Capture(); Assert.AreEqual(count, report.Source.Rows.Count);
-            Assert.AreEqual(count * 2, report.Source.Raw.Count); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(count * 2, report.Source.Raw.Count); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
             Assert.AreEqual(requests, pair.Source.Service.Calls);
             foreach (var query in pair.Source.Queries)
             {
@@ -455,7 +456,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(inventory, UnsupportedCoverageInventory.Build(new[] { new InventoryCheckpoint(source) }, new[] { new InventoryCheckpoint(target) }).Text);
             Assert.IsTrue(source.Components.Concat(target.Components).All(c => c.Status == IdentityResolutionStatus.Unsupported && c.ComparisonKey == null));
             Assert.AreEqual(2, presentation.Summary.Unsupported); Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
-            Assert.AreEqual(1, pair.Source.Service.ExecuteCalls); Assert.AreEqual(1, pair.Target.Service.ExecuteCalls);
+            Assert.AreEqual(2, pair.Source.Service.ExecuteCalls); Assert.AreEqual(2, pair.Target.Service.ExecuteCalls);
         }
 
         [TestMethod]
@@ -516,6 +517,154 @@ namespace D365SolutionComparer.Tests
             if (error != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
 
+        [DataTestMethod]
+        [DataRow("equal", true)] [DataRow("table", false)] [DataRow("language", false)] [DataRow("title", false)]
+        public void FixedProposedCandidateUsesVerifiedTableTitleAndExactLanguage(string difference, bool equal)
+        {
+            var pair = new Pair(); var left = pair.Source.Add(title: " Fixed Title "); var right = pair.Target.Add(title: "fixed title");
+            if (difference == "table") right["templatetypecode"] = "contact";
+            if (difference == "language") right["languagecode"] = 1036;
+            if (difference == "title") right["title"] = "Other title";
+            var report = pair.Capture(); var source = report.Source.Rows[left.Id]; var target = report.Target.Rows[right.Id];
+            Assert.AreNotEqual(left.Id, right.Id); Assert.AreEqual("Verified", source.Scope.Status); Assert.IsNotNull(source.CandidateP);
+            Assert.AreEqual(equal, StringComparer.OrdinalIgnoreCase.Equals(source.CandidateP, target.CandidateP));
+            Assert.AreEqual(equal ? 1 : 0, report.Build().Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).Count(l => l.StartsWith("ScopedPrimaryNamePairHypothesis\t", StringComparison.Ordinal)));
+            StringAssert.Contains(report.Build(), "UniqueCandidatePPairs=" + (equal ? "1" : "0"));
+            if (equal) StringAssert.Contains(report.Build(), "DifferentPrimaryId=1");
+            Assert.IsFalse(source.CandidateP.Contains(left.Id.ToString()));
+        }
+
+        [DataTestMethod]
+        [DataRow("title", "blank")] [DataRow("title", "unavailable")]
+        [DataRow("languagecode", "blank")] [DataRow("languagecode", "unavailable")]
+        [DataRow("templatetypecode", "blank")] [DataRow("templatetypecode", "unavailable")]
+        public void MissingFixedIdentityDimensionCannotUseFallbackOrContent(string field, string failure)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); row["uniquename"] = "stronger_identifier";
+            row["schemaname"] = "AnotherIdentifier"; row["objecttypecode"] = "account";
+            if (failure == "blank") row.Attributes.Remove(field);
+            else Set(pair.Source.Attributes.Single(a => a.LogicalName == field), "IsValidForRead", false);
+            var evidence = pair.Capture().Source.Rows[row.Id];
+            Assert.IsNull(evidence.CandidateP); Assert.IsNotNull(evidence.Content["body"].Sha256);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(evidence.ProposedBlockingReason));
+            if (field == "templatetypecode") Assert.IsNull(evidence.Scope); // Existing A may use objecttypecode; P never does.
+        }
+
+        [DataTestMethod]
+        [DataRow("missing")] [DataRow("ambiguous")] [DataRow("fault")]
+        public void NumericScopeRequiresUniquePublishedLogicalTableMetadata(string state)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); row["templatetypecode"] = "10000";
+            var normal = pair.Source.Service.ExecuteRequest;
+            pair.Source.Service.ExecuteRequest = request =>
+            {
+                if (!(request is RetrieveMetadataChangesRequest)) return normal(request);
+                var query = ((RetrieveMetadataChangesRequest)request).Query;
+                Assert.AreEqual("ObjectTypeCode", query.Criteria.Conditions.Single().PropertyName);
+                Assert.AreEqual(10000, query.Criteria.Conditions.Single().Value);
+                if (state == "fault") throw new FaultException(Secret);
+                var entities = new EntityMetadataCollection();
+                if (state == "ambiguous") for (int i = 0; i < 2; i++) { var entity = new EntityMetadata { LogicalName = "custom_table", MetadataId = Guid.NewGuid() }; Set(entity, "ObjectTypeCode", 10000); entities.Add(entity); }
+                var response = new RetrieveMetadataChangesResponse(); response.Results["EntityMetadata"] = entities; return response;
+            };
+            var report = pair.Capture(); var evidence = report.Source.Rows[row.Id];
+            Assert.AreEqual("Unique", evidence.Status); Assert.IsNotNull(evidence.CandidateA); Assert.IsNull(evidence.CandidateP);
+            Assert.AreEqual(state == "ambiguous" ? "Ambiguous" : state == "fault" ? "Faulted" : "Incomplete", evidence.Scope.Status);
+            Assert.IsFalse(report.Build().Contains(Secret));
+        }
+
+        [TestMethod]
+        public void NumericScopeMapsToLogicalNameAndNeverBecomesPortableNumericKey()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add(); left["templatetypecode"] = "10000"; right["templatetypecode"] = "10001";
+            foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                var normal = side.Service.ExecuteRequest;
+                side.Service.ExecuteRequest = request => {
+                    if (!(request is RetrieveMetadataChangesRequest)) return normal(request);
+                    var entity = new EntityMetadata { LogicalName = "custom_table", MetadataId = Guid.NewGuid() };
+                    Set(entity, "ObjectTypeCode", (int)((RetrieveMetadataChangesRequest)request).Query.Criteria.Conditions.Single().Value);
+                    var response = new RetrieveMetadataChangesResponse(); response.Results["EntityMetadata"] = new EntityMetadataCollection { entity }; return response;
+                };
+            }
+            var report = pair.Capture(); Assert.AreEqual(report.Source.Rows[left.Id].CandidateP, report.Target.Rows[right.Id].CandidateP);
+            Assert.AreNotEqual(report.Source.Rows[left.Id].CandidateA, report.Target.Rows[right.Id].CandidateA);
+            StringAssert.Contains(report.Source.Rows[left.Id].CandidateP, "custom_table"); Assert.IsFalse(report.Source.Rows[left.Id].CandidateP.Contains("10000"));
+        }
+
+        [TestMethod]
+        public void CollisionMatrixRetainsLanguageAndDoesNotCountRepeatedMembershipAsBackingCollision()
+        {
+            var pair = new Pair(); var first = pair.Source.Add(); pair.Source.Reference(first.Id);
+            pair.Source.Add()["languagecode"] = 1036;
+            var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.All(r => !r.DuplicateP));
+            StringAssert.Contains(report.Build(), "Source\tTitle\tCollisionGroups=1");
+            StringAssert.Contains(report.Build(), "Source\tTitle+VerifiedTable\tCollisionGroups=1");
+            StringAssert.Contains(report.Build(), "Source\tTitle+VerifiedTable+Language\tCollisionGroups=0");
+            pair.Source.Add(); report = pair.Capture(); Assert.AreEqual(2, report.Source.Rows.Values.Count(r => r.DuplicateP));
+            StringAssert.Contains(report.Build(), "CandidatePCollisionGroups=1");
+            Assert.IsFalse(report.Build().Split('\n').Any(l => l.StartsWith("ScopedPrimaryNamePairHypothesis\t")));
+        }
+
+        [DataTestMethod]
+        [DataRow("body")] [DataRow("subject")] [DataRow("description")] [DataRow("generationtypecode")]
+        public void DefinitionEvidenceDifferenceDoesNotManufactureOrChangeProposedIdentity(string field)
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add(); right["ismanaged"] = true;
+            right[field] = field == "generationtypecode" ? (object)2 : "Private changed content";
+            var report = pair.Capture(); Assert.AreEqual(report.Source.Rows[left.Id].CandidateP, report.Target.Rows[right.Id].CandidateP);
+            StringAssert.Contains(report.Build(), "ManagedTransition=True"); StringAssert.Contains(report.Build(), "DifferentPrimaryId=1");
+            if (field != "generationtypecode") StringAssert.Contains(report.Build(), "DifferentDefinitionContent=1");
+            else StringAssert.Contains(report.Build(), "Generation/template kind and personal scope remain Unresolved");
+            Assert.IsFalse(report.Build().Contains("Private changed content"));
+        }
+
+        [TestMethod]
+        public void SamePrimaryIdWithDifferentTitleCannotCreateSemanticPairOrProvePortability()
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); pair.Target.Add(row.Id, "Different title");
+            var report = pair.Capture(); Assert.AreEqual(0, report.Lifecycle.Count(e => e.Pair));
+            StringAssert.Contains(report.Build(), "UniqueCandidatePPairs=0"); StringAssert.Contains(report.Build(), "Same templateid does not prove portability");
+        }
+
+        [DataTestMethod]
+        [DataRow("body")] [DataRow("generationtypecode")]
+        public void FullContentQueryFaultRetriesSelectedIdentityColumnsWithoutPretendingHashesAreBlank(string faultingField)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); var normal = pair.Source.Service.RetrievePage;
+            pair.Source.Service.RetrievePage = query => {
+                Assert.IsTrue(query.Criteria.Conditions.Single().Values.Cast<Guid>().SequenceEqual(new[] { row.Id }));
+                if (query.ColumnSet.Columns.Contains(faultingField)) throw new FaultException(Secret);
+                return normal(query);
+            };
+            var report = pair.Capture(); var evidence = report.Source.Rows[row.Id];
+            Assert.AreEqual("Unique", evidence.Status); Assert.IsNotNull(evidence.CandidateA); Assert.IsNotNull(evidence.CandidateP);
+            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.IsFalse(evidence.Content.ContainsKey("body"));
+            Assert.IsFalse(evidence.RuntimeColumns.Contains("generationtypecode"));
+            Assert.IsTrue(report.Source.Batches.Last().Complete); Assert.IsFalse(report.Source.Batches.First().Complete);
+            StringAssert.Contains(report.Build(), "Optional content unavailable"); Assert.IsFalse(report.Build().Contains(Secret));
+        }
+
+        [TestMethod]
+        public void CompletedTableSnapshotIsReusedWithoutScopeMetadataRequest()
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); pair.Source.Raw.Add(Identity("account", 1));
+            var report = pair.Capture(); Assert.IsNotNull(report.Source.Rows[row.Id].CandidateP);
+            Assert.AreEqual(1, pair.Source.Service.ExecuteCalls); Assert.AreEqual(1, pair.Source.Service.Calls);
+            StringAssert.Contains(report.Build(), "Completed snapshot Table correlation");
+        }
+
+        [TestMethod]
+        public void ScopeMetadataCancellationPropagatesAndDoesNotStartTargetCapture()
+        {
+            var pair = new Pair(); pair.Source.Add(); using (var cancel = new CancellationTokenSource()) {
+                var normal = pair.Source.Service.ExecuteRequest;
+                pair.Source.Service.ExecuteRequest = request => { if (request is RetrieveMetadataChangesRequest) cancel.Cancel(); return normal(request); };
+                Assert.ThrowsException<OperationCanceledException>(() => pair.Capture(cancel.Token));
+                Assert.AreEqual(0, pair.Target.Service.ExecuteCalls + pair.Target.Service.Calls);
+            }
+        }
+
         private static MembershipComparisonPresentation Present(MembershipSnapshot source, MembershipSnapshot target) => new MembershipResultPresenter().Create(
             MembershipEnvironmentResult.FromSnapshot("Source", source, 4, TimeSpan.Zero), MembershipEnvironmentResult.FromSnapshot("Target", target, 4, TimeSpan.Zero));
         private static void Set(object target, string property, object value) => target.GetType().GetProperty(property).SetValue(target, value, null);
@@ -541,8 +690,9 @@ namespace D365SolutionComparer.Tests
                 foreach (var field in Type36EvidenceCollector.AuditFields)
                 {
                     AttributeMetadata attribute = field == "templateid" || field == "templateidunique" ? (AttributeMetadata)new UniqueIdentifierAttributeMetadata() :
-                        field == "title" || field == "templatetypecode" || field == "objecttypecode" ? (AttributeMetadata)new StringAttributeMetadata() :
-                        field == "ismanaged" || field == "ispersonal" ? (AttributeMetadata)new BooleanAttributeMetadata() : field == "ownerid" ? (AttributeMetadata)new LookupAttributeMetadata() : new IntegerAttributeMetadata();
+                        field == "title" || field == "templatetypecode" || field == "objecttypecode" || field == "uniquename" || field == "schemaname" ? (AttributeMetadata)new StringAttributeMetadata() :
+                        field == "ismanaged" || field == "ispersonal" ? (AttributeMetadata)new BooleanAttributeMetadata() :
+                        new[] { "ownerid", "organizationid", "solutionid", "owninguser", "owningteam" }.Contains(field) ? (AttributeMetadata)new LookupAttributeMetadata() : new IntegerAttributeMetadata();
                     Attributes.Add(Attribute(field, attribute));
                 }
                 foreach (var field in Type36EvidenceCollector.ContentFields) Attributes.Add(Attribute(field, new MemoAttributeMetadata()));
@@ -550,6 +700,20 @@ namespace D365SolutionComparer.Tests
                 {
                     ExecuteRequest = request =>
                     {
+                        if (request is RetrieveMetadataChangesRequest)
+                        {
+                            var scoped = ((RetrieveMetadataChangesRequest)request).Query;
+                            CollectionAssert.AreEquivalent(new[] { "MetadataId", "LogicalName", "ObjectTypeCode" }, scoped.Properties.PropertyNames.ToArray());
+                            Assert.AreEqual(LogicalOperator.Or, scoped.Criteria.FilterOperator);
+                            Assert.IsTrue(scoped.Criteria.Conditions.Count <= 200);
+                            var entities = new EntityMetadataCollection();
+                            foreach (var condition in scoped.Criteria.Conditions)
+                            {
+                                Assert.AreEqual("LogicalName", condition.PropertyName);
+                                entities.Add(new EntityMetadata { MetadataId = Guid.NewGuid(), LogicalName = ((string)condition.Value).ToLowerInvariant() });
+                            }
+                            var response = new RetrieveMetadataChangesResponse(); response.Results["EntityMetadata"] = entities; return response;
+                        }
                         Assert.IsInstanceOfType(request, typeof(RetrieveEntityRequest));
                         var query = (RetrieveEntityRequest)request; Assert.AreEqual("template", query.LogicalName);
                         Assert.AreEqual(EntityFilters.Attributes, query.EntityFilters); Assert.IsFalse(query.RetrieveAsIfPublished);
@@ -571,7 +735,7 @@ namespace D365SolutionComparer.Tests
             internal RetrieveEntityResponse Schema()
             {
                 var metadata = new EntityMetadata { LogicalName = "template" };
-                Set(metadata, "PrimaryIdAttribute", "templateid"); Set(metadata, "Attributes", Attributes.ToArray());
+                Set(metadata, "PrimaryIdAttribute", "templateid"); Set(metadata, "PrimaryNameAttribute", "title"); Set(metadata, "Attributes", Attributes.ToArray());
                 var result = new RetrieveEntityResponse(); result.Results["EntityMetadata"] = metadata; return result;
             }
             internal Entity Add(Guid? id = null, string title = "Customer follow-up")
