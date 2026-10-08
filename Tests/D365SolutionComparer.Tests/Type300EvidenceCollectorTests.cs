@@ -308,6 +308,137 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual(text, report.Build()); StringAssert.Contains(text, "TotalReads=3"); StringAssert.Contains(text, "AdditionalWhoAmI=0");
             StringAssert.Contains(text, "Writes=0"); StringAssert.Contains(text, "NormalMembershipEvidenceRequests=0");
         }
+        [TestMethod]
+        public void FixedNameCandidatePairsDifferingIdsWithoutChangingCandidateAOrReads()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(name: " publisher_Canvas "); var right = pair.Target.Add(name: "PUBLISHER_canvas"); right["ismanaged"] = true;
+            var report = pair.Capture(); var proposed = report.ProposedPairs.Single();
+            Assert.AreNotEqual(left.Id, right.Id); Assert.AreEqual("FixedFieldPairHypothesis", proposed.Outcome);
+            Assert.IsTrue(proposed.Source.CompleteP && proposed.Target.CompleteP);
+            Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(proposed.Source.CandidateP, proposed.Target.CandidateP));
+            StringAssert.Contains(proposed.Source.CandidateP, "name"); Assert.AreEqual(2, pair.Source.Service.Calls);
+            StringAssert.Contains(report.Build(), "CandidateP=EqualObserved"); StringAssert.Contains(report.Build(), "ManagedTransition=True");
+            Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome);
+        }
+        [TestMethod]
+        public void FixedNameMismatchNeverPairsThroughOtherIdentifierDisplayGuidOrHash()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(name: "one"); pair.Target.Add(left.Id, "two");
+            var report = pair.Capture(); Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "OneSidedEvidence"));
+        }
+        [DataTestMethod, DataRow(""), DataRow(" "), DataRow("d956ce77-da6f-4cb0-937d-1e0b5958a780")]
+        public void FixedNameBlankOrGuidRemainsIncompleteWithoutFallback(string name)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(name: name); pair.Source.Attributes.Add(Attribute("uniquename", new StringAttributeMetadata())); row["uniquename"] = "independent_candidate_a";
+            var evidence = pair.Capture().Source.Rows.Values.Single(); Assert.IsNotNull(evidence.CandidateA); Assert.IsNull(evidence.CandidateP);
+            StringAssert.Contains(evidence.ProposedBlockingReason, "no fallback");
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void FixedNameUnavailableOrRuntimeFaultDoesNotSelectUniquename(bool runtimeFault)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); pair.Source.Attributes.Add(Attribute("uniquename", new StringAttributeMetadata())); row["uniquename"] = "portable_stronger";
+            if (runtimeFault) Fail(pair.Source, "name"); else pair.Source.Attributes.RemoveAll(a => a.LogicalName == "name");
+            var evidence = pair.Capture().Source.Rows.Values.Single(); Assert.IsNotNull(evidence.CandidateA); Assert.IsNull(evidence.CandidateP);
+            StringAssert.Contains(evidence.ProposedBlockingReason, "Fixed identifier name unavailable/faulted");
+        }
+        [TestMethod]
+        public void StrongerFieldMetadataDifferenceCannotChangeFixedContractOrRepairCandidateA()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); pair.Target.Add();
+            pair.Source.Attributes.Add(Attribute("uniquename", new StringAttributeMetadata())); left["uniquename"] = "different_contract";
+            var report = pair.Capture(); Assert.IsTrue(report.Pairs.All(p => p.Outcome == "OneSidedEvidence"));
+            Assert.AreEqual("FixedFieldPairHypothesis", report.ProposedPairs.Single().Outcome);
+            StringAssert.Contains(report.Build(), "CandidateASelectedFieldEquality=DifferentObserved");
+            Assert.IsTrue(report.Source.Rows.Values.Single().CandidateP.Contains("name"));
+        }
+        [DataTestMethod, DataRow(1, true), DataRow(2, false)]
+        public void ExplicitKindHypothesisUsesExactOptionsWhileDefaultRoleRemainsUnresolved(int targetKind, bool equal)
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add();
+            foreach (var side in new[] { pair.Source, pair.Target }) side.Attributes.Add(Attribute("canvasapptype", new PicklistAttributeMetadata()));
+            left["canvasapptype"] = new OptionSetValue(1); right["canvasapptype"] = new OptionSetValue(targetKind);
+            var report = pair.Capture(); Assert.AreEqual("FixedFieldPairHypothesis", report.ProposedPairs.Single().Outcome);
+            StringAssert.Contains(report.Source.Rows.Values.Single().KindEvidence["canvasapptype"], "classification=Unresolved");
+            Type300EvidenceCollector.EvaluateCandidateP(report.Source.Rows.Values.Single(), report.Source.Snapshot, requiredKind: "canvasapptype");
+            Type300EvidenceCollector.EvaluateCandidateP(report.Target.Rows.Values.Single(), report.Target.Snapshot, requiredKind: "canvasapptype");
+            Assert.AreEqual(equal, StringComparer.OrdinalIgnoreCase.Equals(report.Source.Rows.Values.Single().CandidateP, report.Target.Rows.Values.Single().CandidateP));
+        }
+        [TestMethod]
+        public void ExplicitRequiredKindUnavailableCannotBeInferred()
+        {
+            var pair = new Pair(); pair.Source.Add(); var report = pair.Capture(); var row = report.Source.Rows.Values.Single();
+            Type300EvidenceCollector.EvaluateCandidateP(row, report.Source.Snapshot, requiredKind: "canvasappsubtype");
+            Assert.IsNull(row.CandidateP); StringAssert.Contains(row.ProposedBlockingReason, "Required kind unavailable");
+        }
+        [DataTestMethod, DataRow(true), DataRow(false)]
+        public void ExplicitRequiredAppModuleScopeUsesOnlyIndependentSnapshotIdentity(bool verified)
+        {
+            var pair = new Pair();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                var row = side.Add(); var parent = Guid.NewGuid(); side.Attributes.Add(Attribute("appmoduleid", new LookupAttributeMetadata { Targets = new[] { "appmodule" } }));
+                row["appmoduleid"] = new EntityReference("appmodule", parent);
+                if (verified) side.Raw.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 80, parent), IdentityResolutionStatus.Resolved, "publisher_app"));
+            }
+            var report = pair.Capture();
+            foreach (var side in new[] { report.Source, report.Target })
+            {
+                var row = side.Rows.Values.Single(); Type300EvidenceCollector.EvaluateCandidateP(row, side.Snapshot, requiredScope: "appmoduleid");
+                Assert.AreEqual(verified, row.CandidateP != null);
+                if (!verified) StringAssert.Contains(row.ProposedBlockingReason, "Required portable AppModule scope unresolved");
+            }
+            if (verified) Assert.AreEqual(report.Source.Rows.Values.Single().CandidateP, report.Target.Rows.Values.Single().CandidateP);
+        }
+        [TestMethod]
+        public void DefaultHypothesisDoesNotInventParentRequirementFromOwnerOrAppElement()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); pair.Target.Add(); left["ownerid"] = new EntityReference("systemuser", Guid.NewGuid()); pair.Source.AddElement(left.Id);
+            var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.Single().CompleteP);
+            StringAssert.Contains(report.Build(), "No structural scope has yet been independently proven required");
+            Assert.IsFalse(report.Source.Rows.Values.Single().CandidateP.Contains("systemuser"));
+            StringAssert.Contains(report.Build(), "SameSelectedBackingPair; no independent identifier proof or repair");
+        }
+        [TestMethod]
+        public void CandidatePCollisionIsSeparateFromRepeatedMembershipAndCannotUseCandidateARepair()
+        {
+            var pair = new Pair(); var one = pair.Source.Add(); var two = pair.Source.Add(); pair.Target.Add();
+            pair.Source.Reference(300, one.Id);
+            pair.Source.Attributes.Add(Attribute("uniquename", new StringAttributeMetadata())); one["uniquename"] = "one"; two["uniquename"] = "two";
+            var report = pair.Capture(); Assert.AreEqual(2, report.Source.Rows.Count); Assert.AreEqual(3, report.Source.Raw.Count);
+            Assert.IsTrue(report.Source.Rows.Values.All(r => r.DuplicateP && !r.DuplicateA && !r.CompleteP));
+            Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "Ambiguous")); StringAssert.Contains(report.Build(), "CandidatePCollisionGroups=1");
+        }
+        [TestMethod]
+        public void RepeatedMembershipDoesNotCreateCandidatePCollision()
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); pair.Source.Reference(300, row.Id); pair.Target.Add();
+            var report = pair.Capture(); Assert.AreEqual(1, report.ProposedPairs.Count); Assert.IsTrue(report.Source.Rows.Values.Single().CompleteP);
+            Assert.AreEqual(2, pair.Source.Service.Calls);
+        }
+        [DataTestMethod, DataRow("ishidden"), DataRow("hascustommiddletier")]
+        public void BehavioralDefinitionDifferenceDoesNotChangeEitherCandidate(string field)
+        {
+            var pair = new Pair(); foreach (var side in new[] { pair.Source, pair.Target }) { side.Attributes.Add(Attribute(field, new BooleanAttributeMetadata())); side.Add()[field] = side == pair.Target; }
+            var report = pair.Capture(); Assert.AreEqual("FixedFieldPairHypothesis", report.ProposedPairs.Single().Outcome);
+            Assert.AreEqual("False", report.Source.Rows.Values.Single().DefinitionValues[field]); Assert.AreEqual("True", report.Target.Rows.Values.Single().DefinitionValues[field]);
+            StringAssert.Contains(report.Build(), "INITIAL SCALAR DEFINITION EVIDENCE"); StringAssert.Contains(report.Build(), "Comparison=DifferentObserved");
+            Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome);
+        }
+        [TestMethod]
+        public void OptionalBehaviorFaultDoesNotInvalidateFixedIdentifier()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Source.Attributes.Add(Attribute("ishidden", new BooleanAttributeMetadata())); Fail(pair.Source, "ishidden");
+            var row = pair.Capture().Source.Rows.Values.Single(); Assert.IsTrue(row.CompleteP); Assert.AreEqual("Unavailable", row.DefinitionValues["ishidden"]);
+        }
+        [TestMethod]
+        public void AppElementDependencyAndCandidateACannotRepairFixedFieldUnavailable()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add();
+            foreach (var side in new[] { pair.Source, pair.Target }) { side.Attributes.Add(Attribute("uniquename", new StringAttributeMetadata())); side.Data.Single()["uniquename"] = "stronger"; side.Attributes.RemoveAll(a => a.LogicalName == "name"); }
+            pair.Source.AddElement(left.Id); pair.Target.AddElement(right.Id); var report = pair.Capture();
+            Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome); Assert.IsTrue(report.Source.Rows.Values.All(r => r.CandidateP == null));
+            StringAssert.Contains(report.Build(), "dependency cannot repair P"); Assert.AreEqual(3, pair.Source.Service.Calls); // Critical, optional and scoped AppElement batch.
+        }
         private static void Fail(Fixture side, string column)
         {
             var normal = side.Service.RetrievePage; side.Service.RetrievePage = q => { var rows = normal(q); if (q.ColumnSet.Columns.Contains(column))
