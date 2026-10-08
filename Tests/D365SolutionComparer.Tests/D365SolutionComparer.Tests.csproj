@@ -82,6 +82,7 @@
     <Compile Include="Type74EvidenceCollectorTests.cs" />
     <Compile Include="Type511EvidenceCollectorTests.cs" />
     <Compile Include="Type10276EvidenceCollectorTests.cs" />
+    <Compile Include="AppActionEvidenceCollectorTests.cs" />
     <Compile Include="CloudFlowSavedQueryEvidenceTests.cs" />
     <Compile Include="PrimaryIdMembershipResolutionTests.cs" />
   </ItemGroup>
