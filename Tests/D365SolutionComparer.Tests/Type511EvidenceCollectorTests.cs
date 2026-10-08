@@ -417,6 +417,158 @@ namespace D365SolutionComparer.Tests
             var report = pair.Capture(); Assert.AreEqual("teamtemplate", report.Source.EntityName); Assert.AreEqual("Unique", report.Source.Rows[row.Id].Status);
             StringAssert.Contains(report.Build(), "No registered solutioncomponentdefinition"); StringAssert.Contains(report.Build(), "independently correlated by completed Type 511 diagnostics");
         }
+        [TestMethod]
+        public void CandidatePUsesFixedPrimaryNameAndUniquelyMappedTableWithoutExtraReads()
+        {
+            var pair = ReadinessPair(); var report = pair.Capture(); var match = report.ProposedPairs.Single();
+            Assert.AreEqual("ScopedPrimaryNamePairHypothesis", match.Outcome); Assert.IsTrue(match.Source.CompleteP && match.Target.CompleteP);
+            Assert.AreEqual("incident", match.Source.ObjectTypeCodeScopeKey); Assert.AreEqual("Verified", match.Source.ObjectTypeCodeScopeStatus);
+            Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(match.Source.CandidateP, match.Target.CandidateP));
+            StringAssert.Contains(match.Source.CandidateP, "incident"); Assert.IsFalse(match.Source.CandidateP.Contains("10001"));
+            Assert.AreEqual("ScopedPrimaryNameHypothesis", report.Source.CandidateRole);
+            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
+            StringAssert.Contains(report.Build(), "PrimaryNameAttribute=teamtemplatename");
+            StringAssert.Contains(report.Build(), "StrongerInternalIdentifiersExposed=[]");
+        }
+        [TestMethod]
+        public void CandidatePSameNameUnderDifferentTableDoesNotMatch()
+        {
+            var pair = ReadinessPair(); pair.Target.Context.Clear(); pair.Target.Context.Add(new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), 1, Guid.NewGuid()), IdentityResolutionStatus.Resolved, "contact"));
+            var report = pair.Capture(); Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "OneSidedEvidence"));
+            Assert.AreNotEqual(report.Source.Rows.Values.Single().CandidateP, report.Target.Rows.Values.Single().CandidateP);
+        }
+        [DataTestMethod, DataRow(""), DataRow(" "), DataRow("29c137ad-5751-4c77-b385-72ab908746a3")]
+        public void BlankOrGuidOnlyFixedNameCannotUseRightsDescriptionOrSameId(string value)
+        {
+            var pair = ReadinessPair(); pair.Source.Data.Single()["teamtemplatename"] = value;
+            var row = pair.Capture().Source.Rows.Values.Single(); Assert.IsNull(row.CandidateP);
+            StringAssert.Contains(row.ProposedBlockingReason, "Fixed teamtemplatename unavailable/blank/invalid/hash-only");
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void FixedNameUnavailableOrFaultedDoesNotUseOtherPrimaryName(bool runtimeFault)
+        {
+            var pair = ReadinessPair();
+            if (runtimeFault) Fail(pair.Source, "teamtemplatename");
+            else Set(pair.Source.Attributes.Single(a => a.LogicalName == "teamtemplatename"), "IsValidForRead", false);
+            var row = pair.Capture().Source.Rows.Values.Single(); Assert.IsNull(row.CandidateP);
+            Assert.AreEqual("Unique", row.Status); Assert.IsFalse(row.CompleteP);
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void MissingOrAmbiguousObjectTypeMetadataBlocksCandidateP(bool ambiguous)
+        {
+            var pair = ReadinessPair(); var normal = pair.Source.Service.ExecuteRequest;
+            pair.Source.Service.ExecuteRequest = request => {
+                if (!(request is RetrieveMetadataChangesRequest)) return normal(request);
+                var entities = new EntityMetadataCollection();
+                if (ambiguous) for (int i = 0; i < 2; i++) { var metadata = new EntityMetadata { LogicalName = "incident", MetadataId = Guid.NewGuid() }; Set(metadata, "ObjectTypeCode", 10001); entities.Add(metadata); }
+                var response = new RetrieveMetadataChangesResponse(); response.Results["EntityMetadata"] = entities; return response;
+            };
+            var row = pair.Capture().Source.Rows.Values.Single(); Assert.IsNull(row.CandidateP);
+            Assert.AreEqual(ambiguous ? "Ambiguous" : "Incomplete", row.ObjectTypeCodeScopeStatus);
+            Assert.AreEqual("Unique", row.Status);
+        }
+        [TestMethod]
+        public void TextScopeCannotSubstituteForMissingObjectTypeCodeCandidatePRequirement()
+        {
+            var pair = ReadinessPair(); pair.Source.Data.Single().Attributes.Remove("objecttypecode");
+            pair.Source.Data.Single()["entitylogicalname"] = "incident"; pair.Source.Attributes.Add(Attribute("entitylogicalname", new StringAttributeMetadata()));
+            var row = pair.Capture().Source.Rows.Values.Single(); Assert.IsNull(row.CandidateP); Assert.AreEqual("Incomplete", row.ObjectTypeCodeScopeStatus);
+        }
+        [TestMethod]
+        public void CandidatePCollisionFromDifferentBackingIdsCannotUseRightsOrDistinctA()
+        {
+            var pair = ReadinessPair(); var original = pair.Source.Data.Single(); var duplicate = new Entity("teamtemplate", Guid.NewGuid());
+            foreach (var field in original.Attributes) duplicate[field.Key] = field.Value;
+            duplicate[Primary] = duplicate.Id; duplicate["teamtemplatename"] = " other investigators on a case "; duplicate["defaultaccessrightsmask"] = 9;
+            pair.Source.Data.Add(duplicate); pair.Source.Reference(duplicate.Id);
+            var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.All(r => r.DuplicateP && !r.CompleteP));
+            Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "Ambiguous")); StringAssert.Contains(report.Build(), "CandidatePCollisionGroups=1");
+        }
+        [TestMethod]
+        public void RepeatedMembershipReferenceDoesNotCreateCandidatePCollision()
+        {
+            var pair = ReadinessPair(); pair.Source.Reference(pair.Source.Data.Single().Id); var report = pair.Capture();
+            Assert.AreEqual(2, report.Source.Raw.Count); Assert.AreEqual(1, report.Source.Rows.Count);
+            Assert.AreEqual(1, report.ProposedPairs.Count); Assert.IsTrue(report.Source.Rows.Values.Single().CompleteP);
+            Assert.AreEqual(2, pair.Source.Service.Calls);
+        }
+        [TestMethod]
+        public void SamePrimaryIdManagedTransitionNeverProvesPortability()
+        {
+            var report = ReadinessPair().Capture(); var pair = report.ProposedPairs.Single();
+            Assert.IsTrue(pair.Categories.Contains("SamePrimaryId") && pair.Categories.Contains("UnmanagedToManaged"));
+            Assert.IsTrue(pair.Categories.Contains("DifferentUniqueId"));
+            StringAssert.Contains(report.Build(), "Same teamtemplateid is audit evidence only and never proves portability");
+            StringAssert.Contains(report.Build(), "DifferentPrimaryIdCandidatePPairs=0");
+            StringAssert.Contains(report.Build(), "Minimum additional evidence: at least one independently deployed");
+        }
+        [TestMethod]
+        public void DifferentPrimaryIdsWithEqualCandidatePAreDiagnosticLifecycleHypothesis()
+        {
+            var report = ReadinessPair(sameId: false).Capture(); var pair = report.ProposedPairs.Single();
+            Assert.IsTrue(pair.Categories.Contains("DifferentPrimaryId")); Assert.AreNotEqual(pair.Source.PrimaryId, pair.Target.PrimaryId);
+            Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(pair.Source.CandidateP, pair.Target.CandidateP));
+            StringAssert.Contains(report.Build(), "DifferentPrimaryId counts alone do not establish independent deployment");
+        }
+        [TestMethod]
+        public void DifferentPrimaryIdsAndDifferentCandidatePCannotPairThroughDefinitions()
+        {
+            var pair = ReadinessPair(sameId: false); pair.Target.Data.Single()["teamtemplatename"] = "Different template";
+            var report = pair.Capture(); Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "OneSidedEvidence"));
+        }
+        [DataTestMethod, DataRow("defaultaccessrightsmask"), DataRow("issystem"), DataRow("description")]
+        public void DefinitionOnlyDifferenceDoesNotAffectAOrP(string field)
+        {
+            var pair = ReadinessPair(); pair.Target.Data.Single()[field] = field == "description" ? (object)"changed private description" : field == "issystem" ? true : (object)9;
+            var report = pair.Capture(); Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome);
+            var match = report.ProposedPairs.Single(); Assert.AreEqual("ScopedPrimaryNamePairHypothesis", match.Outcome);
+            Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(match.Source.CandidateP, match.Target.CandidateP));
+            StringAssert.Contains(report.Build(), "Comparison=DifferentObserved");
+            Assert.IsFalse(report.Build().Contains("changed private description"));
+        }
+        [DataTestMethod, DataRow("defaultaccessrightsmask"), DataRow("description")]
+        public void OptionalDefinitionFailurePreservesIdentityEvidence(string field)
+        {
+            var pair = ReadinessPair(); Fail(pair.Source, field); var report = pair.Capture(); var row = report.Source.Rows.Values.Single();
+            Assert.AreEqual("Unique", row.Status); Assert.IsNotNull(row.CandidateA); Assert.IsTrue(row.CompleteP);
+            if (field == "description") Assert.IsFalse(row.Content[field].Known); else Assert.AreEqual("Unavailable", row.DefinitionValues[field]);
+            StringAssert.Contains(report.Build(), "Attribute faulted: " + field);
+        }
+        [TestMethod]
+        public void ReadinessEvidenceCannotChangeMembershipOrAddWhoAmIOrWrites()
+        {
+            var pair = ReadinessPair(); var source = pair.Source.Snapshot(); var target = pair.Target.Snapshot(); var comparer = new SolutionMembershipComparer();
+            var before = comparer.Compare(source, target).Select(r => r.Presence).ToArray();
+            var report = new Type511EvidenceCollector().Capture(pair.Source.Service, source, "1", pair.Target.Service, target, "2", CancellationToken.None);
+            CollectionAssert.AreEqual(before, comparer.Compare(source, target).Select(r => r.Presence).ToArray());
+            Assert.IsTrue(source.Components.Where(c => c.Record.ComponentType == 511).All(c => c.ComparisonKey == null));
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+            StringAssert.Contains(report.Build(), "NormalMembershipEvidenceRequests=0"); StringAssert.Contains(report.Build(), "AdditionalWhoAmI=0");
+        }
+        private static Pair ReadinessPair(bool sameId = true)
+        {
+            var pair = new Pair(); Guid id = Guid.NewGuid();
+            foreach (var side in new[] { pair.Source, pair.Target })
+            {
+                side.BackingEntity = "teamtemplate"; side.PrimaryNameField = "teamtemplatename";
+                side.Attributes.RemoveAll(a => a.LogicalName == "uniquename" || a.LogicalName == "entitylogicalname");
+                side.Attributes.Add(Attribute("teamtemplatename", new StringAttributeMetadata()));
+                side.Attributes.Add(Attribute("objecttypecode", new IntegerAttributeMetadata()));
+                side.Attributes.Add(Attribute("componentidunique", new UniqueIdentifierAttributeMetadata()));
+                side.Attributes.Add(Attribute("defaultaccessrightsmask", new IntegerAttributeMetadata()));
+                side.Attributes.Add(Attribute("issystem", new BooleanAttributeMetadata())); side.Attributes.Add(Attribute("description", new MemoAttributeMetadata()));
+                var row = side.Add(side == pair.Source || sameId ? id : Guid.NewGuid());
+                row.Attributes.Remove("uniquename"); row.Attributes.Remove("entitylogicalname");
+                row["teamtemplatename"] = side == pair.Source ? " Other Investigators On A Case " : "other investigators on a case";
+                row["objecttypecode"] = side == pair.Source ? 10001 : 20002;
+                row["componentidunique"] = Guid.NewGuid(); row["defaultaccessrightsmask"] = 1; row["issystem"] = false; row["description"] = Secret;
+                row["ismanaged"] = side == pair.Target;
+                side.Context.Clear(); side.Context.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 1, Guid.NewGuid()),
+                    IdentityResolutionStatus.Resolved, "incident"));
+            }
+            return pair;
+        }
         private static Entity Clone(Entity row, QueryExpression query)
         { var copy = new Entity(row.LogicalName, row.Id); foreach (var field in query.ColumnSet.Columns) if (row.Contains(field)) copy[field] = row[field]; return copy; }
         private static void Fail(Fixture fixture, string field)
@@ -438,7 +590,7 @@ namespace D365SolutionComparer.Tests
             internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>(), Context = new List<ComponentIdentity>();
             internal readonly List<AttributeMetadata> Attributes = new List<AttributeMetadata>();
             internal readonly List<QueryExpression> Queries = new List<QueryExpression>();
-            internal string BackingEntity = EntityName;
+            internal string BackingEntity = EntityName, PrimaryNameField = "name";
             internal readonly FakeOrganizationService Service;
             internal Fixture()
             {
@@ -454,7 +606,7 @@ namespace D365SolutionComparer.Tests
                             Assert.IsTrue(requestScope.Query.Criteria.Conditions.Count <= 200);
                             var entities = new List<EntityMetadata>();
                             foreach (var condition in requestScope.Query.Criteria.Conditions) {
-                                var name = condition.PropertyName == "LogicalName" ? (string)condition.Value : "ava_case";
+                                var name = condition.PropertyName == "LogicalName" ? (string)condition.Value : Context.FirstOrDefault(c => c.Record.ComponentType == 1)?.ComparisonKey ?? "ava_case";
                                 var table = Context.FirstOrDefault(c => c.Record.ComponentType == 1 && c.ComparisonKey == name);
                                 var m = new EntityMetadata { LogicalName = name, MetadataId = table?.Record.ObjectId ?? Guid.NewGuid() };
                                 Set(m, "ObjectTypeCode", condition.PropertyName == "ObjectTypeCode" ? condition.Value : 1234);
@@ -467,7 +619,7 @@ namespace D365SolutionComparer.Tests
                         Assert.AreEqual(BackingEntity, request.LogicalName); Assert.AreEqual(EntityFilters.Entity | EntityFilters.Attributes | EntityFilters.Relationships, request.EntityFilters);
                         Assert.IsFalse(request.RetrieveAsIfPublished); var metadata = new EntityMetadata { LogicalName = request.LogicalName };
                         Set(metadata, "PrimaryIdAttribute", Primary);
-                        Set(metadata, "PrimaryNameAttribute", "name");
+                        Set(metadata, "PrimaryNameAttribute", PrimaryNameField);
                         Set(metadata, "Attributes", Attributes.ToArray());
                         var result = new RetrieveEntityResponse(); result.Results["EntityMetadata"] = metadata; return result; },
                     RetrievePage = q => { Queries.Add(q);
@@ -481,7 +633,7 @@ namespace D365SolutionComparer.Tests
             }
             internal Entity Add(Guid? id = null, string unique = "publisher_template")
             {
-                var row = new Entity(EntityName, id ?? Guid.NewGuid()) { ["uniquename"] = unique, ["name"] = "Display template", ["entitylogicalname"] = "ava_case",
+                var row = new Entity(BackingEntity, id ?? Guid.NewGuid()) { ["uniquename"] = unique, ["name"] = "Display template", ["entitylogicalname"] = "ava_case",
                     ["installationidunique"] = Guid.NewGuid().ToString("D"), ["ismanaged"] = false, ["expression"] = Secret, ["ruletype"] = new OptionSetValue(1) };
                 row[Primary] = row.Id; Data.Add(row); Reference(row.Id);
                 if (!Context.Any(c => c.Record.ComponentType == 1)) Context.Add(new ComponentIdentity(
@@ -489,7 +641,7 @@ namespace D365SolutionComparer.Tests
                 return row;
             }
             internal void Reference(Guid id) => Raw.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 511, id), IdentityResolutionStatus.Unsupported,
-                registeredDefinition: new SolutionComponentDefinitionIdentity(511, "TeamTemplate", EntityName)));
+                registeredDefinition: new SolutionComponentDefinitionIdentity(511, "TeamTemplate", BackingEntity)));
             internal Guid Scope(Entity row)
             {
                 if (!Attributes.Any(a => a.LogicalName == "parenttableid")) Attributes.Add(Attribute("parenttableid", new LookupAttributeMetadata { Targets = new[] { "entity" } }));

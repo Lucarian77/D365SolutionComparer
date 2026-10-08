@@ -19,6 +19,8 @@ namespace D365SolutionComparer.Services.Membership
     internal sealed class Type511EvidenceCollector
     {
         internal const int BatchSize = 200, MaxIsolationGroups = 64;
+        internal const string ProposedIdentifierField = "teamtemplatename";
+        internal static readonly string[] DefinitionFields = { "defaultaccessrightsmask", "issystem" };
         private static readonly string[] InternalNames = { "uniquename", "schemaname", "logicalname" };
         private static readonly string[] AuditText = { "name", "displayname", "uniquename", "schemaname", "logicalname", "version" };
         private static readonly string[] UnsafePayload = { "binary", "attachment", "thumbnail", "image", "media", "package", "base64", "encoded", "secret", "secure", "credential", "token", "document" };
@@ -56,6 +58,7 @@ namespace D365SolutionComparer.Services.Membership
             if (metadata == null)
             { foreach (var row in side.Rows.Values) { row.Status = side.SchemaFailure; row.Reason = "Backing schema unavailable; no guessed columns"; } return side; }
             side.PrimaryId = metadata.PrimaryIdAttribute;
+            side.Metadata = metadata;
             var columns = new List<string>(); var hashes = new HashSet<string>(StringComparer.Ordinal);
             foreach (var attribute in metadata.Attributes.OrderBy(a => a.LogicalName, StringComparer.Ordinal))
             {
@@ -75,7 +78,7 @@ namespace D365SolutionComparer.Services.Membership
                     (attribute.AttributeType == AttributeTypeCode.Integer || attribute.AttributeType == AttributeTypeCode.EntityName || attribute.AttributeType == AttributeTypeCode.String);
                 if (scope) side.ScopeFields.Add(name);
                 bool hash = text && (attribute.AttributeType == AttributeTypeCode.Memo ||
-                    !AuditText.Contains(name) && name != metadata.PrimaryNameAttribute && !scope);
+                    !AuditText.Contains(name) && name != metadata.PrimaryNameAttribute && name != ProposedIdentifierField && !scope);
                 side.Schema.Add(side.EntityName + "." + name + "; type=" + attribute.AttributeType + "; readable=" + attribute.IsValidForRead +
                     "; capture=" + (shadow ? "ExcludedLookupShadow" : payload ? "ExcludedPayload" : readable ? hash ? "HashOnly" : "Audit" : "UnavailableOrNotQueried"));
                 if (readable) { columns.Add(name); if (hash) hashes.Add(name); }
@@ -113,6 +116,24 @@ namespace D365SolutionComparer.Services.Membership
                 row.Managed = found.Row.GetAttributeValue<object>("ismanaged") is bool ? (bool?)found.Row.GetAttributeValue<bool>("ismanaged") : null;
                 ResolveScope(snapshot, side, metadata, referenceFields, found, row);
                 row.CandidateField = side.CandidateField;
+                foreach (var field in InternalNames.Concat(new[] { ProposedIdentifierField }))
+                {
+                    var attribute = metadata.Attributes.SingleOrDefault(a => a.LogicalName == field);
+                    row.IdentifierEvidence[field] = "metadataExposed=" + (attribute != null) + "; metadataReadable=" + attribute?.IsValidForRead +
+                        "; runtimeRead=" + found.Columns.Contains(field) + "; value=" + (row.Get(field) ?? "Unavailable") +
+                        "; hashOnly=" + row.Content.ContainsKey(field);
+                }
+                row.ProposedNameVerified = metadata.LogicalName == "teamtemplate" &&
+                    metadata.Attributes.SingleOrDefault(a => a.LogicalName == ProposedIdentifierField)?.AttributeType == AttributeTypeCode.String &&
+                    found.Columns.Contains(ProposedIdentifierField) && found.Row.GetAttributeValue<object>(ProposedIdentifierField) is string;
+                foreach (var field in DefinitionFields)
+                {
+                    var attribute = metadata.Attributes.SingleOrDefault(a => a.LogicalName == field);
+                    object value = found.Row.GetAttributeValue<object>(field);
+                    bool valid = field == "issystem" ? attribute?.AttributeType == AttributeTypeCode.Boolean && (value == null || value is bool) :
+                        (attribute?.AttributeType == AttributeTypeCode.Integer || attribute?.AttributeType == AttributeTypeCode.BigInt) && (value == null || value is int || value is long);
+                    row.DefinitionValues[field] = valid && found.Columns.Contains(field) ? value == null ? "Null" : Format(value) : "Unavailable";
+                }
             }
             ResolveEntityScopes(service, side, backing, token);
             foreach (var row in side.Rows.Values.Where(r => r.Status == "Unique"))
@@ -126,6 +147,17 @@ namespace D365SolutionComparer.Services.Membership
                 var display = side.PrimaryNameField == null ? row.Get("name") : row.Get(side.PrimaryNameField);
                 if (row.TableStatus == "Verified" && !string.IsNullOrWhiteSpace(display))
                     row.CandidateB = "teamtemplate-candidate-b:" + Type31EvidenceCollector.Frame(side.EntityName, row.TableKey, display.Trim());
+                var blockers = new List<string>();
+                string fixedName = row.Get(ProposedIdentifierField);
+                if (!row.CriticalComplete) blockers.Add("Primary/critical backing evidence incomplete");
+                if (!row.ProposedNameVerified || string.IsNullOrWhiteSpace(fixedName) || Guid.TryParse(fixedName, out var invalidName))
+                    blockers.Add("Fixed teamtemplatename unavailable/blank/invalid/hash-only; no fallback");
+                if (row.ObjectTypeCodeScopeStatus != "Verified" || row.TableStatus != "Verified" ||
+                    !StringComparer.OrdinalIgnoreCase.Equals(row.ObjectTypeCodeScopeKey, row.TableKey))
+                    blockers.Add("objecttypecode portable table mapping unresolved/ambiguous/conflicting");
+                row.ProposedBlockingReason = blockers.Count == 0 ? "None; ScopedPrimaryNameHypothesis, lifecycle portability not proven" : string.Join("; ", blockers);
+                if (blockers.Count == 0) row.CandidateP = "teamtemplate-candidate-p:v1:" +
+                    Type31EvidenceCollector.Frame(row.ObjectTypeCodeScopeKey.Trim(), fixedName.Trim());
             }
             return side;
         }
@@ -204,6 +236,7 @@ namespace D365SolutionComparer.Services.Membership
         {
             var pending = new Dictionary<string, ScopeEvidence>(StringComparer.OrdinalIgnoreCase);
             var rowScopes = new Dictionary<Guid, List<ScopeEvidence>>();
+            var objectTypeScopes = new Dictionary<Guid, ScopeEvidence>();
             foreach (var row in side.Rows.Values.Where(r => r.Status == "Unique"))
             {
                 var scopes = new List<ScopeEvidence>(); rowScopes[row.ObjectId] = scopes;
@@ -215,7 +248,11 @@ namespace D365SolutionComparer.Services.Membership
                     bool numeric = raw is int || int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out number);
                     var input = numeric ? "code:" + (raw is int ? (int)raw : int.Parse(text, CultureInfo.InvariantCulture)).ToString(CultureInfo.InvariantCulture) : "name:" + text;
                     if (!found.Columns.Contains(field) || raw == null || !numeric && !LogicalName(text))
-                    { scopes.Add(new ScopeEvidence { Reason = field + ": missing/faulted/invalid entity scope" }); continue; }
+                    {
+                        var invalid = new ScopeEvidence { Reason = field + ": missing/faulted/invalid entity scope" };
+                        scopes.Add(invalid); if (field == "objecttypecode") objectTypeScopes[row.ObjectId] = invalid;
+                        continue;
+                    }
                     if (!pending.TryGetValue(input, out var scope))
                     {
                         scope = new ScopeEvidence { Input = input, Number = numeric ? (int?)(raw is int ? (int)raw : int.Parse(text, CultureInfo.InvariantCulture)) : null,
@@ -224,6 +261,7 @@ namespace D365SolutionComparer.Services.Membership
                         if (!numeric) ApplySnapshotScope(side.Snapshot, text, scope);
                     }
                     scopes.Add(scope);
+                    if (field == "objecttypecode") objectTypeScopes[row.ObjectId] = scope;
                 }
             }
             var unresolved = pending.Values.Where(s => s.Status == "Incomplete").OrderBy(s => s.Input, StringComparer.Ordinal).ToArray();
@@ -267,6 +305,9 @@ namespace D365SolutionComparer.Services.Membership
                 row.TableStatus = scopes.Any(s => s.Status == "Ambiguous") || keys.Length > 1 ? "Ambiguous" :
                     scopes.Count > 0 && scopes.All(s => s.Status == "Verified") && keys.Length == 1 ? "Verified" : "Incomplete";
                 row.TableKey = row.TableStatus == "Verified" ? keys[0] : null;
+                objectTypeScopes.TryGetValue(row.ObjectId, out var objectTypeScope);
+                row.ObjectTypeCodeScopeStatus = objectTypeScope?.Status ?? "Incomplete";
+                row.ObjectTypeCodeScopeKey = objectTypeScope?.Status == "Verified" ? objectTypeScope.Key : null;
                 foreach (var scope in scopes) row.Context.Add("Entity scope: " + scope.Input + "; " + scope.Status + "; logicalName=" + scope.Key + "; " + scope.Reason);
                 if (scopes.Count == 0) row.Context.Add("No independently verified entity/table scope exposed; no global/tableless assumption");
                 if (keys.Length > 1) row.Context.Add("Conflicting independently resolved parent table scopes");
@@ -531,6 +572,7 @@ namespace D365SolutionComparer.Services.Membership
     {
         internal MembershipSnapshot Snapshot;
         internal string Version, EntityName, PrimaryId, CandidateField, PrimaryNameField, CandidateRole, SchemaFailure;
+        internal EntityMetadata Metadata;
         internal readonly List<string> Discovery = new List<string>(), ScopeFields = new List<string>();
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, TeamTemplateRecordEvidence> Rows = new SortedDictionary<Guid, TeamTemplateRecordEvidence>();
@@ -542,6 +584,11 @@ namespace D365SolutionComparer.Services.Membership
         internal string Status, Reason, CandidateField, CandidateA, CandidateB;
         internal bool CriticalComplete, DuplicateA, DuplicateB, ParentComplete;
         internal string ParentKey, ParentStatus, TableKey, TableStatus;
+        internal string CandidateP, ProposedBlockingReason, ObjectTypeCodeScopeKey, ObjectTypeCodeScopeStatus;
+        internal bool ProposedNameVerified, DuplicateP;
+        internal bool CompleteP => CandidateP != null && !DuplicateP;
+        internal readonly SortedDictionary<string, string> IdentifierEvidence = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        internal readonly SortedDictionary<string, string> DefinitionValues = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal readonly SortedSet<string> TableKeys = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         internal readonly List<string> Context = new List<string>();
         internal readonly SortedDictionary<string, string> Fields = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -559,6 +606,7 @@ namespace D365SolutionComparer.Services.Membership
     {
         internal TeamTemplateSideEvidence Source, Target;
         internal readonly List<TeamTemplatePairEvidence> Pairs = new List<TeamTemplatePairEvidence>();
+        internal readonly List<TeamTemplatePairEvidence> ProposedPairs = new List<TeamTemplatePairEvidence>();
         internal void Analyze(CancellationToken token)
         {
             foreach (var side in new[] { Source, Target })
@@ -567,6 +615,36 @@ namespace D365SolutionComparer.Services.Membership
                     foreach (var row in group) row.DuplicateA = true;
                 foreach (var group in side.Rows.Values.Where(r => r.CandidateB != null).GroupBy(r => r.CandidateB, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
                     foreach (var row in group) row.DuplicateB = true;
+                foreach (var group in side.Rows.Values.Where(r => r.CandidateP != null).GroupBy(r => r.CandidateP, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+                    foreach (var row in group) row.DuplicateP = true;
+            }
+            foreach (var key in Source.Rows.Values.Concat(Target.Rows.Values).Where(r => r.CandidateP != null).Select(r => r.CandidateP)
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+            {
+                token.ThrowIfCancellationRequested();
+                var left = Source.Rows.Values.Where(r => StringComparer.OrdinalIgnoreCase.Equals(r.CandidateP, key)).ToArray();
+                var right = Target.Rows.Values.Where(r => StringComparer.OrdinalIgnoreCase.Equals(r.CandidateP, key)).ToArray();
+                if (left.Length > 1 || right.Length > 1)
+                {
+                    foreach (var row in left) ProposedPairs.Add(new TeamTemplatePairEvidence { Source = row, Outcome = "Ambiguous" });
+                    foreach (var row in right) ProposedPairs.Add(new TeamTemplatePairEvidence { Target = row, Outcome = "Ambiguous" });
+                }
+                else ProposedPairs.Add(new TeamTemplatePairEvidence { Source = left.SingleOrDefault(), Target = right.SingleOrDefault(),
+                    Outcome = left.Length == 1 && right.Length == 1 ? "ScopedPrimaryNamePairHypothesis" : "OneSidedEvidence" });
+            }
+            foreach (var side in new[] { Source, Target }) foreach (var row in side.Rows.Values.Where(r => r.CandidateP == null))
+                ProposedPairs.Add(new TeamTemplatePairEvidence { Source = side == Source ? row : null, Target = side == Target ? row : null,
+                    Outcome = row.Status == "Duplicate" || row.ObjectTypeCodeScopeStatus == "Ambiguous" || row.TableStatus == "Ambiguous" ? "Ambiguous" : "Incomplete" });
+            foreach (var pair in ProposedPairs)
+            {
+                pair.Categories.Add(pair.Outcome);
+                if (pair.Outcome != "ScopedPrimaryNamePairHypothesis") continue;
+                pair.Categories.Add(pair.Source.PrimaryId == pair.Target.PrimaryId ? "SamePrimaryId" : "DifferentPrimaryId");
+                string leftUnique = pair.Source.Get("componentidunique"), rightUnique = pair.Target.Get("componentidunique");
+                pair.Categories.Add(string.IsNullOrWhiteSpace(leftUnique) || string.IsNullOrWhiteSpace(rightUnique) ? "UniqueIdUnavailable" :
+                    StringComparer.OrdinalIgnoreCase.Equals(leftUnique, rightUnique) ? "SameUniqueId" : "DifferentUniqueId");
+                if (pair.Source.Managed.HasValue && pair.Target.Managed.HasValue && pair.Source.Managed != pair.Target.Managed)
+                { pair.Categories.Add("ManagedTransition"); if (pair.Source.Managed == false && pair.Target.Managed == true) pair.Categories.Add("UnmanagedToManaged"); }
             }
             foreach (var key in Source.Rows.Values.Concat(Target.Rows.Values).Where(r => r.CandidateA != null).Select(r => r.CandidateA)
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
@@ -659,6 +737,55 @@ namespace D365SolutionComparer.Services.Membership
                 Line(text, label, "CandidateACollisionGroups=" + s.Rows.Values.Where(r => r.DuplicateA).Select(r => r.CandidateA).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
                     "CandidateBCollisionGroups=" + s.Rows.Values.Where(r => r.DuplicateB).Select(r => r.CandidateB).Distinct(StringComparer.OrdinalIgnoreCase).Count());
             });
+            text.AppendLine("\nFIXED IDENTIFIER / CANDIDATE P READINESS");
+            text.AppendLine("Candidate P = independently verified objecttypecode portable table logical name + fixed teamtemplatename. Trim + ordinal case-insensitive. Classification=ScopedPrimaryNameHypothesis, not an internal semantic identifier.");
+            text.AppendLine("No GUID/display/hash/access-rights fallback. Candidate A is unchanged; A/B/content/deployment observations cannot repair P.");
+            EachSide(text, (s, label) => {
+                Line(text, label, "PrimaryNameAttribute=" + (s.Metadata?.PrimaryNameAttribute ?? "Unavailable"),
+                    "StrongerInternalIdentifiersExposed=[" + string.Join(",", (s.Metadata?.Attributes ?? new AttributeMetadata[0])
+                        .Where(a => new[] { "uniquename", "schemaname", "logicalname" }.Contains(a.LogicalName)).Select(a => a.LogicalName)) + "]");
+                foreach (var row in s.Rows.Values)
+                {
+                    foreach (var item in row.IdentifierEvidence) Line(text, label, row.ObjectId, item.Key, item.Value);
+                    Line(text, label, row.ObjectId, "ObjectTypeCode=" + row.Get("objecttypecode"),
+                        "ObjectTypeCodeScopeStatus=" + row.ObjectTypeCodeScopeStatus, "PortableTable=" + row.ObjectTypeCodeScopeKey,
+                        "CandidateP=" + (row.CandidateP ?? "Incomplete"), "CompleteP=" + row.CompleteP,
+                        "BlockingReason=" + (row.DuplicateP ? "Candidate P collision" : row.ProposedBlockingReason ?? row.Reason));
+                }
+                Line(text, label, "CandidateACollisionGroups=" + s.Rows.Values.Where(r => r.DuplicateA).Select(r => r.CandidateA).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                    "CandidatePCollisionGroups=" + s.Rows.Values.Where(r => r.DuplicateP).Select(r => r.CandidateP).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            });
+            text.AppendLine("\nINITIAL DEFINITION EVIDENCE");
+            text.AppendLine("defaultaccessrightsmask: potential initial behavioral definition property controlling access granted by template-created teams; exact numeric comparison, never identity. issystem: system/custom classification evidence; lifecycle semantics need review before any definition contract. Description: presence/length/SHA-256 only.");
+            EachSide(text, (s, label) => {
+                foreach (var row in s.Rows.Values)
+                {
+                    foreach (var item in row.DefinitionValues) Line(text, label, row.ObjectId, item.Key + "=" + item.Value);
+                    Line(text, label, row.ObjectId, "description=" + DescriptionEvidence(row));
+                }
+            });
+            text.AppendLine("\nCANDIDATE P LIFECYCLE COMPARISON");
+            foreach (var pair in ProposedPairs)
+            {
+                Line(text, pair.Outcome, "Source=" + pair.Source?.PrimaryId, "Target=" + pair.Target?.PrimaryId,
+                    "CandidateP=" + (pair.Source?.CandidateP ?? pair.Target?.CandidateP ?? "Incomplete"));
+                if (pair.Outcome != "ScopedPrimaryNamePairHypothesis") continue;
+                Line(text, "teamtemplateid=" + (pair.Source.PrimaryId == pair.Target.PrimaryId ? "EqualObserved" : "DifferentObserved"),
+                    "componentidunique=" + EqualEvidence(pair.Source.Get("componentidunique"), pair.Target.Get("componentidunique")),
+                    "CandidateA=" + EqualEvidence(pair.Source.CandidateA, pair.Target.CandidateA),
+                    "CandidateP=" + EqualEvidence(pair.Source.CandidateP, pair.Target.CandidateP),
+                    "SourceManaged=" + pair.Source.Managed, "TargetManaged=" + pair.Target.Managed,
+                    "ManagedTransition=" + pair.Categories.Contains("ManagedTransition"));
+                foreach (var field in Type511EvidenceCollector.DefinitionFields)
+                    Line(text, field, "Source=" + DefinitionValue(pair.Source, field), "Target=" + DefinitionValue(pair.Target, field),
+                        "Comparison=" + EqualEvidence(DefinitionValue(pair.Source, field), DefinitionValue(pair.Target, field)));
+                Line(text, "description", "Source=" + DescriptionEvidence(pair.Source), "Target=" + DescriptionEvidence(pair.Target),
+                    "Comparison=" + (KnownDescription(pair.Source) && KnownDescription(pair.Target) ?
+                        StringComparer.Ordinal.Equals(DescriptionEvidence(pair.Source), DescriptionEvidence(pair.Target)) ? "EqualObserved" : "DifferentObserved" : "Incomplete"));
+            }
+            text.AppendLine("\nCANDIDATE P LIFECYCLE MATRIX");
+            foreach (var category in new[] { "ScopedPrimaryNamePairHypothesis", "SamePrimaryId", "DifferentPrimaryId", "SameUniqueId", "DifferentUniqueId", "UniqueIdUnavailable", "ManagedTransition", "UnmanagedToManaged", "OneSidedEvidence", "Ambiguous", "Incomplete" })
+                Line(text, category, ProposedPairs.Count(p => p.Categories.Contains(category)));
             text.AppendLine("\nSOURCE / TARGET FIELD COMPARISON");
             foreach (var pair in Pairs)
             {
@@ -680,6 +807,11 @@ namespace D365SolutionComparer.Services.Membership
             text.AppendLine("\nPORTABILITY ASSESSMENT");
             Line(text, "Unique semantic pairs=" + Pairs.Count(p => p.Outcome == "SemanticPair"), "differing primary IDs=" + Pairs.Count(p => p.Categories.Contains("DifferentPrimaryId")));
             text.AppendLine("Observed evidence does not establish lifecycle portability or safe absence semantics. Additional live/lifecycle review required before production promotion or any production use.");
+            text.AppendLine("\nCANDIDATE P PORTABILITY GATE");
+            Line(text, "UniqueCandidatePPairs=" + ProposedPairs.Count(p => p.Outcome == "ScopedPrimaryNamePairHypothesis"),
+                "DifferentPrimaryIdCandidatePPairs=" + ProposedPairs.Count(p => p.Categories.Contains("DifferentPrimaryId")));
+            text.AppendLine("Same teamtemplateid is audit evidence only and never proves portability. Candidate P cannot be promoted solely from the current EDU same-primary-ID pair, even with an unmanaged-to-managed transition or matching definition hashes.");
+            text.AppendLine("Minimum additional evidence: at least one independently deployed semantic Team Template pair with different teamtemplateid values, the same independently verified table scope, equal Candidate P, and zero ambiguity/collisions. DifferentPrimaryId counts alone do not establish independent deployment; that provenance requires live review. No environment-wide scan or absence inference is authorized.");
             text.AppendLine("\nEXACT REQUEST LEDGER"); EachSide(text, (s, label) => {
                 foreach (var request in s.Requests) Line(text, label, request);
                 foreach (var group in s.Requests.GroupBy(r => r.StartsWith("Execute RetrieveEntity(", StringComparison.Ordinal) ? r.Split(',')[0] + ")" :
@@ -689,6 +821,11 @@ namespace D365SolutionComparer.Services.Membership
             }); return text.ToString();
         }
         private void EachSide(StringBuilder text, Action<TeamTemplateSideEvidence, string> action) { action(Source, "Source"); action(Target, "Target"); }
+        private static string EqualEvidence(string source, string target) => string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(target) || source == "Unavailable" || target == "Unavailable"
+            ? "Incomplete" : StringComparer.OrdinalIgnoreCase.Equals(source, target) ? "EqualObserved" : "DifferentObserved";
+        private static string DefinitionValue(TeamTemplateRecordEvidence row, string field) => row.DefinitionValues.TryGetValue(field, out var value) ? value : "Unavailable";
+        private static bool KnownDescription(TeamTemplateRecordEvidence row) => row.Content.TryGetValue("description", out var hash) && hash.Known;
+        private static string DescriptionEvidence(TeamTemplateRecordEvidence row) => row.Content.TryGetValue("description", out var hash) ? hash.Evidence : "Unavailable";
     }
 }
 #endif
