@@ -23,6 +23,8 @@ namespace D365SolutionComparer.Services.Membership
         internal static readonly int[] RawTypes = { 10266, 10267 };
         private static readonly string[] SubtypeNames = { "appactiontype", "actiontype", "actioncategory", "appactioncategory", "category", "subtype", "type" };
         private static readonly string[] InternalNames = { "uniquename", "schemaname", "logicalname" };
+        private static readonly string[] ProposedFields = { "uniquename", "context", "contextentity", "location", "type", "appmoduleid", "parentappactionid" };
+        internal static readonly string[] DefinitionFields = { "sequence", "hidden", "isdisabled" };
         private static readonly string[] AuditText = { "name", "displayname", "uniquename", "schemaname", "logicalname", "version", "appactiontype", "actiontype", "actioncategory", "appactioncategory", "category", "subtype", "type", "bindingtype", "isbound" };
         private static readonly string[] UnsafePayload = { "binary", "attachment", "thumbnail", "image", "media", "package", "base64", "encoded", "secret", "secure", "credential", "token", "document" };
         private static readonly HashSet<string> AuditReferences = new HashSet<string>(new[] { "organizationid", "ownerid", "owninguser", "owningteam",
@@ -63,6 +65,7 @@ namespace D365SolutionComparer.Services.Membership
             if (metadata == null)
             { foreach (var row in side.Rows.Values) { row.Status = side.SchemaFailure; row.Reason = "Backing schema unavailable; no guessed columns"; } return side; }
             side.PrimaryId = metadata.PrimaryIdAttribute;
+            side.MetadataObjectTypeCode = metadata.ObjectTypeCode;
             var columns = new List<string>(); var hashes = new HashSet<string>(StringComparer.Ordinal);
             var excludedShadows = new HashSet<string>(StringComparer.Ordinal);
             foreach (var attribute in metadata.Attributes.OrderBy(a => a.LogicalName, StringComparer.Ordinal))
@@ -77,7 +80,7 @@ namespace D365SolutionComparer.Services.Membership
                     attribute.AttributeType == AttributeTypeCode.EntityName || attribute.AttributeType == AttributeTypeCode.Picklist ||
                     attribute.AttributeType == AttributeTypeCode.State || attribute.AttributeType == AttributeTypeCode.Status ||
                     attribute.AttributeType == AttributeTypeCode.Integer || attribute.AttributeType == AttributeTypeCode.BigInt || attribute.AttributeType == AttributeTypeCode.Owner ||
-                    attribute.AttributeType == AttributeTypeCode.Boolean || attribute.AttributeType == AttributeTypeCode.DateTime;
+                    attribute.AttributeType == AttributeTypeCode.Boolean || attribute.AttributeType == AttributeTypeCode.DateTime || attribute.AttributeType == AttributeTypeCode.Decimal;
                 bool readable = attribute.IsValidForRead == true && shape && !shadow && !payload;
                 // Exposed scope fields remain required evidence even when their type/readability is unusable.
                 if (shadow) excludedShadows.Add(name);
@@ -127,11 +130,13 @@ namespace D365SolutionComparer.Services.Membership
                 row.Managed = found.Row.GetAttributeValue<object>("ismanaged") is bool ? (bool?)found.Row.GetAttributeValue<bool>("ismanaged") : null;
                 ResolveScope(snapshot, side, metadata, referenceFields, found, row);
                 row.CandidateField = side.CandidateField;
+                CaptureProposedEvidence(metadata, found, row);
             }
             ResolveEntityScopes(service, side, backing, token);
             foreach (var row in side.Rows.Values.Where(r => r.Status == "Unique"))
             {
                 FinalizeReferences(row);
+                ConstructCandidateP(row);
                 var value = side.CandidateField == null ? null : row.Get(side.CandidateField);
                 row.SubtypeComplete = side.SubtypeFields.Count > 0 && side.SubtypeFields.All(f => row.RuntimeColumns.Contains(f) && !string.IsNullOrWhiteSpace(row.Get(f)));
                 row.SubtypeKey = row.SubtypeComplete ? Type31EvidenceCollector.Frame(side.SubtypeFields.Select(f =>
@@ -168,6 +173,7 @@ namespace D365SolutionComparer.Services.Membership
                     !StringComparer.OrdinalIgnoreCase.Equals(d.PrimaryEntityName, definition.PrimaryEntityName)))
                 { side.Discovery.Add("Incomplete/conflicting completed registered definitions; no guessed backing query"); return false; }
                 side.EntityName = definition.PrimaryEntityName;
+                side.Definition = definition;
                 side.Discovery.Add("Reused completed registered definition: objecttypecode=" + side.RawType + "; name=" + definition.Name + "; primaryentityname=" + side.EntityName);
                 return true;
             }
@@ -208,7 +214,8 @@ namespace D365SolutionComparer.Services.Membership
                     var row = rows.Values.Single(); var name = row.GetAttributeValue<string>("name"); var backing = row.GetAttributeValue<string>("primaryentityname");
                     if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(name) || !ValidName(backing))
                     { side.Discovery.Add("Registered definition has incomplete/conflicting family/backing fields"); return false; }
-                    side.EntityName = backing; side.Discovery.Add("Discovered registered definition: objecttypecode=" + side.RawType + "; name=" + name + "; primaryentityname=" + backing); return true;
+                    side.EntityName = backing; side.Definition = new SolutionComponentDefinitionIdentity(side.RawType, name, backing);
+                    side.Discovery.Add("Discovered registered definition: objecttypecode=" + side.RawType + "; name=" + name + "; primaryentityname=" + backing); return true;
                 }
                 side.Discovery.Add("No registered solutioncomponentdefinition for Type " + side.RawType + ". This is not absence of App Action records.");
                 side.Discovery.Add("Backing mapping unavailable: no consistent registered definition or verified completed backing correlation; no assumed scan");
@@ -426,7 +433,15 @@ namespace D365SolutionComparer.Services.Membership
                 }
                 if (current.Values.Any(r => r.Status == "Unique" && r.CriticalComplete))
                     Isolate(service, entity, primary, optional.OrderBy(c => c, StringComparer.Ordinal).ToArray(), batch, current, false, side, token, progress, ref remaining);
-                else side.RetrievalDiagnostics.Add(entity + ": optional fields excluded/deferred because critical correlation is incomplete");
+                else
+                {
+                    side.RetrievalDiagnostics.Add(entity + ": optional fields excluded/deferred because critical correlation is incomplete");
+                    // A retains its original critical-completeness result. P and its optional
+                    // definition evidence can still be investigated after a non-P critical fault.
+                    if (current.Values.Any(r => r.Status == "Unique"))
+                        Isolate(service, entity, primary, optional.Where(f => ProposedFields.Contains(f) || DefinitionFields.Contains(f)).ToArray(),
+                            batch, current, false, side, token, progress, ref remaining);
+                }
                 foreach (var id in batch) result[id] = current[id];
             }
             return result;
@@ -562,9 +577,72 @@ namespace D365SolutionComparer.Services.Membership
             if (raw is EntityReference) { var r = (EntityReference)raw; return ValidName(r.LogicalName) ? r.LogicalName + ":" + r.Id.ToString("D") : null; }
             if (raw is OptionSetValue) return ((OptionSetValue)raw).Value.ToString(CultureInfo.InvariantCulture);
             if (raw is DateTime) return ((DateTime)raw).ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-            if (raw is string || raw is int || raw is long || raw is bool || raw is Guid) return Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim();
+            if (raw is string || raw is int || raw is long || raw is decimal || raw is bool || raw is Guid) return Convert.ToString(raw, CultureInfo.InvariantCulture)?.Trim();
             return null;
         }
+
+        private static void CaptureProposedEvidence(EntityMetadata metadata, LookupEvidence found, AppActionRecordEvidence row)
+        {
+            row.IsAppAction = StringComparer.OrdinalIgnoreCase.Equals(metadata.LogicalName, "appaction");
+            foreach (var binding in new[] { new[] { "contextentity", "entity" }, new[] { "appmoduleid", "appmodule" }, new[] { "parentappactionid", "appaction" } })
+            {
+                var attribute = metadata.Attributes.SingleOrDefault(a => a.LogicalName == binding[0]);
+                bool targetVerified = attribute is LookupAttributeMetadata && ((LookupAttributeMetadata)attribute).Targets?.Contains(binding[1]) == true ||
+                    (metadata.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0]).Any(r => r != null &&
+                        r.ReferencingEntity == metadata.LogicalName && r.ReferencingAttribute == binding[0] && r.ReferencedEntity == binding[1] && r.ReferencedAttribute == PrimaryFor(binding[1]));
+                if (attribute != null && (attribute.AttributeType == AttributeTypeCode.Lookup || attribute.AttributeType == AttributeTypeCode.Uniqueidentifier) && targetVerified)
+                    row.ProposedStructuralSchema.Add(binding[0]);
+            }
+            foreach (var field in ProposedFields)
+            {
+                var attribute = metadata.Attributes.SingleOrDefault(a => a.LogicalName == field);
+                if (attribute == null || !found.Columns.Contains(field)) continue;
+                object value = found.Row.GetAttributeValue<object>(field);
+                if (field == "uniquename" && attribute.AttributeType == AttributeTypeCode.String && value is string)
+                    row.ProposedUniqueName = ((string)value).Trim();
+                if ((field == "context" || field == "location" || field == "type") &&
+                    (attribute.AttributeType == AttributeTypeCode.Picklist || attribute.AttributeType == AttributeTypeCode.Integer))
+                {
+                    if (value is OptionSetValue) row.ProposedNumbers[field] = ((OptionSetValue)value).Value;
+                    else if (value is int) row.ProposedNumbers[field] = (int)value;
+                }
+            }
+            foreach (var field in DefinitionFields)
+            {
+                var attribute = metadata.Attributes.SingleOrDefault(a => a.LogicalName == field);
+                object value = found.Row.GetAttributeValue<object>(field);
+                bool schemaValid = field == "sequence" ? attribute?.AttributeType == AttributeTypeCode.Decimal : attribute?.AttributeType == AttributeTypeCode.Boolean;
+                bool valueValid = value == null || (field == "sequence" ? value is decimal : value is bool);
+                row.DefinitionValues[field] = schemaValid && valueValid && found.Columns.Contains(field)
+                    ? value == null ? "Null" : value is decimal ? ((decimal)value).ToString("G29", CultureInfo.InvariantCulture) : Format(value) : "Unavailable";
+            }
+        }
+
+        private static void ConstructCandidateP(AppActionRecordEvidence row)
+        {
+            var blockers = new List<string>();
+            if (!row.IsAppAction) blockers.Add("Backing entity is not independently established as appaction");
+            if (string.IsNullOrWhiteSpace(row.ProposedUniqueName) || Guid.TryParse(row.ProposedUniqueName, out var ignored))
+                blockers.Add("uniquename blank/unavailable/not semantic text");
+            foreach (var field in new[] { "context", "location", "type" })
+                if (!row.ProposedNumbers.ContainsKey(field)) blockers.Add(field + " unavailable or not an exact numeric option");
+            AppActionReferenceEvidence table, module, parent;
+            row.References.TryGetValue("contextentity", out table);
+            row.References.TryGetValue("appmoduleid", out module);
+            row.References.TryGetValue("parentappactionid", out parent);
+            if (!row.ProposedStructuralSchema.Contains("contextentity") || !VerifiedReference(table) || table.Entity != "entity") blockers.Add("contextentity portable table identity unavailable");
+            if (!row.ProposedStructuralSchema.Contains("appmoduleid") || module == null || module.Status != "NotPresent" && (!VerifiedReference(module) || module.Entity != "appmodule")) blockers.Add("appmoduleid presence/portable identity unavailable");
+            if (!row.ProposedStructuralSchema.Contains("parentappactionid") || parent == null || parent.Status != "NotPresent") blockers.Add("parentappactionid must be verified NotPresent");
+            row.ProposedBlockingReason = blockers.Count == 0 ? "None" : string.Join("; ", blockers);
+            if (blockers.Count != 0) return;
+            row.CandidateP = "appaction:v1:" + Type31EvidenceCollector.Frame("uniquename", row.ProposedUniqueName,
+                "context", row.ProposedNumbers["context"].ToString(CultureInfo.InvariantCulture), "contextentity", table.Key,
+                "location", row.ProposedNumbers["location"].ToString(CultureInfo.InvariantCulture), "type", row.ProposedNumbers["type"].ToString(CultureInfo.InvariantCulture),
+                "appmoduleid", module.Status == "NotPresent" ? Type31EvidenceCollector.Frame("NotPresent") : Type31EvidenceCollector.Frame("Present", module.Key),
+                "parentappactionid", "NotPresent");
+        }
+        private static bool VerifiedReference(AppActionReferenceEvidence reference) => reference != null &&
+            (reference.Status == "VerifiedSnapshot" || reference.Status == "VerifiedScopedMetadata") && !string.IsNullOrWhiteSpace(reference.Key);
     }
 
     internal sealed class AppActionSideEvidence
@@ -573,6 +651,8 @@ namespace D365SolutionComparer.Services.Membership
         internal int RawType; internal bool IsSource;
         internal readonly List<string> SubtypeFields = new List<string>();
         internal string Version, EntityName, PrimaryId, CandidateField, PrimaryNameField, CandidateRole, SchemaFailure;
+        internal SolutionComponentDefinitionIdentity Definition;
+        internal int? MetadataObjectTypeCode;
         internal readonly List<string> Discovery = new List<string>(), ScopeFields = new List<string>();
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, AppActionRecordEvidence> Rows = new SortedDictionary<Guid, AppActionRecordEvidence>();
@@ -588,6 +668,12 @@ namespace D365SolutionComparer.Services.Membership
         internal string Status, Reason, CandidateField, CandidateA, CandidateB, BlockingReason;
         internal bool CriticalComplete, DuplicateA, DuplicateB, ParentComplete, SubtypeComplete;
         internal string SubtypeKey, SemanticBase;
+        internal string CandidateP, ProposedUniqueName, ProposedBlockingReason;
+        internal bool IsAppAction, DuplicateP;
+        internal bool CompleteP => CandidateP != null && !DuplicateP;
+        internal readonly SortedDictionary<string, int> ProposedNumbers = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        internal readonly HashSet<string> ProposedStructuralSchema = new HashSet<string>(StringComparer.Ordinal);
+        internal readonly SortedDictionary<string, string> DefinitionValues = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal string ParentKey, ParentStatus, TableKey, TableStatus;
         internal readonly SortedDictionary<string, AppActionReferenceEvidence> References = new SortedDictionary<string, AppActionReferenceEvidence>(StringComparer.Ordinal);
         internal readonly SortedSet<string> TableKeys = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -609,8 +695,36 @@ namespace D365SolutionComparer.Services.Membership
         private AppActionRecordEvidence[] SourceRows => Sides.Where(s => s.IsSource).SelectMany(s => s.Rows.Values).ToArray();
         private AppActionRecordEvidence[] TargetRows => Sides.Where(s => !s.IsSource).SelectMany(s => s.Rows.Values).ToArray();
         internal readonly List<AppActionPairEvidence> Pairs = new List<AppActionPairEvidence>();
+        internal readonly List<AppActionPairEvidence> ProposedPairs = new List<AppActionPairEvidence>();
         internal void Analyze(CancellationToken token)
         {
+            foreach (var rows in new[] { SourceRows, TargetRows })
+            {
+                token.ThrowIfCancellationRequested();
+                foreach (var group in rows.Where(r => r.CandidateP != null).GroupBy(r => r.CandidateP, StringComparer.OrdinalIgnoreCase)
+                    .Where(g => g.Select(r => r.PrimaryId).Distinct().Count() > 1))
+                    foreach (var row in group) row.DuplicateP = true;
+                foreach (var group in rows.Where(r => r.PrimaryId.HasValue).GroupBy(r => r.PrimaryId)
+                    .Where(g => g.Select(r => r.CandidateP).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+                    foreach (var row in group) { row.DuplicateP = true; row.ProposedBlockingReason = "Conflicting Candidate P evidence for repeated backing row"; }
+            }
+            foreach (var key in SourceRows.Concat(TargetRows).Where(r => r.CandidateP != null).Select(r => r.CandidateP).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+            {
+                token.ThrowIfCancellationRequested();
+                var left = SourceRows.Where(r => StringComparer.OrdinalIgnoreCase.Equals(r.CandidateP, key)).GroupBy(r => r.PrimaryId).Select(g => g.First()).ToArray();
+                var right = TargetRows.Where(r => StringComparer.OrdinalIgnoreCase.Equals(r.CandidateP, key)).GroupBy(r => r.PrimaryId).Select(g => g.First()).ToArray();
+                if (left.Concat(right).Any(r => r.DuplicateP))
+                {
+                    foreach (var row in left) ProposedPairs.Add(new AppActionPairEvidence { Source = row, Outcome = "Ambiguous" });
+                    foreach (var row in right) ProposedPairs.Add(new AppActionPairEvidence { Target = row, Outcome = "Ambiguous" });
+                }
+                else ProposedPairs.Add(new AppActionPairEvidence { Source = left.SingleOrDefault(), Target = right.SingleOrDefault(),
+                    Outcome = left.Length == 1 && right.Length == 1 ? "DiagnosticCandidatePPairHypothesis" : "OneSidedEvidence" });
+            }
+            foreach (var side in Sides)
+                foreach (var row in side.Rows.Values.Where(r => r.CandidateP == null))
+                    ProposedPairs.Add(new AppActionPairEvidence { Source = side.IsSource ? row : null, Target = side.IsSource ? null : row, Outcome = "Incomplete" });
             foreach (var side in Sides)
             {
                 foreach (var group in (side.IsSource ? SourceRows : TargetRows).Where(r => r.CandidateA != null).GroupBy(r => r.CandidateA, StringComparer.OrdinalIgnoreCase).Where(g => g.Select(r => r.PrimaryId).Distinct().Count() > 1))
@@ -663,6 +777,7 @@ namespace D365SolutionComparer.Services.Membership
             var text = new StringBuilder(); text.AppendLine("TYPES 10266 / 10267 APP ACTION EVIDENCE - DEBUG ONLY");
             text.AppendLine("Evidence only. Types 10266 and 10267 remain Unsupported / Indeterminate; no production key, definition contract or absence proof.");
             text.AppendLine("Candidate A is an internal semantic identifier hypothesis, scoped by any verified exposed references; selected-snapshot uniqueness is not lifecycle proof. Candidate B, display names, GUIDs and hashes never repair A.");
+            text.AppendLine("Candidate P is a separate bounded diagnostic hypothesis. It never repairs Candidate A or establishes production matching, raw-type equivalence or absence.");
             foreach (var type in AppActionEvidenceCollector.RawTypes)
             {
             text.AppendLine("\nRAW TYPE " + type + " MEMBERSHIP"); EachSide(text, (s, label) => {
@@ -679,6 +794,16 @@ namespace D365SolutionComparer.Services.Membership
             text.AppendLine("\nREGISTERED-DEFINITION COMPARISON"); EachSide(text, (s, label) => {
                 foreach (var item in s.Discovery) Line(text, label, item);
             });
+            text.AppendLine("\nREGISTRATION / OBJECTTYPECODE COMPARISON"); EachSide(text, (s, label) => {
+                if (s.Raw.Count == 0) { Line(text, label, "Empty raw-type side; zero registration/metadata/backing reads"); return; }
+                Line(text, label, "solutioncomponent.componenttype=" + s.RawType,
+                    "solutioncomponentdefinition.objecttypecode=" + s.Definition?.ObjectTypeCode,
+                    "solutioncomponentdefinition.name=" + s.Definition?.Name,
+                    "solutioncomponentdefinition.primaryentityname=" + s.Definition?.PrimaryEntityName,
+                    "EntityMetadata(" + (s.EntityName ?? "NotEstablished") + ").ObjectTypeCode=" + (s.MetadataObjectTypeCode?.ToString(CultureInfo.InvariantCulture) ?? "Unavailable"),
+                    "NumericAgreement=" + (s.Definition == null || !s.MetadataObjectTypeCode.HasValue ? "Unavailable" : s.Definition.ObjectTypeCode == s.MetadataObjectTypeCode ? "EqualObserved" : "DifferentObserved"));
+            });
+            text.AppendLine("Numeric agreement/disagreement is audit evidence only; no raw-type equivalence is inferred.");
             text.AppendLine("\nBACKING-ENTITY DISCOVERY"); EachSide(text, (s, label) => {
                 Line(text, label, "backingEntity=" + (s.EntityName ?? "NotEstablished"), "IsAppactionObserved=" + StringComparer.OrdinalIgnoreCase.Equals(s.EntityName, "appaction"));
                 foreach (var item in s.Discovery) Line(text, label, item);
@@ -717,6 +842,46 @@ namespace D365SolutionComparer.Services.Membership
                     "CandidateField=" + row.CandidateField, "CandidateA=" + (row.CandidateA ?? "Incomplete"), "CandidateB=" + (row.CandidateB ?? "NotAvailable"),
                     "CompleteA=" + (row.CandidateA != null && !row.DuplicateA), "BlockingReason=" + (row.DuplicateA ? "Candidate A collision" : row.BlockingReason ?? row.Reason));
             });
+            text.AppendLine("\nPROPOSED BOUNDED IDENTITY - CANDIDATE P"); EachSide(text, (s, label) => {
+                foreach (var row in s.Rows.Values) Line(text, label, row.ObjectId, "CandidateP=" + (row.CandidateP ?? "Incomplete"),
+                    "CompleteP=" + row.CompleteP, "BlockingReason=" + (row.DuplicateP ? row.ProposedBlockingReason == "None" ? "Candidate P collision" : row.ProposedBlockingReason : row.ProposedBlockingReason ?? row.Reason),
+                    "context=" + row.Get("context"), "location=" + row.Get("location"), "type=" + row.Get("type"));
+                Line(text, label, "CandidatePCollisionGroups=" + s.Rows.Values.Where(r => r.DuplicateP).Select(r => r.CandidateP).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            });
+            text.AppendLine("\nSTRUCTURAL VERSUS DEFINITION REFERENCES");
+            text.AppendLine("Structural: contextentity, appmoduleid, parentappactionid. Candidate P requires verified contextentity, verified appmoduleid presence/key and parentappactionid=NotPresent.");
+            text.AppendLine("Definition: onclickeventjavascriptwebresourceid, iconwebresourceid, onclickeventformulacomponentlibraryid, visibilityformulacomponentlibraryid. Excluded from Candidate P.");
+            text.AppendLine("Audit-only: organization/user/ownership/solution/lifecycle IDs. Lookup shadows never supply identity.");
+            foreach (bool source in new[] { true, false })
+            {
+                var rows = source ? SourceRows : TargetRows;
+                Line(text, source ? "Source" : "Target", "CandidateACollisionGroupsAcrossRawTypes=" + rows.Where(r => r.DuplicateA).Select(r => r.CandidateA).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                    "CandidatePCollisionGroupsAcrossRawTypes=" + rows.Where(r => r.DuplicateP).Select(r => r.CandidateP).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+                foreach (var group in Sides.Where(s => s.IsSource == source).SelectMany(s => s.Raw)
+                    .Where(r => r.Record.ObjectId.HasValue && r.Record.ObjectId != Guid.Empty).GroupBy(r => r.Record.ObjectId).Where(g => g.Count() > 1))
+                    Line(text, source ? "Source" : "Target", "RepeatedBackingMembershipAcrossRawTypes=" + group.Key, "references=" + group.Count(),
+                        "rawTypes=[" + string.Join(",", group.Select(r => r.Record.ComponentType).Distinct().OrderBy(t => t)) + "]; repetition is not distinct backing identity");
+            }
+            text.AppendLine("\nINITIAL DEFINITION EVIDENCE"); EachSide(text, (s, label) => {
+                foreach (var row in s.Rows.Values) foreach (var field in AppActionEvidenceCollector.DefinitionFields)
+                    Line(text, label, row.ObjectId, field + "=" + DefinitionValue(row, field));
+            });
+            text.AppendLine("\nCANDIDATE A / P SOURCE / TARGET PAIR COMPARISON");
+            foreach (var pair in Pairs.Concat(ProposedPairs).Where(p => p.Source != null && p.Target != null)
+                .GroupBy(p => p.Source.PrimaryId + ":" + p.Target.PrimaryId).Select(g => g.First()))
+            {
+                Line(text, "Diagnostic only", "SourceRawType=" + pair.Source.RawType, "TargetRawType=" + pair.Target.RawType,
+                    "SourceSubtype=" + pair.Source.Get("type"), "TargetSubtype=" + pair.Target.Get("type"),
+                    "PrimaryIdDifference=" + (pair.Source.PrimaryId != pair.Target.PrimaryId),
+                    "CandidateAEquality=" + Equality(pair.Source.CandidateA, pair.Target.CandidateA),
+                    "CandidatePEquality=" + Equality(pair.Source.CandidateP, pair.Target.CandidateP),
+                    "SourceACollision=" + pair.Source.DuplicateA, "TargetACollision=" + pair.Target.DuplicateA,
+                    "SourcePCollision=" + pair.Source.DuplicateP, "TargetPCollision=" + pair.Target.DuplicateP);
+                foreach (var field in AppActionEvidenceCollector.DefinitionFields)
+                    Line(text, field, "Source=" + DefinitionValue(pair.Source, field), "Target=" + DefinitionValue(pair.Target, field),
+                        "Comparison=" + DefinitionComparison(pair.Source, pair.Target, field));
+            }
+            foreach (var pair in ProposedPairs) Line(text, "Candidate P reconciliation", pair.Outcome, "Source=" + pair.Source?.ObjectId, "Target=" + pair.Target?.ObjectId);
             text.AppendLine("\nDUPLICATE / COLLISION ANALYSIS"); EachSide(text, (s, label) => {
                 foreach (var group in s.Raw.Where(r => r.Record.ObjectId.HasValue && r.Record.ObjectId != Guid.Empty).GroupBy(r => r.Record.ObjectId).Where(g => g.Count() > 1))
                     Line(text, label, "RepeatedRawObjectId=" + group.Key, "references=" + group.Count(), "membership repetition, not distinct backing identity");
@@ -759,6 +924,14 @@ namespace D365SolutionComparer.Services.Membership
             }); return text.ToString();
         }
         private void EachSide(StringBuilder text, Action<AppActionSideEvidence, string> action) { foreach (var side in Sides) action(side, (side.IsSource ? "Source" : "Target") + " Type " + side.RawType); }
+        private static string Equality(string source, string target) => source == null || target == null ? "Incomplete" :
+            StringComparer.OrdinalIgnoreCase.Equals(source, target) ? "EqualObserved" : "DifferentObserved";
+        private static string DefinitionValue(AppActionRecordEvidence row, string field) => row.DefinitionValues.TryGetValue(field, out var value) ? value : "Unavailable";
+        internal static string DefinitionComparison(AppActionRecordEvidence source, AppActionRecordEvidence target, string field)
+        {
+            var left = DefinitionValue(source, field); var right = DefinitionValue(target, field);
+            return left == "Unavailable" || right == "Unavailable" ? "Unavailable" : left == right ? "EqualObserved" : "DifferentObserved";
+        }
     }
 }
 #endif

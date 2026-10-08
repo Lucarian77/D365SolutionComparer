@@ -51,7 +51,7 @@ namespace D365SolutionComparer.Tests
 #endif
         }
 #if DEBUG
-        private const string Backing = "fixture_action", Primary = "fixture_actionid", Secret = "PRIVATE-CONTRACT-PAYLOAD-URL-TOKEN";
+        private const string Backing = "appaction", Primary = "appactionid", Secret = "PRIVATE-CONTRACT-PAYLOAD-URL-TOKEN";
         [TestMethod]
         public void ZeroMembersPerformZeroReads()
         {
@@ -332,6 +332,176 @@ namespace D365SolutionComparer.Tests
             }); thread.SetApartmentState(ApartmentState.STA); thread.Start(); Assert.IsTrue(thread.Join(TimeSpan.FromSeconds(30)));
             if (error != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
+        [TestMethod]
+        public void CandidatePMatchesAcrossRawTypesDespiteDifferentExecutionResourcesWithoutRepairingA()
+        {
+            var pair = ProposedPair();
+            AddReference(pair.Source, pair.Source.Data.Single(), "onclickeventjavascriptwebresourceid", "webresource", 61, "script_source");
+            AddReference(pair.Target, pair.Target.Data.Single(), "onclickeventjavascriptwebresourceid", "webresource", 61, "script_target");
+            var report = pair.Capture(); var left = Record(report, true, 10266); var right = Record(report, false, 10267);
+            Assert.AreEqual(left.CandidateP, right.CandidateP); Assert.IsTrue(left.CompleteP && right.CompleteP);
+            Assert.AreNotEqual(left.CandidateA, right.CandidateA);
+            Assert.AreEqual("DiagnosticCandidatePPairHypothesis", report.ProposedPairs.Single().Outcome);
+            Assert.IsTrue(report.Pairs.All(p => p.Outcome == "OneSidedEvidence"));
+            StringAssert.Contains(report.Build(), "CandidateAEquality=DifferentObserved");
+            StringAssert.Contains(report.Build(), "CandidatePEquality=EqualObserved");
+        }
+        [DataTestMethod, DataRow("contextentity"), DataRow("type"), DataRow("location"), DataRow("context")]
+        public void CandidatePDistinguishesEachExplicitBindingDimension(string field)
+        {
+            var pair = ProposedPair(); var target = pair.Target.Data.Single();
+            if (field == "contextentity")
+            {
+                var id = ((EntityReference)target[field]).Id;
+                pair.Target.Context.RemoveAll(c => c.Record.ObjectId == id);
+                pair.Target.Context.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 1, id), IdentityResolutionStatus.Resolved, "account"));
+            }
+            else target[field] = new OptionSetValue(2);
+            var report = pair.Capture(); Assert.AreNotEqual(Record(report, true, 10266).CandidateP, Record(report, false, 10267).CandidateP);
+            Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "OneSidedEvidence"));
+        }
+        [TestMethod]
+        public void CandidatePUsesPortableAppModuleWithDifferentLocalIds()
+        {
+            var pair = ProposedPair();
+            AddReference(pair.Source, pair.Source.Data.Single(), "appmoduleid", "appmodule", 80, "publisher_app");
+            AddReference(pair.Target, pair.Target.Data.Single(), "appmoduleid", "appmodule", 80, "publisher_app");
+            var report = pair.Capture(); var left = Record(report, true, 10266); var right = Record(report, false, 10267);
+            Assert.AreEqual(left.CandidateP, right.CandidateP); Assert.IsTrue(left.CompleteP);
+            Assert.IsFalse(left.CandidateP.Contains(((EntityReference)pair.Source.Data.Single()["appmoduleid"]).Id.ToString()));
+        }
+        [TestMethod]
+        public void CandidatePRequiresVerifiedNullModuleAndParentPresence()
+        {
+            var report = ProposedPair().Capture(); var row = Record(report, true, 10266);
+            Assert.IsTrue(row.CompleteP); Assert.AreEqual("NotPresent", row.References["appmoduleid"].Status);
+            Assert.AreEqual("NotPresent", row.References["parentappactionid"].Status);
+            Assert.AreEqual("DiagnosticCandidatePPairHypothesis", report.ProposedPairs.Single().Outcome);
+        }
+        [TestMethod]
+        public void PopulatedParentActionMakesCandidatePIneligible()
+        {
+            var pair = ProposedPair(); pair.Source.Data.Single()["parentappactionid"] = new EntityReference("appaction", Guid.NewGuid());
+            var row = Record(pair.Capture(), true, 10266); Assert.IsNull(row.CandidateP);
+            StringAssert.Contains(row.ProposedBlockingReason, "parentappactionid must be verified NotPresent");
+        }
+        [DataTestMethod, DataRow(false), DataRow(true)]
+        public void UnavailableParentIsNeverTreatedAsNotPresent(bool runtimeFault)
+        {
+            var pair = ProposedPair();
+            if (runtimeFault) Fail(pair.Source, "parentappactionid");
+            else pair.Source.Attributes.RemoveAll(a => a.LogicalName == "parentappactionid");
+            var row = Record(pair.Capture(), true, 10266); Assert.IsFalse(row.CompleteP);
+            StringAssert.Contains(row.ProposedBlockingReason, "parentappactionid must be verified NotPresent");
+        }
+        [TestMethod]
+        public void CandidatePCollidesAcrossRawTypesWhenDifferentBackingRowsShareItsKey()
+        {
+            var pair = ProposedPair(); var second = pair.Source.Add(10267); Proposed(pair.Source, second);
+            AddReference(pair.Source, pair.Source.Data.First(), "onclickeventjavascriptwebresourceid", "webresource", 61, "script_one");
+            AddReference(pair.Source, second, "onclickeventjavascriptwebresourceid", "webresource", 61, "script_two");
+            var report = pair.Capture(); Assert.IsTrue(report.Sides.Where(s => s.IsSource).SelectMany(s => s.Rows.Values).All(r => r.DuplicateP));
+            Assert.IsFalse(report.Sides.Where(s => s.IsSource).SelectMany(s => s.Rows.Values).Any(r => r.DuplicateA));
+            Assert.IsTrue(report.ProposedPairs.All(p => p.Outcome == "Ambiguous"));
+            StringAssert.Contains(report.Build(), "CandidatePCollisionGroups=1");
+        }
+        [TestMethod]
+        public void RepeatedSameBackingRowAcrossRawTypesDoesNotCreateCandidatePCollision()
+        {
+            var pair = ProposedPair(); pair.Source.Raw.Add(Unsupported(10267, pair.Source.Data.Single().Id, Backing));
+            var report = pair.Capture(); Assert.IsFalse(report.Sides.SelectMany(s => s.Rows.Values).Any(r => r.DuplicateP));
+            Assert.AreEqual(1, report.ProposedPairs.Count); Assert.AreEqual("DiagnosticCandidatePPairHypothesis", report.ProposedPairs.Single().Outcome);
+        }
+        [DataTestMethod, DataRow(10266, "EqualObserved"), DataRow(10267, "DifferentObserved")]
+        public void RegistrationObjectTypeCodeComparisonNeverInfersEquivalence(int code, string outcome)
+        {
+            var pair = ProposedPair(); pair.Source.MetadataObjectTypeCode = code;
+            var report = pair.Capture(); Assert.AreEqual(code, report.Sides.Single(s => s.IsSource && s.RawType == 10266).MetadataObjectTypeCode);
+            StringAssert.Contains(report.Build(), "NumericAgreement=" + outcome);
+            StringAssert.Contains(report.Build(), "no raw-type equivalence is inferred");
+            Assert.IsTrue(pair.Source.Raw.All(r => r.Status == IdentityResolutionStatus.Unsupported && r.ComparisonKey == null));
+        }
+        [DataTestMethod, DataRow("sequence"), DataRow("hidden"), DataRow("isdisabled")]
+        public void DefinitionOnlyDifferencesLeaveCandidatesUnchanged(string field)
+        {
+            var pair = ProposedPair(); pair.Target.Data.Single()[field] = field == "sequence" ? (object)2m : true;
+            var report = pair.Capture(); var left = Record(report, true, 10266); var right = Record(report, false, 10267);
+            Assert.AreEqual(left.CandidateP, right.CandidateP); Assert.AreEqual(left.CandidateA, right.CandidateA);
+            Assert.AreEqual("DifferentObserved", AppActionEvidenceReport.DefinitionComparison(left, right, field));
+        }
+        [TestMethod]
+        public void DecimalDefinitionComparisonIgnoresScaleAndDoesNotCompareAsText()
+        {
+            var pair = ProposedPair(); pair.Source.Data.Single()["sequence"] = 1.00m; pair.Target.Data.Single()["sequence"] = 1m;
+            var report = pair.Capture(); Assert.AreEqual("EqualObserved", AppActionEvidenceReport.DefinitionComparison(Record(report, true, 10266), Record(report, false, 10267), "sequence"));
+        }
+        [TestMethod]
+        public void OptionalDefinitionFaultDoesNotInvalidateCorrelationOrEitherCandidate()
+        {
+            var pair = ProposedPair(); Fail(pair.Source, "hidden"); var report = pair.Capture();
+            var left = Record(report, true, 10266); var right = Record(report, false, 10267);
+            Assert.AreEqual("Unique", left.Status); Assert.IsTrue(left.CompleteP); Assert.AreEqual(left.CandidateA, right.CandidateA);
+            Assert.AreEqual("Unavailable", AppActionEvidenceReport.DefinitionComparison(left, right, "hidden"));
+            Assert.AreEqual("EqualObserved", AppActionEvidenceReport.DefinitionComparison(left, right, "sequence"));
+        }
+        [TestMethod]
+        public void ExecutionReferenceFaultDoesNotBlockIndependentlyVerifiedCandidateP()
+        {
+            var pair = ProposedPair(); AddReference(pair.Source, pair.Source.Data.Single(), "onclickeventjavascriptwebresourceid", "webresource", 61, "script");
+            Fail(pair.Source, "onclickeventjavascriptwebresourceid"); var row = Record(pair.Capture(), true, 10266);
+            Assert.AreEqual("Unique", row.Status); Assert.IsNull(row.CandidateA); Assert.IsTrue(row.CompleteP);
+        }
+        [TestMethod]
+        public void CandidatePRequiresContextEntityToBeAVerifiedTableRelationship()
+        {
+            var pair = ProposedPair(); pair.Source.Attributes.RemoveAll(a => a.LogicalName == "contextentity");
+            AddReference(pair.Source, pair.Source.Data.Single(), "contextentity", "webresource", 61, "not_a_table");
+            var row = Record(pair.Capture(), true, 10266); Assert.IsFalse(row.CompleteP);
+            StringAssert.Contains(row.ProposedBlockingReason, "portable table identity unavailable");
+        }
+        [DataTestMethod, DataRow("context"), DataRow("location"), DataRow("type")]
+        public void CandidatePNeverInfersMissingOrMalformedNumericOptions(string field)
+        {
+            var pair = ProposedPair(); pair.Source.Data.Single()[field] = "0";
+            var row = Record(pair.Capture(), true, 10266); Assert.IsFalse(row.CompleteP);
+            StringAssert.Contains(row.ProposedBlockingReason, field + " unavailable");
+        }
+        [TestMethod]
+        public void ProposedEvidenceReusesReadsAndLeavesMembershipAndZeroSidesUnchanged()
+        {
+            var pair = ProposedPair(); var source = pair.Source.Snapshot(); var target = pair.Target.Snapshot();
+            var before = new SolutionMembershipComparer().Compare(source, target).Select(r => r.Presence).ToArray();
+            var report = new AppActionEvidenceCollector().Capture(pair.Source.Service, source, "1", pair.Target.Service, target, "2", CancellationToken.None);
+            CollectionAssert.AreEqual(before, new SolutionMembershipComparer().Compare(source, target).Select(r => r.Presence).ToArray());
+            Assert.AreEqual(3, pair.Source.Reads); Assert.AreEqual(3, pair.Target.Reads);
+            Assert.IsTrue(report.Sides.Where(s => s.Raw.Count == 0).All(s => s.Requests.Count == 0));
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+            foreach (var section in new[] { "REGISTRATION / OBJECTTYPECODE COMPARISON", "PROPOSED BOUNDED IDENTITY - CANDIDATE P", "STRUCTURAL VERSUS DEFINITION REFERENCES", "INITIAL DEFINITION EVIDENCE", "CANDIDATE A / P SOURCE / TARGET PAIR COMPARISON" })
+                StringAssert.Contains(report.Build(), section);
+        }
+        private static Pair ProposedPair()
+        {
+            var pair = new Pair(); Proposed(pair.Source, pair.Source.Add(10266)); Proposed(pair.Target, pair.Target.Add(10267)); return pair;
+        }
+        private static void Proposed(Fixture fixture, Entity row)
+        {
+            foreach (var field in new[] { "context", "location", "type" })
+            { if (!fixture.Attributes.Any(a => a.LogicalName == field)) fixture.Attributes.Add(Attribute(field, new PicklistAttributeMetadata())); row[field] = new OptionSetValue(field == "context" ? 1 : 0); }
+            foreach (var field in new[] { "appmoduleid", "parentappactionid" })
+                if (!fixture.Attributes.Any(a => a.LogicalName == field)) fixture.Attributes.Add(Attribute(field, new LookupAttributeMetadata { Targets = new[] { field == "appmoduleid" ? "appmodule" : "appaction" } }));
+            AddReference(fixture, row, "contextentity", "entity", 1, "contact");
+            if (!fixture.Attributes.Any(a => a.LogicalName == "sequence")) fixture.Attributes.Add(Attribute("sequence", new DecimalAttributeMetadata()));
+            foreach (var field in new[] { "hidden", "isdisabled" })
+                if (!fixture.Attributes.Any(a => a.LogicalName == field)) fixture.Attributes.Add(Attribute(field, new BooleanAttributeMetadata()));
+            row["sequence"] = 1m; row["hidden"] = false; row["isdisabled"] = false;
+        }
+        private static void AddReference(Fixture fixture, Entity row, string field, string entity, int type, string key)
+        {
+            if (!fixture.Attributes.Any(a => a.LogicalName == field)) fixture.Attributes.Add(Attribute(field, new LookupAttributeMetadata { Targets = new[] { entity } }));
+            var existing = fixture.Context.FirstOrDefault(c => c.Record.ComponentType == type && StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, key));
+            var id = existing?.Record.ObjectId ?? Guid.NewGuid(); row[field] = new EntityReference(entity, id);
+            if (existing == null) fixture.Context.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), type, id), IdentityResolutionStatus.Resolved, key));
+        }
         private static ComponentIdentity Unsupported(int type, Guid id, string backing) => new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), type, id),
             IdentityResolutionStatus.Unsupported, registeredDefinition: backing == null ? null : new SolutionComponentDefinitionIdentity(type, "AppAction", backing));
         private static AppActionRecordEvidence Record(AppActionEvidenceReport report, bool source, int type) => report.Sides.Single(s => s.IsSource == source && s.RawType == type).Rows.Values.Single();
@@ -349,6 +519,7 @@ namespace D365SolutionComparer.Tests
         }
         private sealed class Fixture
         {
+            internal int? MetadataObjectTypeCode;
             internal readonly List<Entity> Data = new List<Entity>();
             internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>(), Context = new List<ComponentIdentity>();
             internal readonly List<AttributeMetadata> Attributes = new List<AttributeMetadata>();
@@ -365,6 +536,7 @@ namespace D365SolutionComparer.Tests
                         Assert.IsInstanceOfType(r, typeof(RetrieveEntityRequest)); var request = (RetrieveEntityRequest)r;
                         Assert.AreEqual(Backing, request.LogicalName); Assert.IsFalse(request.RetrieveAsIfPublished);
                         var metadata = new EntityMetadata { LogicalName = Backing }; Set(metadata, "PrimaryIdAttribute", Primary);
+                        Set(metadata, "ObjectTypeCode", MetadataObjectTypeCode);
                         Set(metadata, "PrimaryNameAttribute", "name"); Set(metadata, "Attributes", Attributes.ToArray());
                         var response = new RetrieveEntityResponse(); response.Results["EntityMetadata"] = metadata; return response;
                     },
