@@ -610,6 +610,23 @@ namespace D365SolutionComparer.Tests
             Assert.IsFalse(cached.Source.Rows.Values.Any(r => r.DuplicateA)); Assert.IsFalse(cached.Target.Rows.Values.Any(r => r.DuplicateA));
         }
         [TestMethod]
+        public void CompletedCanvasCandidatePIsReusedReadOnlyAndAppElementEvidenceCannotRepairIt()
+        {
+            var pair = TwoCanvasPairs(); var cached = pair.CaptureMembers();
+            var member = cached.Source.Rows.Values.Single(); Assert.IsTrue(member.CompleteP);
+            member.RuntimeColumns.Remove(Type300EvidenceCollector.ProposedIdentifierField);
+            Type300EvidenceCollector.EvaluateCandidateP(member, cached.Source.Snapshot);
+            Assert.IsFalse(member.CompleteP); Assert.IsNotNull(member.CandidateA);
+            int before = pair.Source.Queries.Count;
+            var report = pair.Capture(cached: cached);
+            Assert.AreSame(member, report.Source.CanvasReferenceRows[member.ObjectId]); Assert.IsFalse(member.CompleteP);
+            Assert.AreEqual(2, report.Pairs.Count(p => p.Outcome == "SemanticPair")); // Existing A evidence is independent from P.
+            Assert.IsTrue(pair.Source.Queries.Skip(before).Where(q => q.EntityName == "canvasapp")
+                .All(q => !q.Criteria.Conditions.Single().Values.Contains(member.ObjectId)));
+            Assert.AreEqual(2, report.Source.Requests.Count(r => r.StartsWith("RetrieveMultiple canvasapp;")));
+            Assert.IsTrue(report.Source.CanvasReferenceRows.Values.Where(r => r.ObjectId != member.ObjectId).All(r => r.CompleteP));
+        }
+        [TestMethod]
         public void DifferentDependencyCandidateCannotPairThroughIdenticalCandidateBOrHash()
         {
             var pair = new Pair(); var left = pair.Source.AddCanvas(name: "left"); var right = pair.Target.AddCanvas(name: "right");
