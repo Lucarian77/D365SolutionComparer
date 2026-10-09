@@ -45,8 +45,8 @@ namespace D365SolutionComparer.Services.Membership
             token.ThrowIfCancellationRequested();
             var report = new AppElementEvidenceReport
             {
-                Source = Read(sourceService, source, sourceVersion, token, progress),
-                Target = Read(targetService, target, targetVersion, token, progress)
+                Source = Read(sourceService, source, sourceVersion, token, progress, ReferenceEquals(completedType300Evidence?.Source.Snapshot, source) ? completedType300Evidence.Source.Metadata : null),
+                Target = Read(targetService, target, targetVersion, token, progress, ReferenceEquals(completedType300Evidence?.Target.Snapshot, target) ? completedType300Evidence.Target.Metadata : null)
             };
             CompleteCanvasReferences(sourceService, targetService, report, completedType300Evidence, token, progress);
             foreach (var side in new[] { report.Source, report.Target })
@@ -62,10 +62,11 @@ namespace D365SolutionComparer.Services.Membership
         }
 
         private static AppElementSideEvidence Read(IOrganizationService service, MembershipSnapshot snapshot, string version,
-            CancellationToken token, Action<string> progress)
+            CancellationToken token, Action<string> progress, EntityMetadata cachedCanvasMetadata = null)
         {
             if (service == null) throw new ArgumentNullException(nameof(service));
             var side = new AppElementSideEvidence { Snapshot = snapshot, Version = version };
+            if (cachedCanvasMetadata?.LogicalName == "canvasapp") side.TypeMetadataCache["canvasapp"] = cachedCanvasMetadata;
             side.Raw.AddRange(snapshot.Components.Where(c => c.Record.ComponentType == 10072));
             var ids = side.Raw.Where(c => c.Record.ObjectId.HasValue && c.Record.ObjectId != Guid.Empty)
                 .Select(c => c.Record.ObjectId.Value).Distinct().OrderBy(id => id).ToArray();
@@ -86,17 +87,18 @@ namespace D365SolutionComparer.Services.Membership
                      StringComparer.OrdinalIgnoreCase.Equals(name, attribute.AttributeOf + "yominame"));
                 bool excluded = new[] { "attachment", "binary", "base64", "encoded", "secure", "secret", "credential" }.Any(p => name.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0);
                 bool text = attribute.AttributeType == AttributeTypeCode.String || attribute.AttributeType == AttributeTypeCode.Memo;
+                bool typeProbe = PlausibleTypeField(attribute);
                 bool content = text && (!TextEvidence.Contains(name) || attribute.AttributeType == AttributeTypeCode.Memo);
                 bool allowedShape = name == side.PrimaryId ? attribute.AttributeType == AttributeTypeCode.Uniqueidentifier :
                     text || attribute.AttributeType == AttributeTypeCode.EntityName || attribute.AttributeType == AttributeTypeCode.Uniqueidentifier ||
-                    attribute.AttributeType == AttributeTypeCode.Lookup || ScalarEvidence.Contains(name) &&
+                    attribute.AttributeType == AttributeTypeCode.Lookup || (ScalarEvidence.Contains(name) || typeProbe) &&
                     (attribute.AttributeType == AttributeTypeCode.Picklist || attribute.AttributeType == AttributeTypeCode.Integer ||
                      attribute.AttributeType == AttributeTypeCode.Boolean || attribute.AttributeType == AttributeTypeCode.State || attribute.AttributeType == AttributeTypeCode.Status);
                 bool readable = attribute.IsValidForRead == true && !excluded && !lookupShadow && allowedShape;
                 side.Schema.Add("appelement." + name + "; type=" + attribute.AttributeType + "; readable=" + attribute.IsValidForRead +
                     "; capture=" + (lookupShadow ? "ExcludedLookupShadow" : readable ? content ? "HashOnly" : "Audit" : "UnavailableOrNotQueried"));
                 if (!readable) continue;
-                columns.Add(name); if (content) hashes.Add(name);
+                columns.Add(name); if (typeProbe) side.TypeRequestedColumns.Add(name); if (content) hashes.Add(name);
             }
             if (!columns.Contains(side.PrimaryId))
             { foreach (var row in side.Rows.Values) { row.Reason = "Primary ID is not readable; no backing query"; } return side; }
@@ -107,6 +109,10 @@ namespace D365SolutionComparer.Services.Membership
                 if (found.Status != "Unique") continue;
                 row.PrimaryId = found.Row.Id;
                 row.CriticalComplete = found.CriticalComplete;
+                row.RuntimeColumns.UnionWith(found.Columns);
+                foreach (var attribute in metadata.Attributes.Where(PlausibleTypeField))
+                    row.TypeValues[attribute.LogicalName] = found.Columns.Contains(attribute.LogicalName)
+                        ? SafeTypeValue(found.Row.GetAttributeValue<object>(attribute.LogicalName)) : null;
                 row.Context.Add("Successfully retrieved columns=[" + string.Join(",", found.Columns.OrderBy(c => c, StringComparer.Ordinal)) + "]");
                 if (!found.CriticalComplete) row.Context.Add("Identity-critical evidence unavailable; neither candidate may be evaluated");
                 foreach (var column in columns.Except(found.Columns))
@@ -135,12 +141,165 @@ namespace D365SolutionComparer.Services.Membership
                 row.Managed = found.Row.GetAttributeValue<object>("ismanaged") is bool ? (bool?)found.Row.GetAttributeValue<bool>("ismanaged") : null;
             }
             ResolveContext(service, side, metadata, token, progress);
+            InvestigateTypeSources(service, side, metadata, token);
             return side;
+        }
+
+        // Evidence only: this analysis never writes ElementType, CandidateA or CandidateB.
+        private static bool PlausibleTypeField(AttributeMetadata attribute)
+        {
+            var name = attribute.LogicalName;
+            bool shape = attribute.AttributeType == AttributeTypeCode.EntityName || attribute.AttributeType == AttributeTypeCode.Picklist ||
+                attribute.AttributeType == AttributeTypeCode.Integer || attribute.AttributeType == AttributeTypeCode.String;
+            bool named = new[] { "objectidtype", "componenttype", "type", "elementtype", "appelementtype", "objecttypecode" }.Contains(name) ||
+                name.IndexOf("componentkind", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("elementkind", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("componenttype", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("elementtype", StringComparison.OrdinalIgnoreCase) >= 0;
+            // Descriptions are used only to locate schema candidates; labels/descriptions never establish a discriminator contract.
+            var descriptions = attribute.Description?.LocalizedLabels.Select(l => l.Label) ?? Enumerable.Empty<string>();
+            bool described = descriptions.Any(d => d != null && (d.IndexOf("component kind", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                d.IndexOf("element type", StringComparison.OrdinalIgnoreCase) >= 0 || d.IndexOf("referenced entity", StringComparison.OrdinalIgnoreCase) >= 0));
+            return shape && (named || described || attribute.AttributeType == AttributeTypeCode.EntityName);
+        }
+
+        private static string SafeTypeValue(object raw)
+        {
+            if (raw == null) return "";
+            if (raw is OptionSetValue) return ((OptionSetValue)raw).Value.ToString(CultureInfo.InvariantCulture);
+            if (raw is int) return ((int)raw).ToString(CultureInfo.InvariantCulture);
+            if (raw is string && (((string)raw).Trim().Length <= 128 && ValidName(((string)raw).Trim()))) return ((string)raw).Trim();
+            return "MalformedOrRedacted"; // Never export an arbitrary string payload as a type discriminator.
+        }
+
+        private static void InvestigateTypeSources(IOrganizationService service, AppElementSideEvidence side, EntityMetadata metadata, CancellationToken token)
+        {
+            var attributes = metadata.Attributes.Where(PlausibleTypeField).OrderBy(a => a.LogicalName, StringComparer.Ordinal).ToArray();
+            foreach (var attribute in attributes)
+            {
+                bool selected = side.TypeRequestedColumns.Contains(attribute.LogicalName);
+                side.TypeSchema.Add("appelement." + attribute.LogicalName + "; AttributeType=" + attribute.AttributeType +
+                    "; MetadataReadable=" + attribute.IsValidForRead + "; Selected=" + selected + "; AttributeMetadataId=" + attribute.MetadataId);
+                var enumeration = attribute as EnumAttributeMetadata;
+                foreach (var option in (enumeration?.OptionSet?.Options ?? new OptionMetadataCollection()).Where(o => o != null))
+                    side.TypeSchema.Add("OptionProvenance=RetrieveEntity(appelement,Attributes|Relationships); field=" + attribute.LogicalName +
+                        "; OptionSetName=" + enumeration.OptionSet.Name + "; OptionSetMetadataId=" + enumeration.OptionSet.MetadataId +
+                        "; IsGlobal=" + enumeration.OptionSet.IsGlobal + "; NumericValue=" + option.Value + "; LabelsAuditOnly=[" +
+                        string.Join(" | ", option.Label?.LocalizedLabels.Select(l => "LCID=" + l.LanguageCode + ":" + l.Label) ?? Enumerable.Empty<string>()) + "]");
+            }
+            foreach (var name in new[] { "objectidtype", "componenttype", "type", "elementtype", "appelementtype", "objecttypecode" }.Except(attributes.Select(a => a.LogicalName)))
+                side.TypeSchema.Add("appelement." + name + "; NotExposedOrNotTypeBearing=True; Selected=False");
+            // EntityName strings are checked independently against selected entity metadata, never inferred from a lookup/GUID.
+            var entityNames = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in side.Rows.Values.Where(r => r.Status == "Unique"))
+            {
+                token.ThrowIfCancellationRequested();
+                var verified = new List<string>();
+                foreach (var attribute in attributes)
+                {
+                    string field = attribute.LogicalName;
+                    row.TypeValues.TryGetValue(field, out var value);
+                    string state = !row.RuntimeColumns.Contains(field) ? "Unavailable" : string.IsNullOrEmpty(value) ? "NotPresent" : "ObservedSemanticsUnproven";
+                    var enumeration = attribute as EnumAttributeMetadata;
+                    if (!string.IsNullOrEmpty(value) && value != "MalformedOrRedacted" && row.RuntimeColumns.Contains(field))
+                    {
+                        int number;
+                        var options = enumeration?.OptionSet?.Options.Where(o => o != null && o.Value.HasValue && int.TryParse(value, NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out number) && o.Value.Value == number).ToArray() ?? new OptionMetadata[0];
+                        if (attribute.AttributeType == AttributeTypeCode.Picklist)
+                        {
+                            state = options.Length == 1 ? "VerifiedOptionMetadataValue" : options.Length > 1 ? "AmbiguousOptionMetadata" : "OptionMappingUnavailable";
+                            if (options.Length == 1) verified.Add(field + ":picklist:" + value);
+                        }
+                        else if (attribute.AttributeType == AttributeTypeCode.EntityName)
+                        {
+                            if (!ValidName(value) || int.TryParse(value, out number)) state = "EntityNameInterpretationUnavailable";
+                            else
+                            {
+                                if (!entityNames.ContainsKey(value))
+                                {
+                                    var entitySchema = StringComparer.OrdinalIgnoreCase.Equals(value, "appelement") ? metadata : Schema(service, value, side, token);
+                                    entityNames[value] = entitySchema != null && StringComparer.OrdinalIgnoreCase.Equals(entitySchema.LogicalName, value);
+                                }
+                                state = entityNames[value] ? "VerifiedEntityNameTarget; referenced-component discriminator semantics unproven" : "EntityNameTargetUnavailable";
+                                // Target existence alone does not prove which AppElement kind the field represents.
+                            }
+                        }
+                    }
+                    row.TypeAnalysis.Add("Field=" + field + "; RuntimeReadable=" + row.RuntimeColumns.Contains(field) +
+                        "; ActualValue=" + (value ?? "Unavailable") + "; DiscriminatorStatus=" + state + "; Provenance=selected appelement row + RetrieveEntity attribute metadata");
+                }
+                // Values from different domains/fields are not silently equated; multiple populated sources need an explicit mapping contract.
+                var populated = attributes.Where(a => row.TypeValues.TryGetValue(a.LogicalName, out var v) && !string.IsNullOrEmpty(v)).ToArray();
+                row.IndependentTypeStatus = populated.Length > 1 ? "AmbiguousMultipleDiscriminators; no inter-field mapping contract" :
+                    verified.Count == 1 && populated.Length == 1 ? "VerifiedExplicitOptionDiscriminatorEvidence" : "Incomplete; no independently verified discriminator";
+                row.IndependentTypeComplete = populated.Length == 1 && verified.Count == 1;
+                row.TypeAnalysis.Add("CandidateAUnchanged=True; IndependentElementTypeComplete=" + row.IndependentTypeComplete +
+                    "; IndependentTypeStatus=" + row.IndependentTypeStatus + "; Canvas App/parent/GUID/B/hash evidence cannot supply type");
+            }
+            if (side.Rows.Values.Any(r => r.Status == "Unique")) ReadTypeRegistration(service, side, token);
+        }
+
+        private static void ReadTypeRegistration(IOrganizationService service, AppElementSideEvidence side, CancellationToken token)
+        {
+            foreach (var definition in side.Raw.Select(r => r.RegisteredDefinition).Where(d => d != null).Distinct())
+                side.TypeRegistration.Add("CompletedSnapshotRegistration; ObjectTypeCode=" + definition.ObjectTypeCode +
+                    "; Name=" + definition.Name + "; PrimaryEntityName=" + definition.PrimaryEntityName + "; catalog evidence only; no child-type mapping inferred");
+            var metadata = Schema(service, "solutioncomponentdefinition", side, token);
+            if (metadata == null) { side.TypeRegistration.Add("Registered-definition metadata unavailable; no discriminator contract inferred"); return; }
+            var code = metadata.Attributes.SingleOrDefault(a => a.LogicalName == "objecttypecode");
+            if (code?.IsValidForRead != true || code.AttributeType != AttributeTypeCode.Integer && code.AttributeType != AttributeTypeCode.Picklist)
+            { side.TypeRegistration.Add("Readable registered objecttypecode unavailable; no query or inferred child type"); return; }
+            var columns = metadata.Attributes.Where(a => a.IsValidForRead == true && (a.LogicalName == metadata.PrimaryIdAttribute ||
+                a.LogicalName == "objecttypecode" || a.LogicalName == "name" || a.LogicalName == "primaryentityname" || PlausibleTypeField(a)))
+                .Where(a => a.AttributeType == AttributeTypeCode.Uniqueidentifier || a.AttributeType == AttributeTypeCode.String ||
+                    a.AttributeType == AttributeTypeCode.EntityName || a.AttributeType == AttributeTypeCode.Integer || a.AttributeType == AttributeTypeCode.Picklist)
+                .Select(a => a.LogicalName).Distinct().OrderBy(f => f, StringComparer.Ordinal).ToArray();
+            foreach (var attribute in metadata.Attributes.Where(PlausibleTypeField))
+                side.TypeRegistration.Add("RegistrationSchema; Field=" + attribute.LogicalName + "; AttributeType=" + attribute.AttributeType +
+                    "; MetadataReadable=" + attribute.IsValidForRead + "; Selected=" + columns.Contains(attribute.LogicalName));
+            if (!columns.Contains(metadata.PrimaryIdAttribute)) { side.TypeRegistration.Add("Registration primary ID unavailable; no query"); return; }
+            var seen = new Dictionary<Guid, Entity>(); int page = 1; string cookie = null;
+            try
+            {
+                while (true)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var query = new QueryExpression("solutioncomponentdefinition") { ColumnSet = new ColumnSet(columns),
+                        PageInfo = new PagingInfo { Count = BatchSize, PageNumber = page, PagingCookie = cookie } };
+                    query.Criteria.AddCondition("objecttypecode", ConditionOperator.Equal, 10072); query.AddOrder(metadata.PrimaryIdAttribute, OrderType.Ascending);
+                    side.Requests.Add("RetrieveMultiple solutioncomponentdefinition; objecttypecode=10072; page=" + page + "; selected registration only");
+                    var response = service.RetrieveMultiple(query); token.ThrowIfCancellationRequested();
+                    if (response == null) { side.TypeRegistration.Add("Registration incomplete response"); return; }
+                    side.Pages.Add("solutioncomponentdefinition; page=" + page + "; ReturnedRows=" + response.Entities.Count +
+                        "; MoreRecords=" + response.MoreRecords + "; PagingCookieSupplied=" + !string.IsNullOrEmpty(response.PagingCookie));
+                    int before = seen.Count;
+                    foreach (var row in response.Entities)
+                    {
+                        if (row == null || row.LogicalName != "solutioncomponentdefinition" || row.Id == Guid.Empty ||
+                            Type31EvidenceCollector.Id(row, metadata.PrimaryIdAttribute) != row.Id || SafeTypeValue(row.GetAttributeValue<object>("objecttypecode")) != "10072")
+                        { side.TypeRegistration.Add("Registration incomplete/conflicting primary key or raw code; no inference"); return; }
+                        if (seen.TryGetValue(row.Id, out var prior) && !Type31EvidenceCollector.SameReturnedRow(prior, row))
+                        { side.TypeRegistration.Add("Conflicting registration rows; no inference"); return; }
+                        seen[row.Id] = row;
+                    }
+                    if (!response.MoreRecords) break;
+                    if (seen.Count == before || !string.IsNullOrEmpty(response.PagingCookie) && response.PagingCookie == cookie)
+                    { side.TypeRegistration.Add("Registration stalled paging; terminal retrieval not proven"); return; }
+                    cookie = response.PagingCookie; page++;
+                }
+                side.TypeRegistration.Add("Terminal registration retrieval; distinctRows=" + seen.Count + "; pageCount=" + page + "; catalog labels do not establish selected-row subtype");
+                foreach (var row in seen.Values) foreach (var column in columns)
+                    side.TypeRegistration.Add("RegistrationRow=" + row.Id + "; Field=" + column + "; Value=" + SafeTypeValue(row.GetAttributeValue<object>(column)) +
+                        "; No explicit selected-AppElement discriminator mapping established by numeric agreement/catalog label alone");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error) { token.ThrowIfCancellationRequested(); side.TypeRegistration.Add("Registration fault; " + SafeFault(error) + "; no type inference"); }
         }
 
         private static EntityMetadata Schema(IOrganizationService service, string entity, AppElementSideEvidence side, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
+            if (side.TypeMetadataCache.TryGetValue(entity, out var cachedMetadata))
+            { side.TypeSchema.Add("EntityName target metadata reused within the same snapshot/operation: " + entity); return cachedMetadata; }
             side.Requests.Add("Execute RetrieveEntity(" + entity + ", Attributes|Relationships, RetrieveAsIfPublished=False)");
             try
             {
@@ -161,6 +320,7 @@ namespace D365SolutionComparer.Services.Membership
                     if (relationship != null) side.Relationships.Add("Intersect " + relationship.IntersectEntityName + "; relationship=" + relationship.SchemaName + "; not scanned");
                 foreach (var attribute in metadata.Attributes.OfType<LookupAttributeMetadata>())
                     side.Relationships.Add(entity + "." + attribute.LogicalName + "; metadata lookup targets=[" + string.Join(",", attribute.Targets ?? new string[0]) + "]");
+                side.TypeMetadataCache[entity] = metadata;
                 return metadata;
             }
             catch (OperationCanceledException) { throw; }
@@ -539,6 +699,9 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly SortedDictionary<Guid, AppElementRecordEvidence> Rows = new SortedDictionary<Guid, AppElementRecordEvidence>();
         internal readonly List<string> Schema = new List<string>(), Relationships = new List<string>(), Requests = new List<string>(), Pages = new List<string>();
         internal readonly List<string> RetrievalDiagnostics = new List<string>();
+        internal readonly List<string> TypeSchema = new List<string>(), TypeRegistration = new List<string>();
+        internal readonly HashSet<string> TypeRequestedColumns = new HashSet<string>(StringComparer.Ordinal);
+        internal readonly Dictionary<string, EntityMetadata> TypeMetadataCache = new Dictionary<string, EntityMetadata>(StringComparer.OrdinalIgnoreCase);
         internal CanvasAppSideEvidence CanvasDependencies;
         internal readonly SortedDictionary<Guid, CanvasAppRecordEvidence> CanvasReferenceRows = new SortedDictionary<Guid, CanvasAppRecordEvidence>();
         internal readonly HashSet<Guid> CanvasMemberIds = new HashSet<Guid>();
@@ -559,6 +722,11 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly Dictionary<string, EntityReference> References = new Dictionary<string, EntityReference>();
         internal readonly Dictionary<string, Tuple<string, string, Guid>> GuidLinks = new Dictionary<string, Tuple<string, string, Guid>>();
         internal readonly List<string> Context = new List<string>();
+        internal readonly HashSet<string> RuntimeColumns = new HashSet<string>(StringComparer.Ordinal);
+        internal readonly Dictionary<string, string> TypeValues = new Dictionary<string, string>(StringComparer.Ordinal);
+        internal readonly List<string> TypeAnalysis = new List<string>();
+        internal bool IndependentTypeComplete;
+        internal string IndependentTypeStatus = "Incomplete";
         internal string Get(string field) => Fields.TryGetValue(field, out var value) ? value : null;
         internal string ElementTypeField => new[] { "elementtype", "componenttype", "type", "objectidtype" }
             .FirstOrDefault(field => !string.IsNullOrWhiteSpace(Get(field)));
@@ -678,6 +846,26 @@ namespace D365SolutionComparer.Services.Membership
                     foreach (var evidence in row.Context) Line(text, label, row.ObjectId, evidence);
                 }
             }
+            text.AppendLine("ELEMENT-TYPE SOURCE METADATA / SELECTED-ROW VALUES");
+            foreach (var side in new[] { Source, Target })
+            {
+                var label = side == Source ? "Source" : "Target";
+                foreach (var item in side.TypeSchema) Line(text, label, item);
+                foreach (var row in side.Rows.Values) foreach (var item in row.TypeAnalysis) Line(text, label, row.ObjectId, item);
+            }
+            text.AppendLine("REGISTERED-DEFINITION DISCRIMINATOR INVESTIGATION");
+            foreach (var side in new[] { Source, Target }) foreach (var item in side.TypeRegistration) Line(text, side == Source ? "Source" : "Target", item);
+            text.AppendLine("Relationship endpoints, catalog labels, Canvas App dependency identity and ObjectTypeCode agreement are not selected-row discriminator contracts. Incoming relationships are not scanned; no relationship-only type inference.");
+            text.AppendLine("CANDIDATE A BEFORE / AFTER TYPE INVESTIGATION");
+            foreach (var side in new[] { Source, Target }) foreach (var row in side.Rows.Values)
+                Line(text, side == Source ? "Source" : "Target", row.ObjectId, "CandidateAConstructionUnchanged=True",
+                    "ParentIdentityComplete=" + row.ParentIdentityComplete, "ElementTypeComplete=" + row.ElementTypeComplete,
+                    "ReferencedComponentIdentityComplete=" + row.ReferencedComponentIdentityComplete, "CompleteA=" + row.CompleteA,
+                    "IndependentElementTypeComplete=" + row.IndependentTypeComplete, "IndependentTypeStatus=" + row.IndependentTypeStatus);
+            var typeRows = new[] { Source, Target }.SelectMany(s => s.Rows.Values).ToArray();
+            bool typeEstablished = typeRows.Length > 0 && typeRows.All(r => r.Status == "Unique" && r.IndependentTypeComplete);
+            text.AppendLine(typeEstablished ? "Element type independently established; candidate can advance to live validation. Option-metadata value evidence only; Candidate A/B are unchanged and subtype portability still requires review." :
+                "No independent element-type source found; Type 10072 should remain unsupported. Blank/unavailable/ambiguous type evidence cannot be repaired by dependencies or a weaker candidate.");
             text.AppendLine("CANDIDATE IDENTITY ANALYSIS");
             foreach (var side in new[] { Source, Target }) foreach (var row in side.Rows.Values)
             {
@@ -764,6 +952,8 @@ namespace D365SolutionComparer.Services.Membership
                 var label = side == Source ? "Source" : "Target";
                 Line(text, label, "TotalReads=" + side.Requests.Count, "AdditionalWhoAmI=0", "Writes=0", "NormalMembershipEvidenceRequests=0");
                 Line(text, label, "AppElementSchemaRequests=" + side.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(appelement,", StringComparison.Ordinal)),
+                    "TypeSourceMetadataQueries=" + side.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(") && !r.StartsWith("Execute RetrieveEntity(appelement,") && !r.StartsWith("Execute RetrieveEntity(appmodule,") && !r.StartsWith("Execute RetrieveEntity(canvasapp,")),
+                    "RegistrationQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple solutioncomponentdefinition;")),
                     "AppElementQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple appelement;", StringComparison.Ordinal)),
                     "ParentAppModuleSchemaRequests=" + side.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(appmodule,", StringComparison.Ordinal)),
                     "ParentAppModuleQueries=" + side.Requests.Count(r => r.StartsWith("RetrieveMultiple appmodule;", StringComparison.Ordinal)),
