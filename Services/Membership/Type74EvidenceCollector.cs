@@ -10,6 +10,7 @@ using D365SolutionComparer.Models.Membership;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Metadata.Query;
 using Microsoft.Xrm.Sdk.Query;
 
 namespace D365SolutionComparer.Services.Membership
@@ -107,6 +108,7 @@ namespace D365SolutionComparer.Services.Membership
                         : new Type31ContentFingerprint { Presence = "Unavailable" };
                     else row.Fields[field] = found.Columns.Contains(field) ? Format(found.Row.GetAttributeValue<object>(field)) : null;
                 row.Managed = found.Row.GetAttributeValue<object>("ismanaged") is bool ? (bool?)found.Row.GetAttributeValue<bool>("ismanaged") : null;
+                CaptureScopeFields(side, metadata, found.Row, found.Columns, row);
                 ResolveScope(snapshot, side, metadata, referenceFields, found, row);
                 string value = side.CandidateField == null ? null : row.Get(side.CandidateField);
                 row.CandidateField = side.CandidateField;
@@ -117,6 +119,7 @@ namespace D365SolutionComparer.Services.Membership
                     Type31EvidenceCollector.Frame(side.EntityName, row.Get("name"), row.ParentKey ?? "ScopeIncomplete");
             }
             CaptureAttributeScope(service, side, metadata, token, progress);
+            InvestigateScopeSources(service, side, token);
             return side;
         }
 
@@ -232,6 +235,7 @@ namespace D365SolutionComparer.Services.Membership
                             : new Type31ContentFingerprint { Presence = "Unavailable" };
                         else association.Fields[field] = result.Columns.Contains(field) ? Format(item.Value.GetAttributeValue<object>(field)) : null;
                     association.RuntimeColumns.AddRange(result.Columns.OrderBy(f => f, StringComparer.Ordinal));
+                    CaptureScopeFields(side, metadata, item.Value, result.Columns, association);
                     var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     ResolveScope(side.Snapshot, side, metadata, referenceFields, new LookupEvidence { Row = item.Value, Columns = result.Columns },
                         association, metadata.LogicalName, association.AttributeKeys, tables);
@@ -263,6 +267,273 @@ namespace D365SolutionComparer.Services.Membership
                     }
                 }
             }
+        }
+
+        private static bool ScopeField(AttributeMetadata attribute)
+        {
+            if (AuditReferences.Contains(attribute.LogicalName)) return true; // explicit audit-only inventory, never portable scope
+            var lookup = attribute as LookupAttributeMetadata;
+            return attribute.AttributeType == AttributeTypeCode.EntityName || lookup?.Targets?.Any(t => t == "entity" || t == "attribute") == true ||
+                new[] { "entity", "table", "attribute", "column", "metadata", "scope", "global" }.Any(part => attribute.LogicalName.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                attribute.LogicalName == "logicalname" || attribute.LogicalName == "schemaname" || attribute.LogicalName == "objecttypecode";
+        }
+
+        private static bool ScopeContent(string field) => new[] { "config", "xml", "json", "expression", "body", "subject", "payload", "definition" }.Any(part => field.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0);
+        private static string ScopeValue(object raw, bool hashOnly = false)
+        {
+            if (hashOnly) return "HashOnly; " + Type31ContentFingerprint.Create(raw).Evidence;
+            if (raw == null) return "NotPresent";
+            if (raw is EntityReference) { var lookup = (EntityReference)raw; return ValidName(lookup.LogicalName) ? lookup.LogicalName + ":" + lookup.Id.ToString("D") : "Malformed"; }
+            if (raw is Guid || raw is int || raw is bool || raw is OptionSetValue) return Format(raw);
+            if (raw is string && LogicalScope((string)raw)) return ((string)raw).Trim();
+            return "RedactedOrMalformed; " + Type31ContentFingerprint.Create(raw).Evidence;
+        }
+        private static bool LogicalScope(string value) => !string.IsNullOrWhiteSpace(value) && value.Trim().Length <= 128 &&
+            !StringComparer.OrdinalIgnoreCase.Equals(value.Trim(), "none") && (char.IsLetter(value.Trim()[0]) || value.Trim()[0] == '_') && ValidName(value.Trim());
+        private static bool ColumnKey(string value) => !string.IsNullOrWhiteSpace(value) && value.Split('.').Length == 2 && value.Split('.').All(LogicalScope);
+
+        private static void CaptureScopeFields(MaskingRuleSideEvidence side, EntityMetadata metadata, Entity entity, ISet<string> columns, MaskingRuleRecordEvidence row)
+        {
+            foreach (var attribute in metadata.Attributes.Where(ScopeField).OrderBy(a => a.LogicalName, StringComparer.Ordinal))
+            {
+                string field = attribute.LogicalName; bool read = columns.Contains(field);
+                var raw = read ? entity.GetAttributeValue<object>(field) : null;
+                var reference = raw as EntityReference;
+                var links = (metadata.ManyToOneRelationships ?? new OneToManyRelationshipMetadata[0]).Where(r => r != null &&
+                    r.ReferencingEntity == metadata.LogicalName && r.ReferencingAttribute == field && (r.ReferencedEntity == "entity" || r.ReferencedEntity == "attribute")).ToArray();
+                var lookup = attribute as LookupAttributeMetadata;
+                string target = reference != null && lookup?.Targets?.Contains(reference.LogicalName) == true && links.Length <= 1 &&
+                    (links.Length == 0 || links[0].ReferencedEntity == reference.LogicalName && links[0].ReferencedAttribute == reference.LogicalName + "id") ? reference.LogicalName :
+                    raw is Guid && links.Length == 1 && links[0].ReferencedAttribute == links[0].ReferencedEntity + "id" ? links[0].ReferencedEntity : null;
+                var probe = new MaskingScopeSource { Field = field, Entity = metadata.LogicalName, MetadataType = attribute.AttributeType.ToString(),
+                    MetadataReadable = attribute.IsValidForRead, RuntimeReadable = read, Value = read ? ScopeValue(raw, attribute.AttributeType == AttributeTypeCode.Memo || ScopeContent(field)) : "Unavailable",
+                    Id = raw is Guid ? (Guid?)raw : reference?.Id, Target = target, Status = !read ? "Unavailable" : raw == null ? "NotPresent" : "ObservedSemanticsUnproven" };
+                if (field == metadata.PrimaryIdAttribute || field == side.AttributeForeignKey || AuditReferences.Contains(field))
+                { probe.Status = "AuditOrCorrelationOnly"; probe.Target = null; }
+                // Excluded lookup shadows cannot create a second scope even if metadata calls them readable.
+                if (!string.IsNullOrWhiteSpace(attribute.AttributeOf) || metadata.Attributes.OfType<LookupAttributeMetadata>().Any(a => field == a.LogicalName + "name" || field == a.LogicalName + "yominame"))
+                { probe.Status = "ExcludedLookupShadow"; probe.Target = null; }
+                if (links.Length > 1) { probe.Status = "AmbiguousRelationship"; probe.Target = null; }
+                if (attribute.AttributeType == AttributeTypeCode.EntityName || new[] { "entitylogicalname", "tablelogicalname" }.Contains(field))
+                    if (raw is string && LogicalScope((string)raw) && probe.Status != "ExcludedLookupShadow") probe.TableInput = ((string)raw).Trim();
+                // Logical/schema/display text alone is observed only. An attribute lookup/metadata relationship must prove its role.
+                row.ScopeSources.Add(probe);
+            }
+        }
+
+        private static string SnapshotScope(MembershipSnapshot snapshot, MaskingScopeSource probe)
+        {
+            int type = probe.Target == "entity" ? 1 : probe.Target == "attribute" ? 2 : 0;
+            if (type == 0 || !probe.Id.HasValue || probe.Id == Guid.Empty) return null;
+            var matches = snapshot.Components.Where(c => c.Record.ComponentType == type && c.Record.ObjectId == probe.Id).ToArray();
+            var keys = matches.Where(c => c.Status == IdentityResolutionStatus.Resolved && c.InventoryAbsencePolicy == InventoryAbsencePolicy.CompleteInventory &&
+                (type == 1 ? c.SemanticKind == ComponentSemanticKinds.Table && LogicalScope(c.ComparisonKey) : c.SemanticKind == ComponentSemanticKinds.Column && ColumnKey(c.ComparisonKey)))
+                .Select(c => c.ComparisonKey.Trim().ToLowerInvariant()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (keys.Length > 1 || matches.Any(c => c.Status == IdentityResolutionStatus.Ambiguous) || keys.Length == 1 &&
+                snapshot.Components.Where(c => c.Record.ComponentType == type && StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, keys[0])).Any(c => c.Record.ObjectId != probe.Id || c.Status != IdentityResolutionStatus.Resolved))
+            { probe.Status = "AmbiguousSnapshotScope"; return null; }
+            if (keys.Length != 1 || matches.Any(c => c.Status != IdentityResolutionStatus.Resolved || c.InventoryAbsencePolicy != InventoryAbsencePolicy.CompleteInventory)) return null;
+            probe.Status = "VerifiedSnapshotScope"; return keys[0];
+        }
+
+        private static void InvestigateScopeSources(IOrganizationService service, MaskingRuleSideEvidence side, CancellationToken token)
+        {
+            side.ScopeInvestigationStart = side.Requests.Count;
+            var records = side.Rows.Values.Concat(side.AttributeRows.Values).Where(r => r.Status == "Unique").ToArray();
+            foreach (var metadata in side.ScopeMetadata.Values)
+                foreach (var attribute in metadata.Attributes.Where(ScopeField))
+                {
+                    var selected = (metadata.LogicalName == side.EntityName ? side.Rows.Values : side.AttributeRows.Values).ToArray();
+                    side.ScopeInventory.Add(metadata.LogicalName + "." + attribute.LogicalName + "; AttributeType=" + attribute.AttributeType +
+                        "; MetadataReadable=" + attribute.IsValidForRead + "; SelectedRecordsObserved=" + selected.Length +
+                        "; RuntimeReadability=" + (selected.Length == 0 ? "NotObservedNoSelectedRowsOrIncompleteRetrieval" : "ReportedPerSelectedRecord") +
+                        "; ActualValue=" + (selected.Length == 0 ? "NoSelectedRowValue" : "ReportedPerSelectedRecord") +
+                        "; Establishes=" + (selected.Length == 0 ? "Neither" : "ReportedPerSelectedRecord") +
+                        "; provenance=RetrieveEntity Attributes|Relationships; values do not establish global scope");
+                }
+            if (records.Length == 0) return;
+            foreach (var row in records) foreach (var probe in row.ScopeSources.Where(p => p.RuntimeReadable && (p.Target == "entity" || p.Target == "attribute")))
+            {
+                token.ThrowIfCancellationRequested(); var key = SnapshotScope(side.Snapshot, probe);
+                if (key != null) { if (probe.Target == "entity") probe.TableKey = key; else probe.ColumnKey = key; }
+                else if (probe.Status != "AmbiguousSnapshotScope") probe.Status = "Incomplete; no unique completed snapshot scope";
+            }
+            foreach (var probe in records.SelectMany(r => r.ScopeSources).Where(p => p.TableInput != null))
+            {
+                var tables = side.Snapshot.Components.Where(c => c.Record.ComponentType == 1 && StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, probe.TableInput)).ToArray();
+                if (tables.Length == 0) continue;
+                bool unique = tables.All(c => c.Status == IdentityResolutionStatus.Resolved && c.SemanticKind == ComponentSemanticKinds.Table &&
+                    c.InventoryAbsencePolicy == InventoryAbsencePolicy.CompleteInventory && c.Record.ObjectId.HasValue && c.Record.ObjectId != Guid.Empty) &&
+                    tables.Select(c => c.Record.ObjectId).Distinct().Count() == 1;
+                if (unique) { probe.TableKey = probe.TableInput.ToLowerInvariant(); probe.Status = "VerifiedSnapshotTableLogicalName"; }
+                else probe.Status = "AmbiguousSnapshotTableLogicalName";
+            }
+            var tableNames = records.SelectMany(r => r.ScopeSources).Where(p => p.TableInput != null && p.TableKey == null && !p.Status.StartsWith("Ambiguous", StringComparison.Ordinal)).Select(p => p.TableInput)
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            foreach (var batch in NameBatches(tableNames))
+            {
+                var query = new EntityQueryExpression { Properties = new MetadataPropertiesExpression("MetadataId", "LogicalName", "ObjectTypeCode"),
+                    Criteria = new MetadataFilterExpression(LogicalOperator.Or) };
+                foreach (var name in batch) query.Criteria.Conditions.Add(new MetadataConditionExpression("LogicalName", MetadataConditionOperator.Equals, name));
+                side.Requests.Add("Execute RetrieveMetadataChanges; selected table names=[" + string.Join(",", batch) + "]; no AttributeQuery/no global scan");
+                try
+                {
+                    token.ThrowIfCancellationRequested(); var response = service.Execute(new RetrieveMetadataChangesRequest { Query = query }) as RetrieveMetadataChangesResponse; token.ThrowIfCancellationRequested();
+                    foreach (var probe in records.SelectMany(r => r.ScopeSources).Where(p => p.TableInput != null && p.TableKey == null && !p.Status.StartsWith("Ambiguous", StringComparison.Ordinal) && batch.Contains(p.TableInput, StringComparer.OrdinalIgnoreCase)))
+                    {
+                        var found = response?.EntityMetadata?.Where(m => m != null && StringComparer.OrdinalIgnoreCase.Equals(m.LogicalName, probe.TableInput)).ToArray();
+                        if (found?.Length == 1 && found[0].MetadataId.HasValue && found[0].MetadataId != Guid.Empty && LogicalScope(found[0].LogicalName) &&
+                            response.EntityMetadata.All(m => m != null && batch.Contains(m.LogicalName, StringComparer.OrdinalIgnoreCase)))
+                        { probe.TableKey = found[0].LogicalName.Trim().ToLowerInvariant(); probe.Status = "VerifiedSelectedTableMetadata"; }
+                        else probe.Status = found?.Length > 1 ? "AmbiguousTableMetadata" : "IncompleteTableMetadata";
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception error) { token.ThrowIfCancellationRequested(); foreach (var probe in records.SelectMany(r => r.ScopeSources).Where(p => batch.Contains(p.TableInput, StringComparer.OrdinalIgnoreCase))) probe.Status = "FaultedTableMetadata; " + SafeFault(error); }
+            }
+            var pending = new List<Tuple<MaskingScopeSource, string>>();
+            foreach (var row in records)
+            {
+                var owner = row.RelatedMaskingRuleId != Guid.Empty && side.Rows.TryGetValue(row.RelatedMaskingRuleId, out var selectedRule) ? selectedRule : null;
+                var tables = row.ScopeSources.Where(p => p.TableKey != null).Select(p => p.TableKey)
+                    .Concat(row.ScopeSources.Where(p => p.ColumnKey != null).Select(p => p.ColumnKey.Split('.')[0]))
+                    .Concat(owner?.ScopeSources.Where(p => p.TableKey != null).Select(p => p.TableKey) ?? Enumerable.Empty<string>())
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                foreach (var probe in row.ScopeSources.Where(p => p.Target == "attribute" && p.Id.HasValue && p.Id != Guid.Empty && p.ColumnKey == null && p.Status.StartsWith("Incomplete", StringComparison.Ordinal)))
+                {
+                    if (tables.Length == 1) pending.Add(Tuple.Create(probe, tables[0]));
+                    else probe.Status = tables.Length > 1 ? "AmbiguousTableScope; attribute lookup not issued" : "Incomplete; independently verified selected table required";
+                }
+            }
+            foreach (var conflict in pending.GroupBy(p => p.Item1.Id).Where(g => g.Select(p => p.Item2).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+                foreach (var item in conflict) item.Item1.Status = "AmbiguousAttributeTableScope";
+            foreach (var table in pending.Where(p => !p.Item1.Status.StartsWith("Ambiguous", StringComparison.Ordinal)).GroupBy(p => p.Item2, StringComparer.OrdinalIgnoreCase))
+                foreach (var batch in Batches(table.Select(p => p.Item1.Id.Value).Distinct().OrderBy(id => id).ToArray()))
+                {
+                    token.ThrowIfCancellationRequested(); var request = new ExecuteMultipleRequest { Settings = new ExecuteMultipleSettings { ContinueOnError = true, ReturnResponses = true }, Requests = new OrganizationRequestCollection() };
+                    foreach (var id in batch) request.Requests.Add(new RetrieveAttributeRequest { EntityLogicalName = table.Key, MetadataId = id, RetrieveAsIfPublished = false });
+                    side.ScopeMetadataBatches++; side.ScopeAttributeSubrequests += batch.Length;
+                    side.Requests.Add("Execute ExecuteMultiple(RetrieveAttribute); verified table=" + table.Key + "; selectedMetadataIds=[" + string.Join(",", batch) + "]; subrequests=" + batch.Length);
+                    try
+                    {
+                        var response = service.Execute(request) as ExecuteMultipleResponse; token.ThrowIfCancellationRequested();
+                        for (int index = 0; index < batch.Length; index++)
+                        {
+                            var items = response?.Responses?.Where(r => r != null && r.RequestIndex == index).ToArray();
+                            string key = null, status = "IncompleteAttributeMetadata";
+                            bool validBatch = response?.Responses != null && response.Responses.All(r => r != null && r.RequestIndex >= 0 && r.RequestIndex < batch.Length);
+                            if (validBatch && items.Length == 1 && items[0].Fault == null)
+                            {
+                                var attribute = (items[0].Response as RetrieveAttributeResponse)?.AttributeMetadata;
+                                if (attribute != null && attribute.MetadataId == batch[index] && LogicalScope(attribute.LogicalName) && StringComparer.OrdinalIgnoreCase.Equals(attribute.EntityLogicalName, table.Key))
+                                {
+                                    key = table.Key.ToLowerInvariant() + "." + attribute.LogicalName.Trim().ToLowerInvariant();
+                                    if (side.Snapshot.Components.Any(c => c.Record.ComponentType == 2 && StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, key) &&
+                                        (c.Record.ObjectId != batch[index] || c.Status != IdentityResolutionStatus.Resolved || c.SemanticKind != ComponentSemanticKinds.Column)))
+                                    { key = null; status = "AmbiguousAttributeSnapshotConflict"; }
+                                    else status = "VerifiedSelectedAttributeMetadata";
+                                }
+                            }
+                            else if (items?.Length > 1) status = "AmbiguousAttributeMetadata";
+                            else if (items?.Length == 1 && items[0].Fault != null) status = "FaultedAttributeMetadata; " + SafeFault(new FaultException<OrganizationServiceFault>(items[0].Fault));
+                            foreach (var item in table.Where(p => p.Item1.Id == batch[index])) { item.Item1.ColumnKey = key; item.Item1.Status = status; }
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception error) { token.ThrowIfCancellationRequested(); foreach (var item in table.Where(p => batch.Contains(p.Item1.Id.Value))) item.Item1.Status = "FaultedAttributeMetadata; " + SafeFault(error); }
+                }
+            foreach (var collision in records.SelectMany(r => r.ScopeSources).Where(p => p.ColumnKey != null)
+                .GroupBy(p => p.ColumnKey, StringComparer.OrdinalIgnoreCase).Where(g => g.Select(p => p.Id).Distinct().Count() > 1))
+                foreach (var probe in collision) { probe.ColumnKey = null; probe.Status = "AmbiguousCanonicalColumnScope; different selected metadata IDs"; }
+            foreach (var row in records)
+            {
+                foreach (var probe in row.ScopeSources.Where(p => p.ColumnKey != null)) row.RecoveredColumns.Add(probe.ColumnKey);
+                foreach (var probe in row.ScopeSources.Where(p => p.TableKey != null)) row.RecoveredTables.Add(probe.TableKey);
+                bool conflict = row.RecoveredTables.Any(t => row.RecoveredColumns.Any(c => !c.StartsWith(t + ".", StringComparison.OrdinalIgnoreCase)));
+                row.RecoveredScopeComplete = row.CriticalComplete && !conflict && (row.RecoveredColumns.Count > 0 || row.RecoveredTables.Count == 1) &&
+                    !row.ScopeSources.Any(p => p.Status.StartsWith("Ambiguous", StringComparison.Ordinal) || p.Status.StartsWith("Faulted", StringComparison.Ordinal) ||
+                        p.Target != null && p.Status.StartsWith("Incomplete", StringComparison.Ordinal));
+                row.ScopeRecoveryReason = conflict ? "Conflicting table/column scope" : row.RecoveredScopeComplete ? "Independently verified selected scope; Candidate A/B construction unchanged" :
+                    "No complete independently verified table/attribute scope; zero related rows/relationship/name/GUID/hash/catalog cannot supply global scope";
+            }
+            foreach (var rule in side.Rows.Values)
+            {
+                var associations = side.AttributeRows.Values.Where(r => r.RelatedMaskingRuleId == rule.ObjectId).ToArray();
+                if (rule.AttributeScopeStatus == "Verified" && rule.ParentStatus != "Ambiguous" && rule.CriticalComplete && !rule.ScopeSources.Any(p => p.Status.StartsWith("Ambiguous", StringComparison.Ordinal) || p.Status.StartsWith("Faulted", StringComparison.Ordinal))) { rule.RecoveredColumns.UnionWith(rule.AttributeKeys); rule.RecoveredScopeComplete = true; rule.ScopeRecoveryReason = "Verified normalized related attribute scope reused from completed snapshot; Candidate A/B unchanged"; }
+                else if (associations.Length > 0 && associations.All(r => r.RecoveredScopeComplete && r.RecoveredColumns.Count > 0) &&
+                    associations.SelectMany(r => r.RecoveredColumns).Distinct(StringComparer.OrdinalIgnoreCase).Count() == associations.Sum(r => r.RecoveredColumns.Count) &&
+                    rule.AttributeScopeStatus != "Ambiguous" && rule.AttributeScopeStatus != "Faulted" && rule.ParentStatus != "Ambiguous" && rule.CriticalComplete &&
+                    !rule.ScopeSources.Any(p => p.Status.StartsWith("Ambiguous", StringComparison.Ordinal) || p.Status.StartsWith("Faulted", StringComparison.Ordinal)))
+                { rule.RecoveredColumns.UnionWith(associations.SelectMany(r => r.RecoveredColumns)); rule.RecoveredScopeComplete = true; rule.ScopeRecoveryReason = "Selected related attribute metadata independently verified; existing Candidate A/B unchanged"; }
+            }
+            foreach (var rule in side.Rows.Values)
+            {
+                var related = side.AttributeRows.Values.Where(r => r.RelatedMaskingRuleId == rule.ObjectId).ToArray();
+                if (rule.RecoveredTables.Any(t => rule.RecoveredColumns.Concat(related.SelectMany(r => r.RecoveredColumns)).Any(c => !c.StartsWith(t + ".", StringComparison.OrdinalIgnoreCase))) ||
+                    related.Any(r => !r.RecoveredScopeComplete || r.RecoveredColumns.Count == 0 || r.ScopeSources.Any(p => p.Status.StartsWith("Ambiguous", StringComparison.Ordinal) || p.Status.StartsWith("Faulted", StringComparison.Ordinal))) ||
+                    rule.AttributeScopeStatus == "Ambiguous" || rule.AttributeScopeStatus == "Faulted")
+                { rule.RecoveredScopeComplete = false; rule.ScopeRecoveryReason = "Conflicting or ambiguous selected rule/related column scope"; }
+            }
+            ReviewScopeRegistration(service, side, token);
+        }
+        private static IEnumerable<string[]> NameBatches(string[] names)
+        { for (int offset = 0; offset < names.Length; offset += BatchSize) yield return names.Skip(offset).Take(BatchSize).ToArray(); }
+
+        private static void ReviewScopeRegistration(IOrganizationService service, MaskingRuleSideEvidence side, CancellationToken token)
+        {
+            foreach (var definition in side.Raw.Select(r => r.RegisteredDefinition).Where(d => d != null).Distinct())
+                side.ScopeRegistration.Add("Completed registration: ObjectTypeCode=" + definition.ObjectTypeCode + "; Name=" + definition.Name +
+                    "; PrimaryEntityName=" + definition.PrimaryEntityName + "; catalog mapping, not selected rule scope or a global-scope contract");
+            var schema = Schema(service, "solutioncomponentdefinition", side, token);
+            if (schema == null) { side.ScopeRegistration.Add("Registration schema unavailable; no scope inference"); return; }
+            foreach (var attribute in schema.Attributes.Where(ScopeField)) side.ScopeRegistration.Add("RegistrationScopeSchema: field=" + attribute.LogicalName +
+                "; AttributeType=" + attribute.AttributeType + "; MetadataReadable=" + attribute.IsValidForRead + "; No selected-rule scope mapping contract established");
+            var rawCode = schema.Attributes.SingleOrDefault(a => a.LogicalName == "objecttypecode");
+            var primary = schema.Attributes.Single(a => a.LogicalName == schema.PrimaryIdAttribute);
+            if (rawCode?.IsValidForRead != true || !(rawCode.AttributeType == AttributeTypeCode.Integer || rawCode.AttributeType == AttributeTypeCode.Picklist) ||
+                primary.IsValidForRead != true || primary.AttributeType != AttributeTypeCode.Uniqueidentifier)
+            { side.ScopeRegistration.Add("No registered backing-row query: readable raw-code/primary mapping unavailable; completed registration reused"); return; }
+            var columns = schema.Attributes.Where(a => a.IsValidForRead == true && (a.LogicalName == schema.PrimaryIdAttribute || a.LogicalName == "objecttypecode" ||
+                a.LogicalName == "name" || a.LogicalName == "primaryentityname" || ScopeField(a)) &&
+                (a.AttributeType == AttributeTypeCode.String || a.AttributeType == AttributeTypeCode.EntityName || a.AttributeType == AttributeTypeCode.Integer ||
+                    a.AttributeType == AttributeTypeCode.Picklist || a.AttributeType == AttributeTypeCode.Boolean || a.AttributeType == AttributeTypeCode.Uniqueidentifier))
+                .Where(a => !UnsafePayload.Any(part => a.LogicalName.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0) && string.IsNullOrWhiteSpace(a.AttributeOf))
+                .Select(a => a.LogicalName).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            int page = 1; string cookie = null; var rows = new Dictionary<Guid, Entity>();
+            try
+            {
+                while (true)
+                {
+                    token.ThrowIfCancellationRequested(); var query = new QueryExpression("solutioncomponentdefinition") { ColumnSet = new ColumnSet(columns),
+                        PageInfo = new PagingInfo { Count = BatchSize, PageNumber = page, PagingCookie = cookie } };
+                    query.Criteria.AddCondition("objecttypecode", ConditionOperator.Equal, 74); query.AddOrder(schema.PrimaryIdAttribute, OrderType.Ascending);
+                    side.Requests.Add("RetrieveMultiple solutioncomponentdefinition; objecttypecode=74; selected registration only; page=" + page);
+                    var response = service.RetrieveMultiple(query); token.ThrowIfCancellationRequested();
+                    if (response == null) { side.ScopeRegistration.Add("Incomplete registration response; no scope inference"); return; }
+                    side.Pages.Add("solutioncomponentdefinition; page=" + page + "; ReturnedRows=" + response.Entities.Count +
+                        "; MoreRecords=" + response.MoreRecords + "; PagingCookieSupplied=" + !string.IsNullOrEmpty(response.PagingCookie));
+                    int before = rows.Count;
+                    foreach (var row in response.Entities)
+                    {
+                        if (row == null || row.LogicalName != "solutioncomponentdefinition" || row.Id == Guid.Empty || Type31EvidenceCollector.Id(row, schema.PrimaryIdAttribute) != row.Id ||
+                            Format(row.GetAttributeValue<object>("objecttypecode")) != "74")
+                        { side.ScopeRegistration.Add("Conflicting/foreign registration row; no inferred scope"); return; }
+                        if (rows.TryGetValue(row.Id, out var prior) && !Type31EvidenceCollector.SameReturnedRow(prior, row))
+                        { side.ScopeRegistration.Add("Conflicting repeated registration primary ID; no inferred scope"); return; }
+                        rows[row.Id] = row;
+                    }
+                    if (!response.MoreRecords) break;
+                    if (rows.Count == before || !string.IsNullOrEmpty(response.PagingCookie) && response.PagingCookie == cookie)
+                    { side.ScopeRegistration.Add("Stalled registration paging; terminal retrieval not proven"); return; }
+                    cookie = response.PagingCookie; page++;
+                }
+                side.ScopeRegistration.Add("Terminal selected Type 74 registration; distinctRows=" + rows.Count + "; pageCount=" + page + "; catalog values do not prove per-rule/global scope");
+                foreach (var row in rows.Values) foreach (var field in columns)
+                    side.ScopeRegistration.Add("RegistrationRow=" + row.Id + "; Field=" + field + "; ActualValue=" + ScopeValue(row.GetAttributeValue<object>(field), ScopeContent(field)) +
+                        "; Establishes=Neither; no explicit selected-rule scope contract established");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error) { token.ThrowIfCancellationRequested(); side.ScopeRegistration.Add("Registration fault; " + SafeFault(error) + "; no scope inference"); }
         }
 
         private static void SetAttributeScope(IEnumerable<MaskingRuleRecordEvidence> rules, string status, string reason)
@@ -407,6 +678,7 @@ namespace D365SolutionComparer.Services.Membership
                     if (relationship != null) side.Relationships.Add("Intersect " + relationship.IntersectEntityName + "; relationship=" + relationship.SchemaName + "; not scanned");
                 foreach (var attribute in metadata.Attributes.OfType<LookupAttributeMetadata>())
                     side.Relationships.Add(entity + "." + attribute.LogicalName + "; metadata lookup targets=[" + string.Join(",", attribute.Targets ?? new string[0]) + "]");
+                side.ScopeMetadata[entity] = metadata;
                 return metadata;
             }
             catch (OperationCanceledException) { throw; }
@@ -580,6 +852,9 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, MaskingRuleRecordEvidence> Rows = new SortedDictionary<Guid, MaskingRuleRecordEvidence>();
         internal int AttributeRequestStart = -1;
+        internal int ScopeInvestigationStart = -1, ScopeMetadataBatches, ScopeAttributeSubrequests;
+        internal readonly Dictionary<string, EntityMetadata> ScopeMetadata = new Dictionary<string, EntityMetadata>(StringComparer.Ordinal);
+        internal readonly List<string> ScopeInventory = new List<string>(), ScopeRegistration = new List<string>();
         internal string AttributeEntity, AttributeForeignKey;
         internal readonly List<string> AttributeSchema = new List<string>();
         internal readonly SortedDictionary<Guid, MaskingRuleRecordEvidence> AttributeRows = new SortedDictionary<Guid, MaskingRuleRecordEvidence>();
@@ -600,7 +875,19 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly SortedDictionary<string, Type31ContentFingerprint> Content = new SortedDictionary<string, Type31ContentFingerprint>(StringComparer.Ordinal);
         internal readonly List<string> RuntimeColumns = new List<string>();
         internal string Get(string field) => Fields.TryGetValue(field, out var value) ? value : null;
+        internal readonly List<MaskingScopeSource> ScopeSources = new List<MaskingScopeSource>();
+        internal readonly SortedSet<string> RecoveredColumns = new SortedSet<string>(StringComparer.OrdinalIgnoreCase), RecoveredTables = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        internal bool RecoveredScopeComplete;
+        internal string ScopeRecoveryReason = "Not independently evaluated; backing/schema correlation incomplete";
+        internal bool RuleIdentifierComplete => !string.IsNullOrWhiteSpace(CandidateField == null ? Get("name") : Get(CandidateField)) &&
+            !Guid.TryParse(CandidateField == null ? Get("name") : Get(CandidateField), out var ignored);
         internal string Evidence(string field) => Content.TryGetValue(field, out var hash) ? hash.Evidence : Get(field);
+    }
+    internal sealed class MaskingScopeSource
+    {
+        internal string Entity, Field, MetadataType, Value, Status, Target, TableInput, TableKey, ColumnKey;
+        internal bool? MetadataReadable; internal bool RuntimeReadable; internal Guid? Id;
+        internal string Establishes => ColumnKey != null ? "Both" : TableKey != null ? "TableIdentity" : "Neither";
     }
     internal sealed class MaskingRulePairEvidence
     {
@@ -745,10 +1032,47 @@ namespace D365SolutionComparer.Services.Membership
                     "Incomplete primary/critical evidence, parent identity or explicit identifier; name alone cannot create A")); });
             text.AppendLine("\nEXACT ADDITIONAL ATTRIBUTE SCOPE REQUEST LEDGER");
             EachSide(text, (s, label) => {
-                var requests = s.AttributeRequestStart < 0 ? new string[0] : s.Requests.Skip(s.AttributeRequestStart).ToArray();
+                var requests = s.AttributeRequestStart < 0 ? new string[0] : s.Requests.Skip(s.AttributeRequestStart).Take((s.ScopeInvestigationStart < 0 ? s.Requests.Count : s.ScopeInvestigationStart) - s.AttributeRequestStart).ToArray();
                 foreach (var request in requests) Line(text, label, request);
                 Line(text, label, "AdditionalScopeReads=" + requests.Length, "ParentSnapshotReuse=True", "AdditionalWhoAmI=0", "Writes=0", "NormalMembershipEvidenceRequests=0");
             });
+            text.AppendLine("\nSCOPE-SOURCE METADATA / SELECTED-ROW INVENTORY");
+            EachSide(text, (s, label) => {
+                foreach (var item in s.ScopeInventory) Line(text, label, item);
+                foreach (var row in s.Rows.Values.Concat(s.AttributeRows.Values)) foreach (var probe in row.ScopeSources)
+                    Line(text, label, row.ObjectId, probe.Entity + "." + probe.Field, "AttributeType=" + probe.MetadataType,
+                        "MetadataReadable=" + probe.MetadataReadable, "RuntimeReadable=" + probe.RuntimeReadable, "ActualValue=" + probe.Value,
+                        "Establishes=" + probe.Establishes, "TableIdentity=" + probe.TableKey, "ColumnIdentity=" + probe.ColumnKey,
+                        "Status=" + probe.Status, "Provenance=selected backing row + independently verified snapshot/scoped metadata");
+            });
+            text.AppendLine("\nZERO RELATED-ROW SEMANTICS / GLOBAL-SCOPE BOUNDARY");
+            EachSide(text, (s, label) => { foreach (var row in s.Rows.Values)
+                Line(text, label, row.ObjectId, "SelectedRelatedRows=" + row.AttributeRelationshipCount,
+                    "RelatedRetrievalStatus=" + row.AttributeScopeStatus, "TerminalZeroRelatedRowsEvidence=" + (row.AttributeRelationshipCount == 0 && row.AttributeScopeStatus == "Missing"),
+                    "No selected related rows returned != Rule is global",
+                    "IndependentlyVerifiedGlobalScope=False; no global marker contract established; metadata field/relationship existence is insufficient"); });
+            text.AppendLine("\nREGISTERED-DEFINITION SCOPE REVIEW");
+            EachSide(text, (s, label) => { foreach (var item in s.ScopeRegistration) Line(text, label, item); });
+            text.AppendLine("\nINDEPENDENT SCOPE / CANDIDATE A COMPLETENESS");
+            EachSide(text, (s, label) => { foreach (var row in s.Rows.Values)
+                Line(text, label, row.ObjectId, "RuleIdentifierComplete=" + row.RuleIdentifierComplete, "ScopeComplete=" + row.RecoveredScopeComplete,
+                    "RecoveredPortableTables=[" + string.Join(",", row.RecoveredTables) + "]", "RecoveredPortableColumns=[" + string.Join(",", row.RecoveredColumns) + "]",
+                    "CompleteA=" + (row.CandidateA != null && !row.DuplicateA), "CandidateA=" + (row.CandidateA ?? "Incomplete"),
+                    "CandidateAConstructionUnchanged=True; no Candidate P", "BlockingReason=" + row.ScopeRecoveryReason);
+            });
+            text.AppendLine("New scope evidence does not rewrite Candidate A/B, pair incomplete candidates, infer global scope or manufacture production identity. Raw IDs/management state and content hashes remain separate audit/definition observations.");
+            text.AppendLine("\nEXACT SCOPE-SOURCE INVESTIGATION REQUEST LEDGER");
+            EachSide(text, (s, label) => {
+                foreach (var request in s.ScopeInvestigationStart < 0 ? Enumerable.Empty<string>() : s.Requests.Skip(s.ScopeInvestigationStart)) Line(text, label, request);
+                Line(text, label, "ScopeSourceTransportReads=" + (s.ScopeInvestigationStart < 0 ? 0 : s.Requests.Count - s.ScopeInvestigationStart),
+                    "AttributeMetadataBatches=" + s.ScopeMetadataBatches, "AttributeMetadataSubrequests=" + s.ScopeAttributeSubrequests,
+                    "TotalReadOperations=" + (s.Requests.Count - s.ScopeMetadataBatches + s.ScopeAttributeSubrequests),
+                    "NormalMembershipEvidenceRequests=0", "AdditionalWhoAmI=0", "Writes=0");
+            });
+            var selectedRules = new[] { Source, Target }.SelectMany(s => s.Rows.Values).ToArray();
+            text.AppendLine(selectedRules.Length > 0 && selectedRules.All(r => r.Status == "Unique" && r.RecoveredScopeComplete) ?
+                "Portable scope independently established; continue readiness review. Candidate A/B remain diagnostic and unchanged; no production promotion." :
+                "No independent scope source found; Type 74 should remain unsupported. Any incomplete/ambiguous/faulted rule scope blocks readiness; zero related rows are not proof of global scope.");
             text.AppendLine("\nPORTABILITY ASSESSMENT");
             Line(text, "Unique semantic pairs=" + Pairs.Count(p => p.Outcome == "SemanticPair"), "differing primary IDs=" + Pairs.Count(p => p.Categories.Contains("DifferentPrimaryId")));
             text.AppendLine("Observed evidence does not establish lifecycle portability or safe absence semantics. Additional live/lifecycle review required before production promotion or any production use.");
