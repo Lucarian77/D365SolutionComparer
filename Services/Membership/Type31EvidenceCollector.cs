@@ -21,12 +21,14 @@ namespace D365SolutionComparer.Services.Membership
     {
         internal const int BatchSize = 200;
         internal const string PrimaryId = "reportid";
+        internal const string ProposedIdentifierField = "uniquename";
         internal static readonly string[] AuditFields = { PrimaryId, "reportidunique", "signatureid", "signaturelcid",
             "name", "filename", "reporttypecode", "categories", "relatedentities", "objecttypecode", "languagecode",
             "ispersonal", "iscustomreport", "statecode", "statuscode", "ismanaged", "componentstate", "ownerid",
-            "parentreportid", "originalreportid" };
+            "parentreportid", "originalreportid", "reportcategorycode", "signaturedate", "uniquename", "schemaname",
+            "organizationid", "solutionid", "owninguser", "owningteam" };
         internal static readonly string[] ContentFields = { "bodytext", "bodyxml", "rdl", "reportdefinition",
-            "query", "defaultfilter", "description", "presentationdescription", "datadescription" };
+            "query", "defaultfilter", "description", "presentationdescription", "datadescription", "bodybinary" };
 
         internal Type31EvidenceReport Capture(IOrganizationService sourceService, MembershipSnapshot source,
             string sourceVersion, IOrganizationService targetService, MembershipSnapshot target,
@@ -48,6 +50,7 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var group in side.Rows.Values.Where(r => r.Status == "Unique" && r.SignatureId.HasValue)
                     .GroupBy(r => r.SignatureId.Value).Where(g => g.Count() > 1))
                     foreach (var row in group) row.DuplicateSignature = true;
+                RefineUnsignedEvidence(side);
             }
             report.Analyze(token);
             token.ThrowIfCancellationRequested();
@@ -60,6 +63,67 @@ namespace D365SolutionComparer.Services.Membership
                 .GroupBy(r => weaker ? r.CandidateB : r.CandidateA, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
                 foreach (var row in group) { if (weaker) row.DuplicateB = true; else row.DuplicateA = true; }
         }
+
+        private static void RefineUnsignedEvidence(Type31SideEvidence side)
+        {
+            foreach (var row in side.Rows.Values)
+            {
+                var production = side.Raw.Where(c => c.Record.ObjectId == row.ObjectId).ToArray();
+                row.ProductionSignedSnapshot = production.Any(c => c.Status == IdentityResolutionStatus.Resolved &&
+                    StringComparer.OrdinalIgnoreCase.Equals(c.SemanticKind, ComponentSemanticKinds.Report));
+                bool verified = row.ProductionSignedSnapshot && row.Status == "Unique" && row.SignatureId.HasValue && !row.DuplicateSignature &&
+                    production.All(c => c.Status == IdentityResolutionStatus.Resolved && StringComparer.OrdinalIgnoreCase.Equals(c.SemanticKind, ComponentSemanticKinds.Report) &&
+                        StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, row.SignatureId.Value.ToString("D")));
+                row.ReportSubset = verified ? "VerifiedSignedSubset" : "UnsignedOrUnverifiedRemainder";
+                row.BoundaryReason = verified ? "Existing production signed identity agrees with uniquely correlated nonblank signature; production gate unchanged" :
+                    row.ProductionSignedSnapshot ? "Current evidence does not reverify the signed snapshot; no production result changed and no unsigned fallback applied" :
+                    "Outside the existing verified production signed subset; blank/missing/nonblank signature observation alone cannot establish signed eligibility";
+                if (row.Status != "Unique") { row.ProposedBlockingReason = "Backing correlation " + row.Status; continue; }
+                // Refine only the unsupported remainder. A formerly resolved signed snapshot is
+                // never offered an alternative unsigned identity, even if fresh evidence is incomplete.
+                if (row.ProductionSignedSnapshot) { row.ProposedBlockingReason = "Existing signed subset excluded from unsigned Candidate P"; continue; }
+                var blockers = new List<string>();
+                if (!row.RuntimeColumns.Contains("signatureid") || row.Get("signatureid") != "")
+                    blockers.Add("Unsigned signature state unavailable/malformed/nonblank; no signed-gate bypass");
+                string identifier = row.Get(ProposedIdentifierField);
+                if (!side.FixedIdentifierVerified || !row.RuntimeColumns.Contains(ProposedIdentifierField) ||
+                    string.IsNullOrWhiteSpace(identifier) || Guid.TryParse(identifier, out var ignored))
+                    blockers.Add("Fixed internal uniquename unavailable/blank/unverified; name/filename/schemaname cannot repair identity");
+                if (row.ScopeStatus == "Available" && LogicalScope(row.RelatedScope))
+                {
+                    row.ProposedScope = row.RelatedScope.Trim().ToLowerInvariant(); row.ProposedScopeStatus = "Verified";
+                    row.ProposedScopeReason = "Reused metadata-proven report-related entity scope";
+                }
+                else if (row.ScopeStatus == "Ambiguous" || row.ScopeStatus == "Faulted" || row.ScopeStatus == "Incomplete")
+                { row.ProposedScopeStatus = row.ScopeStatus; row.ProposedScopeReason = row.ScopeReason; }
+                else
+                {
+                    string input = row.Get("relatedentities"); if (string.IsNullOrWhiteSpace(input)) input = row.Get("objecttypecode");
+                    var tables = LogicalScope(input) ? side.Snapshot.Components.Where(c => c.Record.ComponentType == 1 &&
+                        StringComparer.OrdinalIgnoreCase.Equals(c.ComparisonKey, input.Trim())).ToArray() : new ComponentIdentity[0];
+                    bool unique = tables.Length > 0 && tables.All(c => c.Status == IdentityResolutionStatus.Resolved && c.InventoryAbsencePolicy == InventoryAbsencePolicy.CompleteInventory) &&
+                        tables.Select(c => c.Record.ObjectId).Distinct().Count() == 1 && tables[0].Record.ObjectId.HasValue && tables[0].Record.ObjectId != Guid.Empty;
+                    row.ProposedScopeStatus = unique ? "Verified" : tables.Length > 0 ? "Ambiguous" : "Incomplete";
+                    row.ProposedScope = unique ? input.Trim().ToLowerInvariant() : null;
+                    row.ProposedScopeReason = unique ? "Reused unique completed snapshot Table identity" : "Raw scope/name/numeric code is not independently verified; no global/tableless assumption";
+                }
+                if (row.ProposedScopeStatus != "Verified") blockers.Add("Verified entity/table scope " + row.ProposedScopeStatus);
+                int type = 0, language = 0;
+                if (!row.RuntimeColumns.Contains("reporttypecode") || !int.TryParse(row.Get("reporttypecode"), NumberStyles.Integer, CultureInfo.InvariantCulture, out type))
+                    blockers.Add("Exact reporttypecode unavailable/malformed");
+                if (!row.RuntimeColumns.Contains("languagecode") || !int.TryParse(row.Get("languagecode"), NumberStyles.Integer, CultureInfo.InvariantCulture, out language) || language <= 0)
+                    blockers.Add("Exact languagecode unavailable/blank/malformed; no signaturelcid fallback");
+                row.ProposedBlockingReason = blockers.Count == 0 ? "None; InternalIdentifierHypothesis only, field semantics and lifecycle portability require live validation" : string.Join("; ", blockers);
+                if (blockers.Count == 0) row.CandidateP = "report-candidate-p:v1:" + Frame(ProposedIdentifierField, identifier.Trim(), row.ProposedScope,
+                    type.ToString(CultureInfo.InvariantCulture), language.ToString(CultureInfo.InvariantCulture));
+            }
+            foreach (var group in side.Rows.Values.Where(r => r.CandidateP != null).GroupBy(r => r.CandidateP, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+                foreach (var row in group) row.DuplicateP = true;
+        }
+
+        private static bool LogicalScope(string value) => !string.IsNullOrWhiteSpace(value) && value.Trim().Length <= 128 &&
+            !StringComparer.OrdinalIgnoreCase.Equals(value.Trim(), "none") && (char.IsLetter(value.Trim()[0]) || value.Trim()[0] == '_') &&
+            value.Trim().All(c => char.IsLetterOrDigit(c) || c == '_');
 
         private static Type31SideEvidence Read(IOrganizationService service, MembershipSnapshot snapshot,
             string version, CancellationToken token, Action<string> progress)
@@ -85,6 +149,7 @@ namespace D365SolutionComparer.Services.Membership
                     metadata.Attributes.Any(a => a == null || string.IsNullOrWhiteSpace(a.LogicalName)) ||
                     metadata.Attributes.GroupBy(a => a.LogicalName, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() != 1))
                     throw new InvalidOperationException("Incomplete/conflicting schema");
+                side.PrimaryName = metadata.PrimaryNameAttribute;
                 foreach (var attribute in metadata.Attributes.OrderBy(a => a.LogicalName, StringComparer.Ordinal))
                 {
                     string name = attribute.LogicalName;
@@ -94,10 +159,12 @@ namespace D365SolutionComparer.Services.Membership
                     bool content = text && (ContentFields.Contains(name) || attribute.AttributeType == AttributeTypeCode.Memo ||
                         new[] { "body", "subject", "content", "xml", "html", "text", "rdl", "query", "layout", "definition" }.Any(part => name.Contains(part)));
                     bool desired = AuditFields.Contains(name) || uniqueId || content;
+                    side.MetadataFields.Add(name + ";type=" + attribute.AttributeType + ";metadataReadable=" + attribute.IsValidForRead + ";selected=" + desired);
                     if (!desired) continue;
                     bool validShape = name == PrimaryId || name == "signatureid" || uniqueId ? attribute.AttributeType == AttributeTypeCode.Uniqueidentifier :
-                        content || name == "name" || name == "filename" || name == "categories" ? text :
-                        name == "ownerid" || name == "parentreportid" || name == "originalreportid" ? attribute.AttributeType == AttributeTypeCode.Lookup || attribute.AttributeType == AttributeTypeCode.Owner :
+                        content || name == "name" || name == "filename" || name == "categories" || name == "uniquename" || name == "schemaname" ? text :
+                        name == "signaturedate" ? attribute.AttributeType == AttributeTypeCode.DateTime :
+                        new[] { "ownerid", "parentreportid", "originalreportid", "organizationid", "solutionid", "owninguser", "owningteam" }.Contains(name) ? attribute.AttributeType == AttributeTypeCode.Lookup || attribute.AttributeType == AttributeTypeCode.Owner :
                         name == "ismanaged" || name == "ispersonal" || name == "iscustomreport" ? attribute.AttributeType == AttributeTypeCode.Boolean :
                         attribute.AttributeType == AttributeTypeCode.Integer || attribute.AttributeType == AttributeTypeCode.Picklist ||
                         attribute.AttributeType == AttributeTypeCode.State || attribute.AttributeType == AttributeTypeCode.Status ||
@@ -109,6 +176,7 @@ namespace D365SolutionComparer.Services.Membership
                     side.Columns.Add(name);
                     if (content) side.HashFields.Add(name);
                     if (uniqueId) side.UniqueFields.Add(name);
+                    if (name == ProposedIdentifierField) side.FixedIdentifierVerified = attribute.AttributeType == AttributeTypeCode.String;
                 }
                 if (!side.Columns.Contains(PrimaryId)) throw new InvalidOperationException("Primary ID is not readable");
                 reportMetadata = metadata;
@@ -240,6 +308,9 @@ namespace D365SolutionComparer.Services.Membership
         internal string Version;
         internal DateTimeOffset CapturedUtc;
         internal int ReturnedRows;
+        internal string PrimaryName;
+        internal bool FixedIdentifierVerified;
+        internal readonly List<string> MetadataFields = new List<string>();
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, Type31ReportEvidence> Rows = new SortedDictionary<Guid, Type31ReportEvidence>();
         internal readonly List<string> Columns = new List<string>();
@@ -294,6 +365,10 @@ namespace D365SolutionComparer.Services.Membership
         internal bool DuplicateA, DuplicateB;
         internal bool DuplicateSignature;
         internal string RelatedScope, ScopeStatus = "NotRequired", ScopeReason;
+        internal string ReportSubset, BoundaryReason, CandidateP, ProposedBlockingReason, ProposedScope,
+            ProposedScopeStatus = "Incomplete", ProposedScopeReason;
+        internal bool ProductionSignedSnapshot, DuplicateP;
+        internal readonly List<string> RuntimeColumns = new List<string>();
         // No Entity/raw subject/body is retained in the report model.
         internal readonly SortedDictionary<string, string> Fields = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal readonly SortedDictionary<string, Type31ContentFingerprint> Content = new SortedDictionary<string, Type31ContentFingerprint>(StringComparer.Ordinal);
@@ -305,13 +380,14 @@ namespace D365SolutionComparer.Services.Membership
         {
             ReportId = Type31EvidenceCollector.Id(row, Type31EvidenceCollector.PrimaryId);
             SignatureId = Type31EvidenceCollector.Id(row, "signatureid");
+            RuntimeColumns.AddRange(side.Columns);
             foreach (var field in side.Columns)
             {
                 row.Attributes.TryGetValue(field, out var raw);
                 if (side.HashFields.Contains(field)) { Content[field] = Type31ContentFingerprint.Create(raw); continue; }
                 if (side.UniqueFields.Contains(field)) { UniqueIds[field] = Type31EvidenceCollector.Id(row, field); continue; }
                 string value = null;
-                if (field == "name") value = raw is string ? ((string)raw).Trim() : raw == null ? "" : null;
+                if (field == "name" || field == "uniquename" || field == "schemaname") value = raw is string ? ((string)raw).Trim() : raw == null ? "" : null;
                 else if (field == Type31EvidenceCollector.PrimaryId) value = ReportId?.ToString("D");
                 else if (field == "signatureid") value = SignatureId?.ToString("D") ?? (raw == null || raw is Guid && (Guid)raw == Guid.Empty ? "" : null);
                 else if ((field == "filename" || field == "categories") && raw is string) value = (string)raw;
@@ -319,6 +395,7 @@ namespace D365SolutionComparer.Services.Membership
                 else if (raw is OptionSetValue) value = ((OptionSetValue)raw).Value.ToString(CultureInfo.InvariantCulture);
                 else if (raw is int) value = ((int)raw).ToString(CultureInfo.InvariantCulture);
                 else if (raw is bool) value = (bool)raw ? "True" : "False";
+                else if (field == "signaturedate" && raw is DateTime) value = ((DateTime)raw).ToString("O", CultureInfo.InvariantCulture);
                 else if ((field == "relatedentities" || field == "objecttypecode") && raw is string)
                 {
                     var scope = ((string)raw).Trim();
@@ -326,7 +403,7 @@ namespace D365SolutionComparer.Services.Membership
                         value = string.Join(",", scope.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0)
                             .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
                 }
-                else if ((field == "ownerid" || field == "parentreportid" || field == "originalreportid") && raw is EntityReference)
+                else if (raw is EntityReference)
                 {
                     var lookup = (EntityReference)raw;
                     if (lookup.Id != Guid.Empty && !string.IsNullOrWhiteSpace(lookup.LogicalName) &&
@@ -589,6 +666,7 @@ namespace D365SolutionComparer.Services.Membership
             else if (Lifecycle.Any(e => e.Pair))
                 text.AppendLine("Observed primary-ID preservation supports further guarded primary-ID investigation only. Raw GUID overlap and one deployment sample do not prove general portability or approve production identity.");
             else text.AppendLine("Neither identity can be assessed: no complete unique backing pairs observed.");
+            BuildUnsignedReadiness(text);
             text.AppendLine("REQUEST LEDGER");
             foreach (var side in new[] { Source, Target })
             {
@@ -600,6 +678,92 @@ namespace D365SolutionComparer.Services.Membership
                 for (int i = 0; i < side.Requests.Count; i++) Line(text, label, i + 1, side.Requests[i]);
             }
             return text.ToString();
+        }
+
+        private void BuildUnsignedReadiness(StringBuilder text)
+        {
+            text.AppendLine("SIGNED SUBSET / UNSIGNED REMAINDER BOUNDARY");
+            text.AppendLine("VerifiedSignedSubset requires agreement with the existing resolved signed production snapshot and uniquely correlated nonblank signature evidence. UnsignedOrUnverifiedRemainder never gains signed eligibility from a blank signature or this diagnostic. Production resolution is never changed by capture.");
+            foreach (var side in new[] { Source, Target })
+            {
+                string label = side == Source ? "Source" : "Target";
+                foreach (var row in side.Rows.Values) Line(text, label, row.ObjectId, "ReportSubset=" + row.ReportSubset,
+                    "ProductionSignedSnapshot=" + row.ProductionSignedSnapshot, "BoundaryReason=" + row.BoundaryReason,
+                    "signatureid=" + (row.Get("signatureid") ?? "UnavailableOrMalformed"));
+                foreach (var raw in side.Raw.Where(c => !c.Record.ObjectId.HasValue || c.Record.ObjectId == Guid.Empty))
+                    Line(text, label, raw.Record.SolutionComponentId, "ReportSubset=UnsignedOrUnverifiedRemainder", "Blank ObjectId; no signature/backing inference");
+            }
+            text.AppendLine("UNSIGNED IDENTIFIER / SCOPE / LANGUAGE ANALYSIS");
+            text.AppendLine("Candidate P is diagnostic-only InternalIdentifierHypothesis: fixed readable string uniquename + independently verified logical table scope + exact reporttypecode + exact languagecode. No schemaname/name/filename/signaturelcid fallback. Metadata availability alone does not establish internal-identifier portability. Name/filename remain context, not independently portable identifiers; no name-only Candidate P is proposed.");
+            foreach (var side in new[] { Source, Target })
+            {
+                string label = side == Source ? "Source" : "Target";
+                Line(text, label, "PrimaryNameAttribute=" + (side.PrimaryName ?? "Unavailable"));
+                foreach (var field in side.MetadataFields) Line(text, label, "Metadata", field);
+                foreach (var row in side.Rows.Values.Where(r => !r.ProductionSignedSnapshot))
+                {
+                    Line(text, label, row.ObjectId, "Correlation=" + row.Status, "TableStatus=" + row.ProposedScopeStatus,
+                        "TableKey=" + row.ProposedScope, "ScopeReason=" + row.ProposedScopeReason,
+                        "CandidateP=" + (row.CandidateP ?? "Incomplete"), "CompleteP=" + (row.CandidateP != null && !row.DuplicateP),
+                        "DuplicateP=" + row.DuplicateP, "BlockingReason=" + (row.DuplicateP ? "Candidate P collision; no automatic pairing" : row.ProposedBlockingReason));
+                    foreach (var field in new[] { "name", "filename", "uniquename", "schemaname", "reporttypecode", "reportcategorycode", "languagecode", "ispersonal", "signatureid", "signaturedate", "signaturelcid" })
+                        Line(text, label, row.ObjectId, field, "Schema=" + (side.Schema.TryGetValue(field, out var schema) ? schema : "NotExposed"),
+                            "RuntimeRead=" + row.RuntimeColumns.Contains(field), "Value=" + (row.Get(field) ?? "UnavailableOrMalformed"));
+                    foreach (var field in Type31EvidenceCollector.ContentFields)
+                        Line(text, label, row.ObjectId, field, row.Content.TryGetValue(field, out var hash) ? hash.Evidence : "NotRetrievedOrUnavailable; presence/length/hash unknown; binary never requested");
+                }
+            }
+            text.AppendLine("UNSIGNED CRITICAL COLLISION MATRIX");
+            foreach (var side in new[] { Source, Target })
+            {
+                string label = side == Source ? "Source" : "Target";
+                var rows = side.Rows.Values.Where(r => !r.ProductionSignedSnapshot && r.Status == "Unique").ToArray();
+                Collision(text, label, "NameOnly", rows, r => Key(r.Get("name")));
+                Collision(text, label, "FilenameOnly", rows, r => Key(r.Get("filename")));
+                Collision(text, label, "Name+ReportType", rows, r => Key(r.Get("name"), r.Get("reporttypecode")));
+                Collision(text, label, "Name+Language", rows, r => Key(r.Get("name"), r.Get("languagecode")));
+                Collision(text, label, "Name+VerifiedScope", rows, r => r.ProposedScopeStatus == "Verified" ? Key(r.Get("name"), r.ProposedScope) : null);
+                Collision(text, label, "CandidateP", rows, r => r.CandidateP);
+            }
+            text.AppendLine("UNSIGNED CANDIDATE P LIFECYCLE COMPARISON");
+            var sourceGroups = Source.Rows.Values.Where(r => r.CandidateP != null).GroupBy(r => r.CandidateP, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
+            var targetGroups = Target.Rows.Values.Where(r => r.CandidateP != null).GroupBy(r => r.CandidateP, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
+            int pairs = 0, different = 0;
+            foreach (var key in sourceGroups.Keys.Union(targetGroups.Keys, StringComparer.OrdinalIgnoreCase).OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+            {
+                var left = sourceGroups.TryGetValue(key, out var l) ? l : new Type31ReportEvidence[0];
+                var right = targetGroups.TryGetValue(key, out var r) ? r : new Type31ReportEvidence[0];
+                string outcome = left.Length > 1 || right.Length > 1 ? "Ambiguous" : left.Length == 1 && right.Length == 1 ? "InternalIdentifierPairHypothesis" : "OneSidedEvidence";
+                Line(text, outcome, key, "SourceIds=" + Ids(left), "TargetIds=" + Ids(right));
+                if (outcome != "InternalIdentifierPairHypothesis") continue;
+                pairs++; bool differing = left[0].ReportId != right[0].ReportId; if (differing) different++;
+                Line(text, "reportid=" + (differing ? "DifferentObserved" : "EqualObserved"),
+                    "SourceSubset=" + left[0].ReportSubset, "TargetSubset=" + right[0].ReportSubset,
+                    "SourceManaged=" + left[0].Managed, "TargetManaged=" + right[0].Managed,
+                    "ManagedTransition=" + (left[0].Managed.HasValue && right[0].Managed.HasValue && left[0].Managed != right[0].Managed),
+                    "Content=" + ContentComparison(left[0], right[0]));
+                foreach (var field in left[0].Fields.Keys.Union(right[0].Fields.Keys).Union(left[0].Content.Keys).Union(right[0].Content.Keys).Union(left[0].UniqueIds.Keys).Union(right[0].UniqueIds.Keys).OrderBy(f => f, StringComparer.Ordinal))
+                {
+                    string first = Field(left[0], field), second = Field(right[0], field);
+                    Line(text, field, "Source=" + (first ?? "Unavailable"), "Target=" + (second ?? "Unavailable"), first == null || second == null ? "Incomplete" :
+                        StringComparer.OrdinalIgnoreCase.Equals(first, second) ? "EqualObserved" : "DifferentObserved");
+                }
+            }
+            Line(text, "UniqueCandidatePPairs=" + pairs, "SamePrimaryId=" + (pairs - different), "DifferentPrimaryId=" + different);
+            text.AppendLine("UNSIGNED DEFINITION EVIDENCE / RESOLVER READINESS");
+            text.AppendLine("Name and filename are context/mutable definition hypotheses. Report type/category and language require semantic classification; type/language are retained conservatively in hypothetical Candidate P and cannot also become definition properties without a revised contract. Content hashes and signature fields/date/locale are definition/audit evidence only; none create unsigned identity. bodybinary/attachments are not retrieved.");
+            text.AppendLine("Same reportid does not prove portability. An absent readable fixed internal identifier, unverified scope, missing language/type or collisions make Candidate P incomplete/ambiguous: recommend remaining unsupported. Even a complete diagnostic Candidate P needs independently deployed differing-primary-ID lifecycle evidence and semantic review; metadata/readability, matching hashes and managed transition do not alone make the unsigned remainder production-design-ready. No absence inference.");
+        }
+
+        private static string Key(params string[] fields) => fields.Any(string.IsNullOrWhiteSpace) ? null : Type31EvidenceCollector.Frame(fields.Select(f => f.Trim()).ToArray());
+        private static void Collision(StringBuilder text, string side, string dimension, Type31ReportEvidence[] rows, Func<Type31ReportEvidence, string> select)
+        {
+            var keys = rows.Select(select).Where(k => k != null).ToArray();
+            var collisions = keys.GroupBy(k => k, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).ToArray();
+            Line(text, side, dimension, "CollisionGroups=" + collisions.Length, "IncompleteDimension=" + (rows.Length - keys.Length));
+            foreach (var group in collisions) Line(text, side, dimension, "Candidate=" + group.Key, "DistinctBackingRecords=" + group.Count());
         }
 
         private static string Field(Type31ReportEvidence row, string field)
