@@ -150,7 +150,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("Unique", entry.Source.ParentStatus); Assert.AreEqual("Unique", entry.Source.ReferenceStatus);
             StringAssert.Contains(report.Build(), "DifferentPrimaryId"); StringAssert.Contains(report.Build(), "UnmanagedToManaged");
             StringAssert.Contains(report.Build(), "ObjectIdEqualsPrimaryId=True");
-            Assert.AreEqual(1, pair.Source.Service.Calls); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(1, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
             Assert.IsFalse(report.Build().Contains(Secret)); StringAssert.Contains(report.Build(), "sha256=");
             var after = new SolutionMembershipComparer().Compare(pair.Source.Snapshot(), pair.Target.Snapshot());
             CollectionAssert.AreEqual(before.Select(r => r.Presence).ToArray(), after.Select(r => r.Presence).ToArray());
@@ -222,7 +222,7 @@ namespace D365SolutionComparer.Tests
             var pair = new Pair(); pair.Source.Add(); pair.Source.ReferenceKey = "second.js"; pair.Source.Add();
             pair.Source.Context.RemoveAll(c => c.Record.ComponentType == 80);
             var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.All(r => r.ParentStatus == "Unique"));
-            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(3, pair.Source.Service.ExecuteCalls);
             Assert.AreEqual(1, pair.Source.Queries.Single(q => q.EntityName == "appmodule").Criteria.Conditions.Single().Values.Count);
             StringAssert.Contains(report.Build(), "appmodule.uniquename");
         }
@@ -261,7 +261,7 @@ namespace D365SolutionComparer.Tests
         {
             var pair = new Pair(); for (int i = 0; i < count; i++) pair.Source.Add();
             var report = pair.Capture(); Assert.AreEqual(calls, pair.Source.Service.Calls);
-            Assert.AreEqual(count, report.Source.Rows.Count); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(count, report.Source.Rows.Count); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
             Assert.IsTrue(pair.Source.Queries.All(q => q.Criteria.Conditions.Single().Values.Count <= 200));
         }
         [TestMethod]
@@ -359,7 +359,7 @@ namespace D365SolutionComparer.Tests
         public void FullQuerySuccessKeepsSingleBatchedReadAndDoesNotRetry()
         {
             var pair = new Pair(); pair.Source.Add(); var report = pair.Capture();
-            Assert.AreEqual(1, pair.Source.Service.Calls); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(1, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
             Assert.AreEqual("Unique", report.Source.Rows.Values.Single().Status);
             Assert.IsFalse(report.Build().Contains("Minimal AppElement retry"));
         }
@@ -401,7 +401,7 @@ namespace D365SolutionComparer.Tests
             pair.Source.Service.RetrievePage = q => { var rows = normal(q); if (q.EntityName == "appelement" && ++count == 1) throw SdkFault(); return rows; };
             var report = pair.Capture(); var row = report.Source.Rows.Values.Single();
             Assert.AreEqual("Unique", row.Status); Assert.IsTrue(row.CriticalComplete); Assert.IsNotNull(row.CandidateA);
-            Assert.AreEqual(3, pair.Source.Service.Calls); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(3, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
             CollectionAssert.AreEquivalent(new[] { "appelementid", "parentappmoduleid", "objectid", "objectidtype", "name", "uniquename", "componentidunique", "componentstate", "ismanaged", "canvasappid" },
                 pair.Source.Queries[1].ColumnSet.Columns.ToArray());
             Assert.IsFalse(pair.Source.Queries[1].ColumnSet.Columns.Contains("publishconfiguration"));
@@ -417,7 +417,7 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("Unavailable", row.Content["publishconfiguration"].Presence); Assert.IsFalse(row.Content["publishconfiguration"].Known);
             foreach (var field in bad) StringAssert.Contains(report.Build(), "Attribute faulted: " + field);
             Assert.IsTrue(row.Content["configjson"].Known); Assert.IsTrue(pair.Source.Service.Calls <= 67);
-            Assert.AreEqual(1, pair.Source.Service.ExecuteCalls); Assert.AreEqual(0, pair.Source.Service.WriteCalls);
+            Assert.AreEqual(2, pair.Source.Service.ExecuteCalls); Assert.AreEqual(0, pair.Source.Service.WriteCalls);
         }
         [TestMethod]
         public void IdentityCriticalFaultRetainsPrimaryAndOtherFieldsButBlocksCandidates()
@@ -465,7 +465,7 @@ namespace D365SolutionComparer.Tests
             var selected = pair.Source.Rows.Select(r => r.Id).ToHashSet();
             Assert.IsTrue(pair.Source.Queries.All(q => q.Criteria.Conditions.Count == 1 && q.Criteria.Conditions[0].Operator == ConditionOperator.In &&
                 q.Criteria.Conditions[0].Values.Count <= 200 && q.Criteria.Conditions[0].Values.Cast<Guid>().All(selected.Contains)));
-            Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
         }
         [TestMethod]
         public void RetryPagingHonorsTerminalCookieAndCrossPageDeduplication()
@@ -719,6 +719,197 @@ namespace D365SolutionComparer.Tests
                 Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
             }
         }
+        [TestMethod]
+        public void ExplicitPicklistTypeValueIsVerifiedOnlyThroughSelectedAttributeOptionMetadata()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); TypeOptions(pair.Source, "elementtype", 7);
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsTrue(row.IndependentTypeComplete); Assert.AreEqual("VerifiedExplicitOptionDiscriminatorEvidence", row.IndependentTypeStatus);
+            StringAssert.Contains(report.Build(), "NumericValue=7"); StringAssert.Contains(report.Build(), "OptionSetName=appelement_kind_test");
+            StringAssert.Contains(report.Build(), "LabelsAuditOnly=[LCID=1033:Fixture type label]");
+            Assert.AreEqual("7", row.ElementType); Assert.IsFalse(row.CandidateA.Contains("Fixture type label"));
+            Assert.IsTrue(row.TypeAnalysis.Any(a => a.Contains("ActualValue=7") && a.Contains("VerifiedOptionMetadataValue")));
+        }
+
+        [DataTestMethod, DataRow("blank"), DataRow("unavailable"), DataRow("unknownOption"), DataRow("ambiguousOption")]
+        public void BlankUnavailableUnknownOrAmbiguousTypeCannotBeIndependentlyEstablished(string state)
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); TypeOptions(pair.Source, "elementtype", 7);
+            if (state == "blank") backing.Attributes.Remove("elementtype");
+            if (state == "unavailable") Set(pair.Source.Attributes.Single(a => a.LogicalName == "elementtype"), "IsValidForRead", false);
+            if (state == "unknownOption") backing["elementtype"] = new OptionSetValue(9);
+            if (state == "ambiguousOption") ((PicklistAttributeMetadata)pair.Source.Attributes.Single(a => a.LogicalName == "elementtype")).OptionSet.Options.Add(new OptionMetadata(new Microsoft.Xrm.Sdk.Label("Other label", 1033), 7));
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsFalse(row.IndependentTypeComplete); StringAssert.Contains(report.Build(), "No independent element-type source found");
+            if (state == "blank" || state == "unavailable") { Assert.IsFalse(row.ElementTypeComplete); Assert.IsNull(row.CandidateA); }
+            if (state == "unavailable") Assert.IsFalse(pair.Source.Queries.Any(q => q.ColumnSet.Columns.Contains("elementtype")));
+        }
+
+        [TestMethod]
+        public void ConflictingExplicitFieldsRequireAnIndependentMappingAndCannotBeCollapsedByLabels()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); TypeOptions(pair.Source, "elementtype", 7);
+            pair.Source.Attributes.Add(Attribute("objectidtype", new PicklistAttributeMetadata())); TypeOptions(pair.Source, "objectidtype", 8);
+            backing["objectidtype"] = new OptionSetValue(8);
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsFalse(row.IndependentTypeComplete); StringAssert.Contains(row.IndependentTypeStatus, "AmbiguousMultipleDiscriminators");
+            Assert.AreEqual("7", row.ElementType); // Existing A precedence/construction is unchanged; this investigation does not repair or rewrite it.
+            Assert.IsTrue(row.TypeAnalysis.Count(a => a.Contains("VerifiedOptionMetadataValue")) == 2);
+        }
+
+        [DataTestMethod, DataRow("canvasapp", true), DataRow("99999", false), DataRow("unavailable_entity", false)]
+        public void EntityNameTargetIsIndependentlyVerifiedWithoutInferringAppElementKind(string value, bool verified)
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); backing.Attributes.Remove("elementtype");
+            pair.Source.Attributes.Add(Attribute("objectidtype", new EntityNameAttributeMetadata())); backing["objectidtype"] = value;
+            var normal = pair.Source.Service.ExecuteRequest;
+            pair.Source.Service.ExecuteRequest = req => {
+                if (((RetrieveEntityRequest)req).LogicalName == "unavailable_entity") throw new InvalidOperationException("private server data");
+                return normal(req);
+            };
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsFalse(row.IndependentTypeComplete);
+            Assert.AreEqual(verified, row.TypeAnalysis.Any(a => a.Contains("VerifiedEntityNameTarget")));
+            StringAssert.Contains(report.Build(), "No independent element-type source found");
+            Assert.IsFalse(report.Build().Contains("private server data"));
+            Assert.IsFalse(pair.Source.Queries.Any(q => q.EntityName == "canvasapp"));
+        }
+
+        [TestMethod]
+        public void NewPlausibleFieldIsObservedWithoutChangingExistingCandidateConstruction()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); backing.Attributes.Remove("elementtype");
+            pair.Source.Attributes.Add(Attribute("appelementtype", new PicklistAttributeMetadata())); TypeOptions(pair.Source, "appelementtype", 3);
+            backing["appelementtype"] = new OptionSetValue(3);
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsTrue(row.IndependentTypeComplete); Assert.IsTrue(row.ParentIdentityComplete && row.ReferencedComponentIdentityComplete);
+            Assert.IsFalse(row.ElementTypeComplete); Assert.IsNull(row.CandidateA); Assert.IsNotNull(row.CandidateB);
+            StringAssert.Contains(report.Build(), "CandidateAConstructionUnchanged=True");
+        }
+
+        [TestMethod]
+        public void VerifiedTypeCompletesOnlyTypeEvidenceAndCannotSupplyAnUnresolvedParentOrReference()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); TypeOptions(pair.Source, "elementtype", 7);
+            pair.Source.Context.Clear(); pair.Source.ParentRows.Clear();
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.IsTrue(row.IndependentTypeComplete && row.ElementTypeComplete);
+            Assert.IsFalse(row.ParentIdentityComplete || row.ReferencedComponentIdentityComplete || row.CompleteA);
+        }
+
+        [TestMethod]
+        public void CanvasRelationshipAndCachedDependencyCannotManufactureMissingElementType()
+        {
+            var pair = TwoCanvasPairs(); var cached = pair.CaptureMembers();
+            foreach (var side in new[] { pair.Source, pair.Target }) foreach (var row in side.Rows) row.Attributes.Remove("elementtype");
+            var report = pair.Capture(cached: cached);
+            Assert.IsTrue(report.Source.Rows.Values.Concat(report.Target.Rows.Values).All(r => r.ParentIdentityComplete && r.ReferencedComponentIdentityComplete &&
+                !r.ElementTypeComplete && !r.IndependentTypeComplete && !r.CompleteA));
+            Assert.AreEqual(2, report.Source.Requests.Count(r => r.StartsWith("RetrieveMultiple canvasapp;"))); // existing critical + optional dependency batches; completed member reused
+            Assert.IsTrue(report.Source.Rows.Values.All(r => r.CandidateB != null));
+            StringAssert.Contains(report.Build(), "Canvas App/parent/GUID/B/hash evidence cannot supply type");
+        }
+
+        [TestMethod]
+        public void TypeInvestigationLeavesCandidateKeysAndProductionMembershipUnchanged()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); var before = pair.Capture();
+            TypeOptions(pair.Source, "elementtype", 7); var after = pair.Capture();
+            Assert.AreEqual(before.Source.Rows[backing.Id].CandidateA, after.Source.Rows[backing.Id].CandidateA);
+            Assert.AreEqual(before.Source.Rows[backing.Id].CandidateB, after.Source.Rows[backing.Id].CandidateB);
+            Assert.IsTrue(pair.Source.Raw.All(r => r.Status == IdentityResolutionStatus.Unsupported && r.ComparisonKey == null));
+            Assert.IsTrue(new SolutionMembershipComparer().Compare(pair.Source.Snapshot(), pair.Target.Snapshot()).Where(r => r.Source?.Record.ComponentType == 10072 || r.Target?.Record.ComponentType == 10072).All(r => r.Presence == MembershipPresence.Indeterminate));
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+        }
+
+        [TestMethod]
+        public void RegistrationReviewIsMetadataFirstRawTypeScopedAndNeverSuppliesChildType()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); backing.Attributes.Remove("elementtype");
+            var normal = pair.Source.Service.ExecuteRequest;
+            pair.Source.Service.ExecuteRequest = req => {
+                if (((RetrieveEntityRequest)req).LogicalName != "solutioncomponentdefinition") return normal(req);
+                var metadata = new EntityMetadata { LogicalName = "solutioncomponentdefinition" };
+                Set(metadata, "PrimaryIdAttribute", "solutioncomponentdefinitionid");
+                Set(metadata, "Attributes", new[] { Attribute("solutioncomponentdefinitionid", new UniqueIdentifierAttributeMetadata()),
+                    Attribute("objecttypecode", new IntegerAttributeMetadata()), Attribute("name", new StringAttributeMetadata()),
+                    Attribute("primaryentityname", new StringAttributeMetadata()), Attribute("componenttype", new IntegerAttributeMetadata()) });
+                var response = new RetrieveEntityResponse(); response.Results["EntityMetadata"] = metadata; return response;
+            };
+            var registration = new Entity("solutioncomponentdefinition", Guid.NewGuid()); registration["solutioncomponentdefinitionid"] = registration.Id;
+            registration["objecttypecode"] = 10072; registration["name"] = "AppElement"; registration["primaryentityname"] = "appelement"; registration["componenttype"] = 300;
+            var normalPage = pair.Source.Service.RetrievePage;
+            pair.Source.Service.RetrievePage = q => {
+                if (q.EntityName != "solutioncomponentdefinition") return normalPage(q);
+                pair.Source.Queries.Add(q); Assert.AreEqual(ConditionOperator.Equal, q.Criteria.Conditions.Single().Operator);
+                Assert.AreEqual(10072, q.Criteria.Conditions.Single().Values.Single()); Assert.AreEqual(200, q.PageInfo.Count);
+                return new EntityCollection(new List<Entity> { registration }) { PagingCookie = "private-cookie", MoreRecords = false };
+            };
+            var report = pair.Capture(); Assert.IsFalse(report.Source.Rows[backing.Id].IndependentTypeComplete); Assert.IsNull(report.Source.Rows[backing.Id].CandidateA);
+            StringAssert.Contains(report.Build(), "distinctRows=1; pageCount=1"); StringAssert.Contains(report.Build(), "Field=componenttype; Value=300");
+            Assert.IsFalse(report.Build().Contains("private-cookie"));
+            Assert.AreEqual(report.Source.Requests.Count, pair.Source.Service.Calls + pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(0, pair.Target.Service.Calls + pair.Target.Service.ExecuteCalls);
+        }
+
+        [TestMethod]
+        public void TypeMetadataReadFaultCannotInvalidateExistingBackingParentOrReferenceEvidence()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); var normal = pair.Source.Service.ExecuteRequest;
+            pair.Source.Service.ExecuteRequest = req => ((RetrieveEntityRequest)req).LogicalName == "solutioncomponentdefinition" ? throw new InvalidOperationException("private metadata") : normal(req);
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.AreEqual("Unique", row.Status); Assert.IsTrue(row.ParentIdentityComplete && row.ReferencedComponentIdentityComplete);
+            Assert.IsNotNull(row.CandidateA); Assert.IsFalse(report.Build().Contains("private metadata"));
+            StringAssert.Contains(report.Build(), "Registered-definition metadata unavailable");
+        }
+
+        [TestMethod]
+        public void RuntimeFaultingTypeColumnRemainsUnavailableWithoutLosingBackingCorrelation()
+        {
+            var pair = new Pair(); var backing = pair.Source.Add(); TypeOptions(pair.Source, "elementtype", 7);
+            FailColumns(pair.Source, new[] { "elementtype" });
+            var report = pair.Capture(); var row = report.Source.Rows[backing.Id];
+            Assert.AreEqual("Unique", row.Status); Assert.IsTrue(row.ParentIdentityComplete && row.ReferencedComponentIdentityComplete);
+            Assert.IsFalse(row.IndependentTypeComplete || row.ElementTypeComplete || row.CompleteA);
+            StringAssert.Contains(report.Build(), "appelement.elementtype; AttributeType=Picklist; MetadataReadable=True; Selected=True");
+            Assert.IsTrue(row.TypeAnalysis.Any(a => a.Contains("Field=elementtype; RuntimeReadable=False; ActualValue=Unavailable")));
+            Assert.IsTrue(pair.Source.Queries.All(q => q.Criteria.Conditions.Single().Operator == ConditionOperator.In));
+        }
+
+        [TestMethod]
+        public void EntityNameInvestigationReusesExactSnapshotCanvasMetadataWithoutIdentityRepair()
+        {
+            var pair = TwoCanvasPairs(); var cached = pair.CaptureMembers();
+            foreach (var side in new[] { pair.Source, pair.Target }) {
+                side.Attributes.Add(Attribute("objectidtype", new EntityNameAttributeMetadata()));
+                foreach (var row in side.Rows) { row.Attributes.Remove("elementtype"); row["objectidtype"] = "canvasapp"; }
+            }
+            var report = pair.Capture(cached: cached);
+            Assert.IsTrue(report.Source.Rows.Values.All(r => !r.IndependentTypeComplete));
+            Assert.IsFalse(report.Source.Requests.Any(r => r.StartsWith("Execute RetrieveEntity(canvasapp,")));
+            Assert.AreSame(cached.Source.Rows.Values.Single(), report.Source.CanvasReferenceRows[cached.Source.Rows.Keys.Single()]);
+            Assert.IsTrue(report.Source.TypeSchema.Any(v => v.Contains("target metadata reused")));
+        }
+
+        [TestMethod]
+        public void CancellationDuringRegistrationMetadataStopsInvestigationWithoutFurtherReads()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var normal = pair.Source.Service.ExecuteRequest;
+            using (var cancel = new CancellationTokenSource()) {
+                pair.Source.Service.ExecuteRequest = req => { if (((RetrieveEntityRequest)req).LogicalName == "solutioncomponentdefinition") cancel.Cancel(); return normal(req); };
+                Assert.ThrowsException<OperationCanceledException>(() => pair.Capture(cancel.Token));
+                Assert.AreEqual(0, pair.Target.Service.Calls + pair.Target.Service.ExecuteCalls);
+                Assert.IsTrue(pair.Source.Raw.All(r => r.Status == IdentityResolutionStatus.Unsupported && r.ComparisonKey == null));
+            }
+        }
+
+        private static void TypeOptions(Fixture side, string field, int value)
+        {
+            var attribute = (PicklistAttributeMetadata)side.Attributes.Single(a => a.LogicalName == field);
+            attribute.OptionSet = new OptionSetMetadata { Name = "appelement_kind_test", IsGlobal = false };
+            attribute.OptionSet.Options.Add(new OptionMetadata(new Microsoft.Xrm.Sdk.Label("Fixture type label", 1033), value));
+        }
+
         private static Pair TwoCanvasPairs()
         {
             var pair = new Pair(); foreach (var side in new[] { pair.Source, pair.Target })
