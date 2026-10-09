@@ -779,6 +779,140 @@ namespace D365SolutionComparer.Tests
             if (error != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
 
+        [DataTestMethod]
+        [DataRow(false)] [DataRow(true)]
+        public void UnsignedRefinementDoesNotTurnBlankSignatureIntoSignedEligibility(bool emptyGuid)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); if (emptyGuid) row["signatureid"] = Guid.Empty;
+            var report = pair.Capture(); var evidence = report.Source.Rows[row.Id];
+            Assert.AreEqual("UnsignedOrUnverifiedRemainder", evidence.ReportSubset); Assert.IsFalse(evidence.ProductionSignedSnapshot);
+            Assert.IsNull(evidence.CandidateP); StringAssert.Contains(evidence.ProposedBlockingReason, "Fixed internal uniquename");
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, pair.Source.Raw.Single().Status); Assert.IsNull(pair.Source.Raw.Single().ComparisonKey);
+            StringAssert.Contains(report.Build(), "blank signature or this diagnostic");
+        }
+
+        [TestMethod]
+        public void VerifiedProductionSignedSnapshotIsExcludedFromUnsignedRefinementEvenWithInternalName()
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); var signature = Guid.NewGuid(); row["signatureid"] = signature; row["uniquename"] = "ava_signed";
+            pair.Source.Raw.Clear(); pair.Source.Raw.Add(new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 31, row.Id),
+                IdentityResolutionStatus.Resolved, comparisonKey: signature.ToString("D"), semanticKind: ComponentSemanticKinds.Report));
+            var report = pair.Capture(); var evidence = report.Source.Rows[row.Id];
+            Assert.AreEqual("VerifiedSignedSubset", evidence.ReportSubset); Assert.IsNull(evidence.CandidateP);
+            StringAssert.Contains(evidence.ProposedBlockingReason, "signed subset excluded"); Assert.AreEqual(signature.ToString("D"), pair.Source.Raw.Single().ComparisonKey);
+            row.Attributes.Remove("signatureid"); evidence = pair.Capture().Source.Rows[row.Id];
+            Assert.AreEqual("UnsignedOrUnverifiedRemainder", evidence.ReportSubset); Assert.IsNull(evidence.CandidateP);
+            Assert.AreEqual(IdentityResolutionStatus.Resolved, pair.Source.Raw.Single().Status); // Fresh evidence cannot mutate production snapshot.
+        }
+
+        [TestMethod]
+        public void NonblankSignatureOutsideVerifiedSnapshotCannotGainSignedEligibilityOrUnsignedFallback()
+        {
+            var pair = UnsignedReadinessPair(); var row = pair.Source.Rows.Single(); row["signatureid"] = Guid.NewGuid();
+            var report = pair.Capture(); var found = report.Source.Rows[row.Id];
+            Assert.AreEqual("UnsignedOrUnverifiedRemainder", found.ReportSubset); Assert.IsNull(found.CandidateP);
+            StringAssert.Contains(found.ProposedBlockingReason, "Unsigned signature state");
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, pair.Source.Raw.Single().Status);
+        }
+
+        [TestMethod]
+        public void UnsignedNameAndFilenameCollisionsRemainVisibleWithoutCreatingInternalIdentity()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Source.Add(); pair.Target.Add(); pair.Target.Add(title: "Other name");
+            var report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.Concat(report.Target.Rows.Values).All(r => r.CandidateP == null));
+            StringAssert.Contains(report.Build(), "Source\tNameOnly\tCollisionGroups=1"); StringAssert.Contains(report.Build(), "Source\tFilenameOnly\tCollisionGroups=1");
+            StringAssert.Contains(report.Build(), "Target\tNameOnly\tCollisionGroups=0"); StringAssert.Contains(report.Build(), "Target\tFilenameOnly\tCollisionGroups=1");
+            StringAssert.Contains(report.Build(), "recommend remaining unsupported");
+        }
+
+        [TestMethod]
+        public void CompleteFixedInternalIdentifierHypothesisPairsDifferingPrimaryIdsOnlyDiagnostically()
+        {
+            var pair = UnsignedReadinessPair(); var left = pair.Source.Rows.Single(); var right = pair.Target.Rows.Single();
+            right["uniquename"] = " AVA_UNSIGNED_REPORT "; right["filename"] = "different.rdl";
+            var report = pair.Capture(); var first = report.Source.Rows[left.Id]; var second = report.Target.Rows[right.Id];
+            Assert.AreNotEqual(left.Id, right.Id); Assert.IsTrue(StringComparer.OrdinalIgnoreCase.Equals(first.CandidateP, second.CandidateP)); Assert.IsNotNull(first.CandidateP);
+            Assert.IsFalse(first.CandidateP.Contains(left.Id.ToString())); Assert.IsFalse(first.CandidateP.Contains("different.rdl"));
+            StringAssert.Contains(report.Build(), "UniqueCandidatePPairs=1\tSamePrimaryId=0\tDifferentPrimaryId=1");
+            Assert.IsTrue(pair.Source.Raw.Concat(pair.Target.Raw).All(r => r.Status == IdentityResolutionStatus.Unsupported && r.ComparisonKey == null));
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+        }
+
+        [DataTestMethod]
+        [DataRow("uniquename", "blank")] [DataRow("uniquename", "unavailable")]
+        [DataRow("languagecode", "blank")] [DataRow("languagecode", "unavailable")]
+        [DataRow("reporttypecode", "blank")] [DataRow("reporttypecode", "unavailable")]
+        public void FixedIdentityDimensionUnavailableCannotUseDisplaySignatureLocaleOrHashFallback(string field, string state)
+        {
+            var pair = UnsignedReadinessPair(); var row = pair.Source.Rows.Single(); row["schemaname"] = "other_identifier"; row["signaturelcid"] = 1033;
+            if (state == "blank") row.Attributes.Remove(field); else Set(pair.Source.Attributes.Single(a => a.LogicalName == field), "IsValidForRead", false);
+            var report = pair.Capture(); Assert.IsNull(report.Source.Rows[row.Id].CandidateP); Assert.IsNotNull(report.Source.Rows[row.Id].Content["bodytext"].Sha256);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(report.Source.Rows[row.Id].ProposedBlockingReason));
+            StringAssert.Contains(report.Build(), "No schemaname/name/filename/signaturelcid fallback");
+        }
+
+        [DataTestMethod]
+        [DataRow(false)] [DataRow(true)]
+        public void MissingOrAmbiguousRelatedScopeKeepsInternalHypothesisIncomplete(bool ambiguous)
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); row["uniquename"] = "ava_unsigned_report"; row.Attributes.Remove("relatedentities");
+            var scope = new ScopeFixture(pair.Source); if (ambiguous) { scope.Add(row.Id, "account"); scope.Add(row.Id, "incident"); }
+            var report = pair.Capture(); Assert.IsNull(report.Source.Rows[row.Id].CandidateP);
+            Assert.AreEqual(ambiguous ? "Ambiguous" : "Incomplete", report.Source.Rows[row.Id].ProposedScopeStatus);
+            StringAssert.Contains(report.Source.Rows[row.Id].ProposedBlockingReason, "Verified entity/table scope");
+        }
+
+        [TestMethod]
+        public void SamePrimaryIdAndMatchingContentNeverRepairsMissingUnsignedInternalIdentifier()
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); pair.Target.Add(left.Id);
+            var report = pair.Capture(); Assert.IsNull(report.Source.Rows[left.Id].CandidateP);
+            StringAssert.Contains(report.Build(), "UniqueCandidatePPairs=0"); StringAssert.Contains(report.Build(), "Same reportid does not prove portability");
+        }
+
+        [DataTestMethod]
+        [DataRow("bodytext")] [DataRow("signaturedate")] [DataRow("signaturelcid")] [DataRow("ismanaged")]
+        public void ContentSignatureAuditAndManagementDifferencesCannotChangeUnsignedInternalCandidate(string field)
+        {
+            var pair = UnsignedReadinessPair(); var left = pair.Source.Rows.Single(); var right = pair.Target.Rows.Single();
+            right[field] = field == "signaturedate" ? (object)new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc) :
+                field == "signaturelcid" ? (object)1036 : field == "ismanaged" ? (object)true : "PRIVATE CHANGED REPORT BODY";
+            var report = pair.Capture(); Assert.AreEqual(report.Source.Rows[left.Id].CandidateP, report.Target.Rows[right.Id].CandidateP);
+            if (field == "bodytext") StringAssert.Contains(report.Build(), "Content=DifferentContent");
+            if (field == "ismanaged") StringAssert.Contains(report.Build(), "ManagedTransition=True");
+            Assert.IsFalse(report.Build().Contains("PRIVATE CHANGED REPORT BODY"));
+        }
+
+        [TestMethod]
+        public void DuplicateInternalCandidateAndRepeatedMembershipAreDistinguished()
+        {
+            var pair = UnsignedReadinessPair(); var left = pair.Source.Rows.Single(); pair.Source.Reference(left.Id);
+            var report = pair.Capture(); Assert.IsFalse(report.Source.Rows[left.Id].DuplicateP);
+            var other = pair.Source.Add(); other["uniquename"] = "ava_unsigned_report"; other.Attributes.Remove("relatedentities");
+            pair.Source.Raw.Add(Identity("account", 1)); // This second raw scope is verified independently without another backing read.
+            other["relatedentities"] = "account";
+            report = pair.Capture(); Assert.IsTrue(report.Source.Rows.Values.All(r => r.DuplicateP));
+            StringAssert.Contains(report.Build(), "Source\tCandidateP\tCollisionGroups=1"); Assert.IsFalse(report.Build().Split('\n').Any(l => l.StartsWith("InternalIdentifierPairHypothesis\t")));
+        }
+
+        [TestMethod]
+        public void BinaryAndBodyPayloadsRemainExcludedOrHashOnlyWithMetadataAnalysis()
+        {
+            var pair = new Pair(); var row = pair.Source.Add(); pair.Source.Attributes.Add(Attribute("bodybinary", new MemoAttributeMetadata())); row["bodybinary"] = new byte[] { 1, 2, 3 };
+            var report = pair.Capture(); Assert.IsTrue(pair.Source.Queries.All(q => !q.ColumnSet.Columns.Contains("bodybinary")));
+            StringAssert.Contains(report.Build(), "bodybinary"); StringAssert.Contains(report.Build(), "PrimaryNameAttribute=name");
+            Assert.IsFalse(report.Build().Contains(Secret));
+            Assert.IsNull(report.Source.Rows[row.Id].CandidateP); Assert.IsFalse(report.Source.Rows[row.Id].RuntimeColumns.Contains("bodybinary"));
+        }
+
+        private static Pair UnsignedReadinessPair()
+        {
+            var pair = new Pair(); foreach (var side in new[] { pair.Source, pair.Target }) {
+                var row = side.Add(); row["uniquename"] = "ava_unsigned_report"; row.Attributes.Remove("relatedentities");
+                var scope = new ScopeFixture(side); scope.Add(row.Id, "account");
+            } return pair;
+        }
+
         private static MembershipComparisonPresentation Present(MembershipSnapshot source, MembershipSnapshot target) => new MembershipResultPresenter().Create(
             MembershipEnvironmentResult.FromSnapshot("Source", source, 4, TimeSpan.Zero), MembershipEnvironmentResult.FromSnapshot("Target", target, 4, TimeSpan.Zero));
         private static void Set(object target, string property, object value) => target.GetType().GetProperty(property).SetValue(target, value, null);
@@ -868,12 +1002,13 @@ namespace D365SolutionComparer.Tests
                 foreach (var field in Type31EvidenceCollector.AuditFields)
                 {
                     AttributeMetadata attribute = field == "reportid" || field == "reportidunique" || field == "signatureid" ? (AttributeMetadata)new UniqueIdentifierAttributeMetadata() :
-                        new[] { "name", "filename", "categories", "relatedentities", "objecttypecode" }.Contains(field) ? (AttributeMetadata)new StringAttributeMetadata() :
+                        new[] { "name", "filename", "categories", "relatedentities", "objecttypecode", "uniquename", "schemaname" }.Contains(field) ? (AttributeMetadata)new StringAttributeMetadata() :
+                        field == "signaturedate" ? (AttributeMetadata)new DateTimeAttributeMetadata() :
                         field == "ismanaged" || field == "ispersonal" || field == "iscustomreport" ? (AttributeMetadata)new BooleanAttributeMetadata() :
-                        field == "ownerid" || field == "parentreportid" || field == "originalreportid" ? (AttributeMetadata)new LookupAttributeMetadata() : new IntegerAttributeMetadata();
+                        new[] { "ownerid", "parentreportid", "originalreportid", "organizationid", "solutionid", "owninguser", "owningteam" }.Contains(field) ? (AttributeMetadata)new LookupAttributeMetadata() : new IntegerAttributeMetadata();
                     Attributes.Add(Attribute(field, attribute));
                 }
-                foreach (var field in Type31EvidenceCollector.ContentFields) Attributes.Add(Attribute(field, new MemoAttributeMetadata()));
+                foreach (var field in Type31EvidenceCollector.ContentFields.Where(f => f != "bodybinary")) Attributes.Add(Attribute(field, new MemoAttributeMetadata()));
                 Service = new FakeOrganizationService
                 {
                     ExecuteRequest = request =>
@@ -899,7 +1034,7 @@ namespace D365SolutionComparer.Tests
             internal RetrieveEntityResponse Schema()
             {
                 var metadata = new EntityMetadata { LogicalName = "report" };
-                Set(metadata, "PrimaryIdAttribute", "reportid"); Set(metadata, "Attributes", Attributes.ToArray());
+                Set(metadata, "PrimaryIdAttribute", "reportid"); Set(metadata, "PrimaryNameAttribute", "name"); Set(metadata, "Attributes", Attributes.ToArray());
                 Set(metadata, "OneToManyRelationships", Relationships); Set(metadata, "ManyToManyRelationships", Intersects);
                 var result = new RetrieveEntityResponse(); result.Results["EntityMetadata"] = metadata; return result;
             }
