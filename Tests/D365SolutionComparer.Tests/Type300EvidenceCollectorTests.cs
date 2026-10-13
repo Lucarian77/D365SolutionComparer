@@ -12,6 +12,7 @@ using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
+using Label = Microsoft.Xrm.Sdk.Label;
 using static D365SolutionComparer.Tests.MembershipTestData;
 
 namespace D365SolutionComparer.Tests
@@ -97,7 +98,7 @@ namespace D365SolutionComparer.Tests
             Assert.IsTrue(match.Categories.Contains("DifferentPrimaryId")); Assert.IsTrue(match.Categories.Contains("DifferentUniqueId"));
             Assert.IsTrue(match.Categories.Contains("UnmanagedToManaged"));
             CollectionAssert.AreEquivalent(new[] { "canvasappid", "name" }, pair.Source.Queries.First().ColumnSet.Columns.ToArray());
-            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(2, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
         }
         [TestMethod]
         public void DifferentCandidatesNeverPairUsingDisplayCompositeHashOrMatchingGuid()
@@ -195,7 +196,7 @@ namespace D365SolutionComparer.Tests
             var pair = new Pair(); for (int i = 0; i < count; i++) pair.Source.Add(name: "app" + i);
             var report = pair.Capture(); Assert.AreEqual(calls, pair.Source.Service.Calls);
             Assert.IsTrue(pair.Source.Queries.All(q => q.Criteria.Conditions.Single().Values.Count <= 200));
-            Assert.AreEqual(count, report.Source.Rows.Count); Assert.AreEqual(1, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(count, report.Source.Rows.Count); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
         }
         [TestMethod]
         public void TerminalPagingCookieIsValidAndNotExposed()
@@ -269,7 +270,7 @@ namespace D365SolutionComparer.Tests
             var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add(); pair.Source.AddElement(left.Id); pair.Target.AddElement(right.Id);
             var report = pair.Capture(); Assert.AreEqual(left.Id, report.Source.Links.Single().CanvasId); Assert.AreEqual(right.Id, report.Target.Links.Single().CanvasId);
             StringAssert.Contains(report.Build(), "localReferenceEqualsBacking=True"); StringAssert.Contains(report.Build(), "SemanticPairObserved; potential future reuse only");
-            Assert.AreEqual(3, pair.Source.Service.Calls); Assert.AreEqual(2, pair.Source.Service.ExecuteCalls);
+            Assert.AreEqual(3, pair.Source.Service.Calls); Assert.AreEqual(3, pair.Source.Service.ExecuteCalls);
             Assert.IsTrue(pair.Source.Queries.Where(q => q.EntityName == "appelement").All(q => q.ColumnSet.Columns.Count == 2));
         }
         [TestMethod]
@@ -298,14 +299,14 @@ namespace D365SolutionComparer.Tests
             CollectionAssert.AreEqual(before.Select(r => r.Presence).ToArray(), comparer.Compare(left, right).Select(r => r.Presence).ToArray());
             Assert.IsTrue(left.Components.Concat(right.Components).All(c => c.Status == IdentityResolutionStatus.Unsupported && c.ComparisonKey == null));
             Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
-            Assert.AreEqual(2, pair.Source.Service.ExecuteCalls + pair.Target.Service.ExecuteCalls); // Schema only, no WhoAmI.
+            Assert.AreEqual(4, pair.Source.Service.ExecuteCalls + pair.Target.Service.ExecuteCalls); // Schema and targeted option metadata only, no WhoAmI.
         }
         [TestMethod]
         public void ReportHasEveryRequiredSectionAndDeterministicSafeRequestLedger()
         {
             var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var report = pair.Capture(); var text = report.Build();
             foreach (var heading in new[] { "RAW TYPE 300 MEMBERSHIP", "BACKING CANVAS APP CORRELATION", "READABLE / UNAVAILABLE SCHEMA", "RUNTIME-READABLE / FAULTED COLUMNS", "PARENT / REFERENCE RELATIONSHIP DISCOVERY", "CANDIDATE IDENTITY ANALYSIS", "DUPLICATE / REPEATED ANALYSIS", "SOURCE / TARGET FIELD COMPARISON", "LIFECYCLE CORRELATION MATRIX", "DIFFERING PRIMARY-ID SEMANTIC PAIRS", "TYPE 10072 DEPENDENCY ASSESSMENT", "PORTABILITY ASSESSMENT", "EXACT REQUEST LEDGER" }) StringAssert.Contains(text, heading);
-            Assert.AreEqual(text, report.Build()); StringAssert.Contains(text, "TotalReads=3"); StringAssert.Contains(text, "AdditionalWhoAmI=0");
+            Assert.AreEqual(text, report.Build()); StringAssert.Contains(text, "TotalReads=4"); StringAssert.Contains(text, "AdditionalWhoAmI=0");
             StringAssert.Contains(text, "Writes=0"); StringAssert.Contains(text, "NormalMembershipEvidenceRequests=0");
         }
         [TestMethod]
@@ -439,6 +440,257 @@ namespace D365SolutionComparer.Tests
             Assert.AreEqual("SemanticPair", report.Pairs.Single().Outcome); Assert.IsTrue(report.Source.Rows.Values.All(r => r.CandidateP == null));
             StringAssert.Contains(report.Build(), "dependency cannot repair P"); Assert.AreEqual(3, pair.Source.Service.Calls); // Critical, optional and scoped AppElement batch.
         }
+        [TestMethod]
+        public void AuthenticatedOptionMetadataCapturesReturnedLabelsAndProvenanceWithOneRequestPerPopulatedSide()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var report = pair.Capture();
+            foreach (var side in new[] { report.Source, report.Target })
+            {
+                Assert.IsTrue(side.OptionMetadata.Complete); Assert.AreEqual(1, side.OptionMetadata.Attempted);
+                Assert.AreEqual(1, side.OptionMetadata.Succeeded); Assert.AreEqual(0, side.OptionMetadata.Failed);
+                Assert.AreEqual("App Component Library", side.OptionMetadata.Labels[1033]);
+                Assert.IsNotNull(side.OptionMetadata.TimestampUtc); Assert.IsNull(side.OptionMetadata.Endpoint);
+                Assert.AreEqual(2, side.Requests.Count(r => r.StartsWith("Execute")));
+                Assert.AreEqual(2, side.Requests.Count(r => r.StartsWith("RetrieveMultiple")));
+            }
+            Assert.AreEqual(1, pair.Source.OptionRequests.Count); Assert.AreEqual(1, pair.Target.OptionRequests.Count);
+            var text = report.Build(); StringAssert.Contains(text, "OptionSet.Name=canvasapp_canvasapptype");
+            StringAssert.Contains(text, "OptionSet.IsGlobal=True"); StringAssert.Contains(text, "OptionSet.OptionSetType=Picklist");
+            StringAssert.Contains(text, "Attribute.MetadataId="); StringAssert.Contains(text, "UserLocalizedLabel.LanguageCode=1033");
+            StringAssert.Contains(text, "LocalizedLabel: LanguageCode=1033"); StringAssert.Contains(text, "OptionEvidenceGate=Complete");
+            StringAssert.Contains(text, "StructuralScope=Unresolved"); StringAssert.Contains(text, "ConfirmedEndpoint=Unavailable");
+            Assert.AreEqual(0, pair.Source.Service.WriteCalls + pair.Target.Service.WriteCalls);
+        }
+        [TestMethod]
+        public void EnvironmentSpecificMetadataIdsAreAuditOnly()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var left = ValidOptionMetadata(); var right = ValidOptionMetadata();
+            Assert.AreNotEqual(left.MetadataId, right.MetadataId); Assert.AreNotEqual(left.OptionSet.MetadataId, right.OptionSet.MetadataId);
+            pair.Source.OptionResponse = r => OptionMetadataResponse(left); pair.Target.OptionResponse = r => OptionMetadataResponse(right);
+            StringAssert.Contains(pair.Capture().Build(), "Comparison=EqualObservedForSharedLanguages");
+        }
+        [DataTestMethod]
+        [DataRow("NullAttribute")]
+        [DataRow("WrongType")]
+        [DataRow("WrongName")]
+        [DataRow("Unreadable")]
+        [DataRow("NoOptionSet")]
+        [DataRow("NoValue1")]
+        [DataRow("DuplicateValue1")]
+        [DataRow("NoLabels")]
+        [DataRow("ConflictingLabels")]
+        [DataRow("IncompleteProvenance")]
+        public void IncompleteOptionMetadataNeverRepairsOrInvalidatesIdentity(string problem)
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); AttributeMetadata attribute = ValidOptionMetadata();
+            var picklist = (PicklistAttributeMetadata)attribute;
+            switch (problem)
+            {
+                case "NullAttribute": attribute = null; break;
+                case "WrongType": attribute = Attribute("canvasapptype", new StringAttributeMetadata()); break;
+                case "WrongName": attribute.LogicalName = "different"; break;
+                case "Unreadable": Set(attribute, "IsValidForRead", false); break;
+                case "NoOptionSet": picklist.OptionSet = null; break;
+                case "NoValue1": picklist.OptionSet.Options.Clear(); break;
+                case "DuplicateValue1": picklist.OptionSet.Options.Add(new OptionMetadata(new Label("duplicate", 1033), 1)); break;
+                case "NoLabels": picklist.OptionSet.Options[0].Label = new Label(); break;
+                case "ConflictingLabels": picklist.OptionSet.Options[0].Label.LocalizedLabels.Add(new LocalizedLabel("conflicting", 1033)); break;
+                case "IncompleteProvenance": picklist.OptionSet.Name = null; break;
+            }
+            pair.Source.OptionResponse = r => OptionMetadataResponse(attribute); var report = pair.Capture();
+            Assert.IsFalse(report.Source.OptionMetadata.Complete); Assert.IsTrue(report.Target.OptionMetadata.Complete);
+            Assert.AreEqual(1, report.Source.OptionMetadata.Succeeded); Assert.AreEqual(0, report.Source.OptionMetadata.Failed);
+            Assert.IsTrue(report.Source.Rows.Values.Single().CompleteP); Assert.AreEqual("Unique", report.Source.Rows.Values.Single().Status);
+            Assert.AreEqual("FixedFieldPairHypothesis", report.ProposedPairs.Single().Outcome);
+            StringAssert.Contains(report.Build(), "OptionEvidenceGate=Unresolved");
+        }
+        [TestMethod]
+        public void MissingTranslationDoesNotConflictAndDoesNotFabricatePublishedLabel()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var metadata = ValidOptionMetadata();
+            metadata.OptionSet.Options[0].Label.LocalizedLabels.Add(new LocalizedLabel("Bibliotheque", 1036));
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var text = pair.Capture().Build();
+            StringAssert.Contains(text, "Comparison=EqualObservedForSharedLanguages");
+            StringAssert.Contains(text, "SourceOnlyTranslation=1036"); StringAssert.Contains(text, "Not a conflicting option definition");
+        }
+        [TestMethod]
+        public void DifferentLabelsForSameLanguageKeepCombinedGateUnresolved()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add(); var metadata = ValidOptionMetadata();
+            metadata.OptionSet.Options[0].Label = new Label("Different live definition", 1033);
+            pair.Target.OptionResponse = r => OptionMetadataResponse(metadata); var text = pair.Capture().Build();
+            StringAssert.Contains(text, "Comparison=DifferentObserved"); StringAssert.Contains(text, "OptionEvidenceGate=Unresolved");
+        }
+        [DataTestMethod]
+        [DataRow(true, false)]
+        [DataRow(false, true)]
+        [DataRow(true, true)]
+        public void OptionalMetadataFaultOnEitherSideNeverChangesSnapshotOrCandidateEvidence(bool sourceFault, bool targetFault)
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add();
+            Func<RetrieveAttributeRequest, OrganizationResponse> fault = r => { throw new FaultException<OrganizationServiceFault>(
+                new OrganizationServiceFault { ErrorCode = unchecked((int)0x8004023B), Message = Secret + " https://private.invalid/?token=secret", TraceText = "PRIVATE-STACK" }, new FaultReason(Secret)); };
+            if (sourceFault) pair.Source.OptionResponse = fault; if (targetFault) pair.Target.OptionResponse = fault;
+            var source = pair.Source.Snapshot(); var target = pair.Target.Snapshot(); var before = new SolutionMembershipComparer().Compare(source, target).Select(r => r.Presence).ToArray();
+            var report = new Type300EvidenceCollector().Capture(pair.Source.Service, source, "1", pair.Target.Service, target, "2", CancellationToken.None);
+            CollectionAssert.AreEqual(before, new SolutionMembershipComparer().Compare(source, target).Select(r => r.Presence).ToArray());
+            Assert.AreEqual(sourceFault ? 1 : 0, report.Source.OptionMetadata.Failed); Assert.AreEqual(targetFault ? 1 : 0, report.Target.OptionMetadata.Failed);
+            Assert.IsTrue(report.Source.Rows.Values.Single().CompleteP); Assert.IsTrue(report.Target.Rows.Values.Single().CompleteP);
+            var text = report.Build(); StringAssert.Contains(text, "8004023B");
+            Assert.IsFalse(text.Contains(Secret)); Assert.IsFalse(text.Contains("private.invalid")); Assert.IsFalse(text.Contains("PRIVATE-STACK"));
+            Assert.AreEqual(1, pair.Source.OptionRequests.Count); Assert.AreEqual(1, pair.Target.OptionRequests.Count);
+        }
+        [TestMethod]
+        public void ZeroMemberSideSkipsTargetedOptionMetadataWithoutDispatch()
+        {
+            var pair = new Pair(); pair.Source.Add(); var report = pair.Capture();
+            Assert.AreEqual(1, report.Target.OptionMetadata.Skipped); Assert.AreEqual(0, report.Target.OptionMetadata.Attempted);
+            Assert.AreEqual(0, pair.Target.OptionRequests.Count); Assert.AreEqual(0, pair.Target.Service.ExecuteCalls + pair.Target.Service.Calls);
+        }
+        [TestMethod]
+        public void CancellationAfterMetadataDispatchDoesNotStartTargetMetadata()
+        {
+            var pair = new Pair(); pair.Source.Add(); pair.Target.Add();
+            using (var cancellation = new CancellationTokenSource())
+            {
+                pair.Source.OptionResponse = r => { cancellation.Cancel(); return OptionMetadataResponse(ValidOptionMetadata()); };
+                Assert.ThrowsException<OperationCanceledException>(() => pair.Capture(cancellation.Token));
+                Assert.AreEqual(1, pair.Source.OptionRequests.Count); Assert.AreEqual(0, pair.Target.OptionRequests.Count);
+            }
+        }
+        [DataTestMethod]
+        [DataRow("Blank", "EmptyString", "0", "True")]
+        [DataRow("Populated", "Populated", "7", "True")]
+        [DataRow("Null", "Null", "Unknown", "True")]
+        [DataRow("Omitted", "AttributeOmitted", "Unknown", "True")]
+        [DataRow("Unavailable", "Unavailable", "Unknown", "False")]
+        [DataRow("Faulted", "RetrievalFailed", "Unknown", "False")]
+        public void StringSubtypeReportsRetrievalAndPresenceSeparatelyFromNumericApplicability(string scenario, string presence, string length, string runtimeRead)
+        {
+            var pair = new Pair(); var row = pair.Source.Add();
+            if (scenario != "Unavailable") pair.Source.Attributes.Add(Attribute("canvasappsubtype", new StringAttributeMetadata()));
+            if (scenario == "Blank") row["canvasappsubtype"] = "";
+            if (scenario == "Null") row["canvasappsubtype"] = null;
+            if (scenario == "Populated") row["canvasappsubtype"] = "Subtype";
+            if (scenario == "Faulted") Fail(pair.Source, "canvasappsubtype");
+            var evidence = pair.Capture().Source.Rows.Values.Single(); var text = evidence.KindEvidence["canvasappsubtype"];
+            StringAssert.Contains(text, "runtimeRead=" + runtimeRead); StringAssert.Contains(text, "presence=" + presence);
+            StringAssert.Contains(text, "length=" + length);
+            StringAssert.Contains(text, scenario == "Unavailable" ? "numericClassification=Unknown" : "numericClassification=NotApplicable");
+            if (scenario != "Unavailable") StringAssert.Contains(text, "exactNumericValue=NotApplicable");
+            StringAssert.Contains(text, "eligibility=NotEstablished");
+            StringAssert.Contains(evidence.Evidence("canvasappsubtype"), "presence=" + presence);
+            Assert.IsTrue(evidence.CompleteP);
+        }
+        [DataTestMethod]
+        [DataRow("EmptyString", "EmptyString", true)]
+        [DataRow("Null", "Null", true)]
+        [DataRow("AttributeOmitted", "AttributeOmitted", true)]
+        [DataRow("EmptyString", "Null", false)]
+        [DataRow("EmptyString", "AttributeOmitted", false)]
+        [DataRow("Null", "AttributeOmitted", false)]
+        [DataRow("Populated", "Populated", true)]
+        public void SubtypeComparisonPreservesSdkRepresentationEvenWhenNormalizedHashesAgree(string sourceState, string targetState, bool equal)
+        {
+            var pair = new Pair(); var left = pair.Source.Add(); var right = pair.Target.Add();
+            foreach (var side in new[] { pair.Source, pair.Target }) side.Attributes.Add(Attribute("canvasappsubtype", new StringAttributeMetadata()));
+            SetSubtype(left, sourceState); SetSubtype(right, targetState); var report = pair.Capture();
+            var source = report.Source.Rows.Values.Single(); var target = report.Target.Rows.Values.Single();
+            StringAssert.Contains(source.KindEvidence["canvasappsubtype"], "presence=" + sourceState);
+            StringAssert.Contains(target.KindEvidence["canvasappsubtype"], "presence=" + targetState);
+            var comparison = report.Build().Split(new[] { "SOURCE / TARGET FIELD COMPARISON" }, StringSplitOptions.None).Last()
+                .Split('\n').Single(line => line.StartsWith("canvasappsubtype\tSource=", StringComparison.Ordinal));
+            StringAssert.Contains(comparison, "Source=presence=" + sourceState); StringAssert.Contains(comparison, "Target=presence=" + targetState);
+            StringAssert.Contains(comparison, equal ? "EqualObserved" : "DifferentObserved");
+            Assert.AreEqual(source.Content["canvasappsubtype"].Sha256, target.Content["canvasappsubtype"].Sha256);
+            Assert.AreEqual(sourceState != "AttributeOmitted", source.StringValues["canvasappsubtype"].AttributeCollectionContains);
+            Assert.IsTrue(source.StringValues["canvasappsubtype"].QueryColumnCompleted);
+            Assert.IsTrue(source.CompleteP && target.CompleteP); StringAssert.Contains(comparison, "hash does not prove representation or eligibility");
+        }
+        private static void SetSubtype(Entity row, string state)
+        {
+            if (state == "EmptyString") row["canvasappsubtype"] = "";
+            else if (state == "Null") row["canvasappsubtype"] = null;
+            else if (state == "Populated") row["canvasappsubtype"] = "Subtype";
+        }
+        [TestMethod]
+        public void UserLabelIsSeparateProvenanceAndDoesNotRenderAsSecondLocalizedCollectionEntry()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata();
+            metadata.OptionSet.Options[0].Label.UserLocalizedLabel = metadata.OptionSet.Options[0].Label.LocalizedLabels.Single();
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var report = pair.Capture(); var fields = report.Source.OptionMetadata.Fields;
+            Assert.IsTrue(report.Source.OptionMetadata.Complete); Assert.AreEqual(1, fields.Count(f => f.StartsWith("LocalizedLabel:")));
+            CollectionAssert.Contains(fields, "LocalizedLabels.RawEntryCount=1"); CollectionAssert.Contains(fields, "UserLocalizedLabelAlsoInLocalizedLabels=True");
+        }
+        [TestMethod]
+        public void ExactSdkLocalizedDuplicatesRetainRawMultiplicityAndMetadataIdsWithOneDisplayEntry()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata(); var labels = metadata.OptionSet.Options[0].Label;
+            labels.LocalizedLabels.Add(new LocalizedLabel(labels.LocalizedLabels[0].Label, 1033) { MetadataId = Guid.NewGuid() });
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var report = pair.Capture(); var fields = report.Source.OptionMetadata.Fields;
+            Assert.IsTrue(report.Source.OptionMetadata.Complete); CollectionAssert.Contains(fields, "LocalizedLabels.RawEntryCount=2");
+            var display = fields.Single(f => f.StartsWith("LocalizedLabel:")); StringAssert.Contains(display, "RawCollectionOccurrences=2");
+            StringAssert.Contains(display, labels.LocalizedLabels[1].MetadataId.ToString());
+            CollectionAssert.Contains(fields, "Value1OptionCount=1");
+        }
+        [TestMethod]
+        public void MultipleLanguagesArePresentedSeparatelyWithoutUserLabelDuplication()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata();
+            metadata.OptionSet.Options[0].Label.LocalizedLabels.Add(new LocalizedLabel("Bibliotheque", 1036));
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var option = pair.Capture().Source.OptionMetadata;
+            Assert.IsTrue(option.Complete); Assert.AreEqual(2, option.Labels.Count);
+            Assert.AreEqual(2, option.Fields.Count(f => f.StartsWith("LocalizedLabel:")));
+        }
+        [TestMethod]
+        public void ConflictingLabelsForSameLanguageAreRetainedAndDoNotBecomeDuplicateOptions()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata();
+            metadata.OptionSet.Options[0].Label.LocalizedLabels.Add(new LocalizedLabel("conflicting", 1033));
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var option = pair.Capture().Source.OptionMetadata;
+            Assert.IsFalse(option.Complete); Assert.AreEqual(2, option.Fields.Count(f => f.StartsWith("LocalizedLabel:")));
+            StringAssert.Contains(option.Limitation, "conflicting"); CollectionAssert.Contains(option.Fields, "Value1OptionCount=1");
+        }
+        [TestMethod]
+        public void MissingUserLabelDoesNotInvalidateLocalizedCollectionProvenance()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata(); metadata.OptionSet.Options[0].Label.UserLocalizedLabel = null;
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var option = pair.Capture().Source.OptionMetadata;
+            Assert.IsTrue(option.Complete); Assert.AreEqual(1, option.Labels.Count); Assert.AreEqual(1, option.Fields.Count(f => f.StartsWith("LocalizedLabel:")));
+        }
+        [TestMethod]
+        public void MissingLocalizedCollectionEntriesPreserveUserLabelAsSeparateProvenance()
+        {
+            var pair = new Pair(); pair.Source.Add(); var metadata = ValidOptionMetadata(); metadata.OptionSet.Options[0].Label.LocalizedLabels.Clear();
+            pair.Source.OptionResponse = r => OptionMetadataResponse(metadata); var option = pair.Capture().Source.OptionMetadata;
+            Assert.IsTrue(option.Complete); Assert.AreEqual(1, option.Labels.Count); Assert.AreEqual(0, option.Fields.Count(f => f.StartsWith("LocalizedLabel:")));
+            CollectionAssert.Contains(option.Fields, "LocalizedLabels.RawEntryCount=0");
+        }
+        [TestMethod]
+        public void ResolvedIndeterminateRowsAreRetainedEvenThoughExistingSummaryHasNoCounterForThem()
+        {
+            Func<ComponentIdentity> resolved = () => new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), 60, Guid.NewGuid()),
+                IdentityResolutionStatus.Resolved, "systemform:" + Guid.NewGuid(), componentTypeKey: ComponentSemanticKinds.SystemForm,
+                semanticKind: ComponentSemanticKinds.SystemForm, inventoryAbsencePolicy: InventoryAbsencePolicy.MatchOnly);
+            var source = Snapshot(resolved()); var target = Snapshot(resolved(), resolved());
+            var presentation = new MembershipResultPresenter().Create(MembershipEnvironmentResult.FromSnapshot("Source", source, 0, TimeSpan.Zero),
+                MembershipEnvironmentResult.FromSnapshot("Target", target, 0, TimeSpan.Zero));
+            Assert.AreEqual(1, presentation.Source.Diagnostics.ResolvedCount); Assert.AreEqual(2, presentation.Target.Diagnostics.ResolvedCount);
+            Assert.AreEqual(3, presentation.Rows.Count); Assert.IsTrue(presentation.Rows.All(r => r.Presence == MembershipPresence.Indeterminate));
+            Assert.AreEqual(0, presentation.Summary.PresentInBoth + presentation.Summary.SourceOnly + presentation.Summary.TargetOnly +
+                presentation.Summary.Unsupported + presentation.Summary.Unresolved + presentation.Summary.Ambiguous);
+            Assert.IsTrue(presentation.Rows.All(r => r.SourceResolutionStatus == "Resolved" || r.TargetResolutionStatus == "Resolved"));
+        }
+        private static PicklistAttributeMetadata ValidOptionMetadata()
+        {
+            var option = new OptionMetadata(new Label("App Component Library", 1033), 1);
+            option.Label.UserLocalizedLabel = new LocalizedLabel("App Component Library", 1033) { MetadataId = Guid.NewGuid() };
+            var set = new OptionSetMetadata { Name = "canvasapp_canvasapptype", MetadataId = Guid.NewGuid(), IsGlobal = true, OptionSetType = OptionSetType.Picklist };
+            set.Options.Add(option);
+            return (PicklistAttributeMetadata)Attribute("canvasapptype", new PicklistAttributeMetadata { MetadataId = Guid.NewGuid(), OptionSet = set });
+        }
+        private static RetrieveAttributeResponse OptionMetadataResponse(AttributeMetadata metadata)
+        { var response = new RetrieveAttributeResponse(); response.Results["AttributeMetadata"] = metadata; return response; }
         private static void Fail(Fixture side, string column)
         {
             var normal = side.Service.RetrievePage; side.Service.RetrievePage = q => { var rows = normal(q); if (q.ColumnSet.Columns.Contains(column))
@@ -459,6 +711,8 @@ namespace D365SolutionComparer.Tests
             internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
             internal readonly List<QueryExpression> Queries = new List<QueryExpression>();
             internal readonly List<AttributeMetadata> Attributes = new List<AttributeMetadata>();
+            internal readonly List<RetrieveAttributeRequest> OptionRequests = new List<RetrieveAttributeRequest>();
+            internal Func<RetrieveAttributeRequest, OrganizationResponse> OptionResponse = request => OptionMetadataResponse(ValidOptionMetadata());
             internal Fixture()
             {
                 Attributes.Add(Attribute("canvasappid", new UniqueIdentifierAttributeMetadata()));
@@ -468,6 +722,13 @@ namespace D365SolutionComparer.Tests
                 Attributes.Add(Attribute("ownerid", new LookupAttributeMetadata { Targets = new[] { "systemuser", "team" } }));
                 Service = new FakeOrganizationService {
                     ExecuteRequest = request => {
+                        var optionRequest = request as RetrieveAttributeRequest;
+                        if (optionRequest != null)
+                        {
+                            OptionRequests.Add(optionRequest); Assert.AreEqual("canvasapp", optionRequest.EntityLogicalName);
+                            Assert.AreEqual("canvasapptype", optionRequest.LogicalName); Assert.IsFalse(optionRequest.RetrieveAsIfPublished);
+                            return OptionResponse(optionRequest);
+                        }
                         Assert.IsInstanceOfType(request, typeof(RetrieveEntityRequest)); var req = (RetrieveEntityRequest)request;
                         Assert.AreEqual(EntityFilters.Attributes | EntityFilters.Relationships, req.EntityFilters); Assert.IsFalse(req.RetrieveAsIfPublished);
                         Assert.IsTrue(new[] { "canvasapp", "appelement" }.Contains(req.LogicalName));

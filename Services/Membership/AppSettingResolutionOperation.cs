@@ -43,17 +43,17 @@ namespace D365SolutionComparer.Services.Membership
 
         internal IReadOnlyList<ComponentIdentity> Resolve(IReadOnlyList<ComponentIdentity> candidates,
             Func<IReadOnlyList<Guid>, IReadOnlyDictionary<Guid, AppSettingRowResult>> readParents,
-            CancellationToken token)
+            CancellationToken token, IAppSettingParentEvidenceSink evidenceSink = null)
         {
             if (candidates.Count == 0) return candidates;
             ReadRows(candidates.Select(i => i.Record.ObjectId), "appsetting", "appsettingid",
-                new[] { "appsettingid", "settingdefinitionid", "parentappmoduleid" }, settings, token);
+                new[] { "appsettingid", "settingdefinitionid", "parentappmoduleid" }, settings, token, evidenceSink: evidenceSink);
             var rows = candidates.Where(i => i.Record.ObjectId.HasValue && settings.ContainsKey(i.Record.ObjectId.Value))
                 .Select(i => settings[i.Record.ObjectId.Value].Row).Where(r => r != null).ToList();
             var definitionIds = rows.Select(r => Reference(r, "settingdefinitionid", "settingdefinition"));
             ReadRows(definitionIds, "settingdefinition", "settingdefinitionid",
                 new[] { "settingdefinitionid", "uniquename" }, identityDefinitions, token,
-                conflictsAreAmbiguous: true);
+                conflictsAreAmbiguous: true, evidenceSink: evidenceSink);
             var parentIds = rows.Select(r => Reference(r, "parentappmoduleid", "appmodule"))
                 .Where(id => id.HasValue).Select(id => id.Value).Distinct().OrderBy(id => id)
                 .Where(id => !parents.ContainsKey(id)).ToList();
@@ -202,7 +202,7 @@ namespace D365SolutionComparer.Services.Membership
 
         private void ReadRows(IEnumerable<Guid?> ids, string table, string primaryId, string[] columns,
             IDictionary<Guid, AppSettingRowResult> cache, CancellationToken token,
-            bool conflictsAreAmbiguous = false)
+            bool conflictsAreAmbiguous = false, IAppSettingParentEvidenceSink evidenceSink = null)
         {
             var pending = ids.Where(id => id.HasValue && id.Value != Guid.Empty).Select(id => id.Value)
                 .Distinct().OrderBy(id => id).Where(id => !cache.ContainsKey(id)).ToList();
@@ -218,6 +218,20 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var id in pending)
                 {
                     var correlation = result.GetCorrelation(id);
+                    AppSettingParentEvidenceEmission.Emit(evidenceSink, () =>
+                    {
+                        var unique = correlation.Status == DiagnosticCorrelationStatus.Unique;
+                        var row = unique ? correlation.Rows[0] : null;
+                        var parent = Reference(row, "parentappmoduleid", "appmodule");
+                        var definition = Reference(row, "settingdefinitionid", "settingdefinition");
+                        return new AppSettingReadObservation(table == "appsetting" ? AppSettingReadKind.Child : AppSettingReadKind.Definition,
+                            id, unique ? NormalReadDisposition.Unique : correlation.Status == DiagnosticCorrelationStatus.Missing
+                                ? NormalReadDisposition.Missing : correlation.Status == DiagnosticCorrelationStatus.Duplicate
+                                ? NormalReadDisposition.Duplicate : NormalReadDisposition.FailedReadOrIncomplete,
+                            correlation.Rows.Count, row?.GetAttributeValue<Guid>(primaryId),
+                            table == "settingdefinition" ? row?.GetAttributeValue<object>("uniquename") as string : null,
+                            parent, parent.HasValue, definition, definition.HasValue);
+                    });
                     if (correlation.Status == DiagnosticCorrelationStatus.Unique)
                     {
                         var row = correlation.Rows[0];
@@ -238,6 +252,10 @@ namespace D365SolutionComparer.Services.Membership
             catch (Exception)
             {
                 token.ThrowIfCancellationRequested();
+                foreach (var id in pending)
+                    AppSettingParentEvidenceEmission.Emit(evidenceSink, () => new AppSettingReadObservation(
+                        table == "appsetting" ? AppSettingReadKind.Child : AppSettingReadKind.Definition,
+                        id, NormalReadDisposition.Faulted, 0));
                 foreach (var id in pending) cache[id] = new AppSettingRowResult(null, IdentityResolutionStatus.Unresolved,
                     table + " retrieval failed; server details withheld.");
             }

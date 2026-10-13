@@ -58,6 +58,16 @@
     <Compile Include="MembershipComparisonTests.cs" />
     <Compile Include="MembershipPerformanceTests.cs" />
     <Compile Include="MembershipPresentationTests.cs" />
+    <Compile Include="ComponentDisplayEvidenceTests.cs" />
+    <Compile Include="ComponentDisplayEvidenceIntegrationTests.cs" />
+    <Compile Include="MembershipGridPresentationTests.cs" />
+    <Compile Include="ComponentHierarchyProjectionTests.cs" />
+    <Compile Include="MembershipHierarchyUiTests.cs" />
+    <Compile Include="AppSettingParentEvidenceHandoffTests.cs" />
+    <Compile Include="MembershipHierarchyPresentationTests.cs" />
+    <Compile Include="SolutionObjectsExplorerUiTests.cs" />
+    <Compile Include="SolutionObjectsExplorerProjectionTests.cs" />
+    <Compile Include="SolutionObjectsExplorerPresentationTests.cs" />
     <Compile Include="MembershipCoverageDiagnosticsTests.cs" />
     <Compile Include="MembershipUiResponsivenessTests.cs" />
     <Compile Include="MembershipCoverageCsvExporterTests.cs" />

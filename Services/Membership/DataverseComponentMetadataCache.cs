@@ -48,6 +48,9 @@ namespace D365SolutionComparer.Services.Membership
         public bool TryGetEntity(Guid metadataId, out EntityMetadata metadata) =>
             entities.TryGetValue(metadataId, out metadata);
 
+        // Read-only traversal for optional display projection. No retrieval or cache mutation.
+        internal IEnumerable<EntityMetadata> RetainedEntities => entities.Values;
+
         public bool HasCompleteEntityDefinition(Guid metadataId) =>
             completeEntityDefinitions.Contains(metadataId);
 
