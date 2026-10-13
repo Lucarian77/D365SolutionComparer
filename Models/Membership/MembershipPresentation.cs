@@ -96,6 +96,34 @@ namespace D365SolutionComparer.Models.Membership
             Unsupported = items.Count(item => item.HasResolutionStatus(IdentityResolutionStatus.Unsupported));
             Unresolved = items.Count(item => item.HasResolutionStatus(IdentityResolutionStatus.Unresolved));
             Ambiguous = items.Count(item => item.HasResolutionStatus(IdentityResolutionStatus.Ambiguous));
+
+            // Each retained presentation row represents one authoritative comparison result,
+            // not one occurrence per environment. Legacy resolution counters above may overlap.
+            TotalComparisonRows = items.Count;
+            foreach (var item in items)
+            {
+                switch (item.Presence)
+                {
+                    case MembershipPresence.PresentInBoth:
+                    case MembershipPresence.OnlyInSource:
+                    case MembershipPresence.OnlyInTarget:
+                        continue;
+                    case MembershipPresence.Indeterminate:
+                        switch (ClassifyIndeterminate(item.SourceIdentity?.Status, item.TargetIdentity?.Status))
+                        {
+                            case IndeterminatePartition.Ambiguous: IndeterminateAmbiguous++; break;
+                            case IndeterminatePartition.Unresolved: IndeterminateUnresolved++; break;
+                            case IndeterminatePartition.Unsupported: IndeterminateUnsupported++; break;
+                            case IndeterminatePartition.Resolved: IndeterminateResolved++; break;
+                            default: IndeterminateOtherOrUnavailable++; break;
+                        }
+                        break;
+                    default:
+                        // Do not silently lose an unfamiliar presentation state.
+                        IndeterminateOtherOrUnavailable++;
+                        break;
+                }
+            }
         }
 
         public int PresentInBoth { get; }
@@ -104,6 +132,35 @@ namespace D365SolutionComparer.Models.Membership
         public int Unsupported { get; }
         public int Unresolved { get; }
         public int Ambiguous { get; }
+        public int IndeterminateAmbiguous { get; }
+        public int IndeterminateUnresolved { get; }
+        public int IndeterminateUnsupported { get; }
+        public int IndeterminateResolved { get; }
+        public int IndeterminateOtherOrUnavailable { get; }
+        public int TotalComparisonRows { get; }
+
+        internal enum IndeterminatePartition { Ambiguous, Unresolved, Unsupported, Resolved, OtherOrUnavailable }
+
+        /// <summary>
+        /// Presentation-only precedence: Ambiguous, Unresolved, Unsupported, then Resolved.
+        /// Resolved requires every populated status to be Resolved; unknown statuses or no
+        /// statuses use the residual bucket rather than masquerading as resolved evidence.
+        /// </summary>
+        internal static IndeterminatePartition ClassifyIndeterminate(
+            IdentityResolutionStatus? source, IdentityResolutionStatus? target)
+        {
+            if (source == IdentityResolutionStatus.Ambiguous || target == IdentityResolutionStatus.Ambiguous)
+                return IndeterminatePartition.Ambiguous;
+            if (source == IdentityResolutionStatus.Unresolved || target == IdentityResolutionStatus.Unresolved)
+                return IndeterminatePartition.Unresolved;
+            if (source == IdentityResolutionStatus.Unsupported || target == IdentityResolutionStatus.Unsupported)
+                return IndeterminatePartition.Unsupported;
+            if ((source.HasValue || target.HasValue) &&
+                (!source.HasValue || source == IdentityResolutionStatus.Resolved) &&
+                (!target.HasValue || target == IdentityResolutionStatus.Resolved))
+                return IndeterminatePartition.Resolved;
+            return IndeterminatePartition.OtherOrUnavailable;
+        }
     }
 
     public sealed class MembershipResultRow

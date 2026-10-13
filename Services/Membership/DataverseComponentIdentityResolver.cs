@@ -67,6 +67,10 @@ namespace D365SolutionComparer.Services.Membership
 
         internal MembershipSnapshot ResolveSnapshot(DataverseReadContext context, MembershipSnapshot snapshot,
             CancellationToken cancellationToken)
+            => ResolveSnapshot(context, snapshot, cancellationToken, null);
+
+        internal MembershipSnapshot ResolveSnapshot(DataverseReadContext context, MembershipSnapshot snapshot,
+            CancellationToken cancellationToken, IAppSettingParentEvidenceSink evidenceSink)
         {
             if (context == null) throw new ArgumentNullException(nameof(context));
             if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
@@ -74,7 +78,7 @@ namespace D365SolutionComparer.Services.Membership
             if (snapshot.State != MembershipSnapshotState.Complete) return snapshot;
             if (context.Environment.OrganizationId != snapshot.Environment.OrganizationId)
                 throw new InvalidOperationException("The verified context belongs to a different environment.");
-            var resolved = new ResolutionContext(context, entityKeyResolutionEnabled)
+            var resolved = new ResolutionContext(context, entityKeyResolutionEnabled, evidenceSink)
                 .ResolveAll(snapshot.Components, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             return new Type92MembershipResolver().Apply(context,
@@ -95,6 +99,7 @@ namespace D365SolutionComparer.Services.Membership
             private const int TeamTemplateComponentType = 511;
             private const int PluginAssemblyComponentType = 91;
             private readonly DataverseReadContext context;
+            private readonly IAppSettingParentEvidenceSink evidenceSink;
             private readonly bool entityKeyResolutionEnabled;
             private readonly Dictionary<LookupKey, ResolutionValue> identityCache =
                 new Dictionary<LookupKey, ResolutionValue>();
@@ -155,9 +160,11 @@ namespace D365SolutionComparer.Services.Membership
             private string connectionMappingDiagnostic;
             private IdentityResolutionStatus connectionMappingStatus = IdentityResolutionStatus.Unresolved;
 
-            public ResolutionContext(DataverseReadContext context, bool entityKeyResolutionEnabled)
+            public ResolutionContext(DataverseReadContext context, bool entityKeyResolutionEnabled,
+                IAppSettingParentEvidenceSink evidenceSink = null)
             {
                 this.context = context;
+                this.evidenceSink = evidenceSink;
                 this.entityKeyResolutionEnabled = entityKeyResolutionEnabled;
             }
 
@@ -431,7 +438,7 @@ namespace D365SolutionComparer.Services.Membership
                             ? IdentityResolutionStatus.Ambiguous : IdentityResolutionStatus.Unresolved,
                             "Parent AppModule correlation is missing, ambiguous or unavailable; server details withheld.");
                     });
-                }, token);
+                }, token, evidenceSink);
             }
 
             private ComponentIdentity Classify(SolutionComponentRecord record, CancellationToken cancellationToken,
@@ -3285,6 +3292,7 @@ namespace D365SolutionComparer.Services.Membership
                         cancellationToken.ThrowIfCancellationRequested();
                         if (rows.MoreRecords)
                         {
+                            EmitParentBatch(batch, NormalReadDisposition.Incomplete, rows.Entities.Count);
                             SetAppModuleResults(batch, IdentityResolutionStatus.Ambiguous,
                                 "AppModule identity lookup returned an incomplete result set.");
                             continue;
@@ -3308,6 +3316,7 @@ namespace D365SolutionComparer.Services.Membership
                         }
                         if (invalidResponse)
                         {
+                            EmitParentBatch(batch, NormalReadDisposition.Conflicting, rows.Entities.Count);
                             SetAppModuleResults(batch, IdentityResolutionStatus.Ambiguous,
                                 "AppModule identity lookup returned conflicting or incomplete primary-key data.");
                             continue;
@@ -3317,6 +3326,11 @@ namespace D365SolutionComparer.Services.Membership
                         {
                             var matches = returned.Where(item => item.Key == key.ObjectId)
                                 .Select(item => item.Value).ToList();
+                            AppSettingParentEvidenceEmission.Emit(evidenceSink, () => new AppSettingReadObservation(
+                                AppSettingReadKind.Parent, key.ObjectId, matches.Count == 0 ? NormalReadDisposition.Missing :
+                                matches.Count > 1 ? NormalReadDisposition.Duplicate : NormalReadDisposition.Unique,
+                                matches.Count, matches.Count == 1 ? (Guid?)matches[0].GetAttributeValue<Guid>("appmoduleid") : null,
+                                matches.Count == 1 ? matches[0].GetAttributeValue<object>("uniquename") as string : null));
                             if (matches.Count == 0)
                                 identityCache[key] = ResolutionValue.Unresolved(key.Kind,
                                     "No appmodule row matched the component object ID.");
@@ -3342,10 +3356,18 @@ namespace D365SolutionComparer.Services.Membership
                     catch (FaultException ex)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+                        EmitParentBatch(batch, NormalReadDisposition.Faulted, 0);
                         SetAppModuleResults(batch, IdentityResolutionStatus.Unresolved,
                             "AppModule identity lookup failed: " + ex.Message);
                     }
                 }
+            }
+
+            private void EmitParentBatch(IEnumerable<LookupKey> keys, NormalReadDisposition disposition, int count)
+            {
+                foreach (var key in keys)
+                    AppSettingParentEvidenceEmission.Emit(evidenceSink, () => new AppSettingReadObservation(
+                        AppSettingReadKind.Parent, key.ObjectId, disposition, count));
             }
 
             private void SetAppModuleResults(IEnumerable<LookupKey> keys, IdentityResolutionStatus status,

@@ -35,7 +35,99 @@ namespace D365SolutionComparer.Services.Membership
             token.ThrowIfCancellationRequested();
             var report = new CanvasAppEvidenceReport { Source = Read(sourceService, source, sourceVersion, token, progress),
                 Target = Read(targetService, target, targetVersion, token, progress) };
+            CaptureOptionMetadata(sourceService, report.Source, token);
+            CaptureOptionMetadata(targetService, report.Target, token);
             report.Analyze(token); return report;
+        }
+
+        private static void CaptureOptionMetadata(IOrganizationService service, CanvasAppSideEvidence side, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var evidence = side.OptionMetadata;
+            if (side.Rows.Count == 0)
+            { evidence.Skipped = 1; evidence.Limitation = "No selected nonblank Canvas App IDs; request skipped"; return; }
+            evidence.TimestampUtc = DateTimeOffset.UtcNow;
+            // Read only the known SDK transport endpoint. Never stringify a service/connection object.
+            try
+            {
+                Uri endpoint = null;
+                if (service.GetType().FullName == "Microsoft.Xrm.Tooling.Connector.CrmServiceClient")
+                    endpoint = service.GetType().GetProperty("ConnectedOrgUriActual")?.GetValue(service, null) as Uri;
+                var proxy = service as Microsoft.Xrm.Sdk.Client.OrganizationServiceProxy;
+                if (endpoint == null && proxy != null) endpoint = proxy.ServiceConfiguration.CurrentServiceEndpoint.Address.Uri;
+                if (endpoint != null && endpoint.IsAbsoluteUri && (endpoint.Scheme == "https" || endpoint.Scheme == "http") &&
+                    string.IsNullOrEmpty(endpoint.UserInfo))
+                    evidence.Endpoint = endpoint.GetLeftPart(UriPartial.Authority) + endpoint.AbsolutePath;
+            }
+            catch (Exception) { /* Endpoint unavailable must not prevent the optional metadata read. */ }
+            side.Requests.Add("Execute RetrieveAttribute(canvasapp, canvasapptype, RetrieveAsIfPublished=False)");
+            evidence.Attempted = 1;
+            try
+            {
+                var response = service.Execute(new RetrieveAttributeRequest { EntityLogicalName = "canvasapp",
+                    LogicalName = "canvasapptype", RetrieveAsIfPublished = false }) as RetrieveAttributeResponse;
+                evidence.Succeeded = 1; evidence.Status = "Succeeded";
+                token.ThrowIfCancellationRequested();
+                var attribute = response?.AttributeMetadata;
+                evidence.Fields.Add("MetadataType=" + (attribute?.GetType().FullName ?? "NotReturned"));
+                evidence.Fields.Add("Attribute.LogicalName=" + attribute?.LogicalName);
+                evidence.Fields.Add("Attribute.MetadataId=" + attribute?.MetadataId);
+                evidence.Fields.Add("Attribute.IsValidForRead=" + attribute?.IsValidForRead);
+                var picklist = attribute as PicklistAttributeMetadata;
+                if (picklist == null || attribute.LogicalName != "canvasapptype" || attribute.IsValidForRead != true)
+                { evidence.Limitation = "Expected readable canvasapptype PicklistAttributeMetadata not returned"; return; }
+                var set = picklist.OptionSet;
+                if (set == null) { evidence.Limitation = "OptionSet not returned"; return; }
+                evidence.Fields.Add("OptionSet.Name=" + set.Name);
+                evidence.Fields.Add("OptionSet.MetadataId=" + set.MetadataId);
+                evidence.Fields.Add("OptionSet.IsGlobal=" + set.IsGlobal);
+                evidence.Fields.Add("OptionSet.OptionSetType=" + set.OptionSetType);
+                evidence.Fields.Add("OptionSet.IsManaged=" + set.IsManaged);
+                evidence.Fields.Add("Provenance=SDK OptionSet; global/local determined only by returned IsGlobal; no separate global request");
+                var options = set.Options.Where(o => o != null && o.Value == 1).ToArray();
+                evidence.Fields.Add("Value1OptionCount=" + options.Length);
+                if (options.Length != 1) { evidence.Limitation = "Exactly one value-1 option required"; return; }
+                var option = options[0];
+                evidence.Fields.Add("Option.Value=" + option.Value);
+                evidence.Fields.Add("Option.IsManaged=" + option.IsManaged);
+                var label = option.Label;
+                var user = label?.UserLocalizedLabel;
+                evidence.Fields.Add("UserLocalizedLabel.Label=" + (user?.Label ?? "NotReturned"));
+                evidence.Fields.Add("UserLocalizedLabel.LanguageCode=" + user?.LanguageCode);
+                evidence.Fields.Add("UserLocalizedLabel.MetadataId=" + user?.MetadataId);
+                var localized = (label?.LocalizedLabels ?? new LocalizedLabelCollection()).ToArray();
+                evidence.Fields.Add("LocalizedLabels.RawEntryCount=" + localized.Length);
+                evidence.Fields.Add("LocalizedLabels.NullEntryCount=" + localized.Count(l => l == null));
+                evidence.Fields.Add("UserLocalizedLabelAlsoInLocalizedLabels=" + (user != null && localized.Any(l => l != null &&
+                    l.LanguageCode == user.LanguageCode && StringComparer.Ordinal.Equals(l.Label, user.Label) && l.MetadataId == user.MetadataId)));
+                // UserLocalizedLabel is separate SDK provenance, not another entry in LocalizedLabels.
+                // Collapse identical display entries while retaining SDK multiplicity and all metadata IDs.
+                foreach (var group in localized.Where(l => l != null).GroupBy(l => new { l.LanguageCode, l.Label })
+                    .OrderBy(g => g.Key.LanguageCode).ThenBy(g => g.Key.Label, StringComparer.Ordinal))
+                    evidence.Fields.Add("LocalizedLabel: LanguageCode=" + group.Key.LanguageCode + "; Label=" + group.Key.Label +
+                        "; RawCollectionOccurrences=" + group.Count() + "; MetadataIds=[" + string.Join(",", group.Select(l =>
+                            l.MetadataId?.ToString("D") ?? "NotReturned").Distinct().OrderBy(id => id, StringComparer.Ordinal)) + "]");
+                var labels = localized.Where(l => l != null)
+                    .Concat(user == null ? Enumerable.Empty<LocalizedLabel>() : new[] { user }).ToArray();
+                foreach (var group in labels.GroupBy(l => l.LanguageCode).OrderBy(g => g.Key))
+                {
+                    var values = group.Where(l => !string.IsNullOrWhiteSpace(l.Label)).Select(l => l.Label.Trim()).Distinct(StringComparer.Ordinal).ToArray();
+                    if (values.Length != 1 || group.Any(l => string.IsNullOrWhiteSpace(l.Label)))
+                    { evidence.Limitation = "Missing/conflicting localized label for language " + group.Key; return; }
+                    evidence.Labels[group.Key] = values[0];
+                }
+                if (evidence.Labels.Count == 0) { evidence.Limitation = "Value-1 labels not returned"; return; }
+                if (string.IsNullOrWhiteSpace(set.Name) || !set.MetadataId.HasValue || !set.IsGlobal.HasValue || !set.OptionSetType.HasValue)
+                { evidence.Limitation = "OptionSet provenance incomplete"; return; }
+                evidence.Complete = true; evidence.Limitation = "None; structural scope remains Unresolved";
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error)
+            {
+                token.ThrowIfCancellationRequested();
+                if (evidence.Succeeded == 0) { evidence.Failed = 1; evidence.Status = "Faulted"; }
+                evidence.Limitation = (evidence.Succeeded == 1 ? "Metadata processing incomplete; " : "Metadata request failed; ") + SafeFault(error);
+            }
         }
 
         private static CanvasAppSideEvidence Read(IOrganizationService service, MembershipSnapshot snapshot, string version,
@@ -134,8 +226,37 @@ namespace D365SolutionComparer.Services.Membership
                 bool numeric = attribute != null && (attribute.AttributeType == AttributeTypeCode.Picklist || attribute.AttributeType == AttributeTypeCode.Integer) &&
                     (raw is OptionSetValue || raw is int) && found.Columns.Contains(field);
                 if (numeric) row.KindValues[field] = raw is OptionSetValue ? ((OptionSetValue)raw).Value : (int)raw;
+                bool runtimeRead = found.Columns.Contains(field);
+                bool numericApplicable = attribute?.AttributeType == AttributeTypeCode.Picklist || attribute?.AttributeType == AttributeTypeCode.Integer;
+                bool stringApplicable = attribute?.AttributeType == AttributeTypeCode.String;
+                string presence = attribute == null ? "AttributeUnavailable" : !runtimeRead ? "UnavailableOrFaulted" : raw == null ? "Null" :
+                    raw is string ? string.IsNullOrWhiteSpace((string)raw) ? "Blank" : "Populated" : "Populated";
+                CanvasAppStringValueEvidence subtype = null;
+                if (field == "canvasappsubtype")
+                {
+                    subtype = new CanvasAppStringValueEvidence { QueryColumnCompleted = runtimeRead,
+                        NumericClassification = stringApplicable ? "NotApplicable" : attribute == null ? "Unknown" : numericApplicable ? "Applicable" : "NotApplicable" };
+                    if (attribute?.IsValidForRead != true || !stringApplicable) subtype.Presence = "Unavailable";
+                    else if (!runtimeRead) subtype.Presence = found.FaultedColumns.Contains(field) ? "RetrievalFailed" : "Unavailable";
+                    else
+                    {
+                        subtype.AttributeCollectionContains = found.Row.Contains(field);
+                        subtype.Presence = !subtype.AttributeCollectionContains.Value ? "AttributeOmitted" : raw == null ? "Null" :
+                            !(raw is string) ? "InvalidShape" : ((string)raw).Length == 0 ? "EmptyString" : "Populated";
+                        if (raw is string) subtype.Length = ((string)raw).Length;
+                    }
+                    row.StringValues[field] = subtype; presence = subtype.Presence;
+                }
                 row.KindEvidence[field] = "classification=Unresolved; metadataExposed=" + (attribute != null) +
-                    "; runtimeRead=" + found.Columns.Contains(field) + "; exactNumericValue=" + (numeric ? Format(raw) : "Unavailable");
+                    "; metadataReadable=" + attribute?.IsValidForRead + "; attributeType=" + (attribute?.AttributeType?.ToString() ?? "Unavailable") +
+                    "; runtimeRead=" + runtimeRead + "; presence=" + presence +
+                    "; length=" + (subtype != null ? subtype.Length?.ToString(CultureInfo.InvariantCulture) ?? "Unknown" :
+                        stringApplicable && runtimeRead ? raw == null ? "0" : raw is string ? ((string)raw).Length.ToString(CultureInfo.InvariantCulture) : "InvalidShape" : "NotApplicable") +
+                    (subtype == null ? "" : "; queryColumnCompleted=" + subtype.QueryColumnCompleted + "; attributeCollectionContains=" +
+                        (subtype.AttributeCollectionContains?.ToString() ?? "Unknown")) +
+                    "; numericClassification=" + (numericApplicable ? "Applicable" : attribute == null ? "Unknown" : "NotApplicable") +
+                    "; exactNumericValue=" + (numeric ? Format(raw) : numericApplicable || attribute == null ? "Unavailable" : "NotApplicable") +
+                    "; eligibility=NotEstablished; no inferred eligibility";
             }
             foreach (var field in BehavioralFields)
             {
@@ -312,6 +433,7 @@ namespace D365SolutionComparer.Services.Membership
                     else
                     {
                         side.RetrievalDiagnostics.Add("Attribute faulted: " + group[0] + "; class=" + (critical ? "IdentityCriticalUnavailable" : "OptionalUnavailable") + "; no value retained");
+                        foreach (var value in current.Values) value.FaultedColumns.Add(group[0]);
                         if (critical) foreach (var value in current.Values) value.CriticalComplete = false;
                     }
                     continue;
@@ -409,6 +531,7 @@ namespace D365SolutionComparer.Services.Membership
         {
             internal string Status, Reason; internal Entity Row; internal bool CriticalComplete = true;
             internal HashSet<string> Columns = new HashSet<string>(StringComparer.Ordinal);
+            internal HashSet<string> FaultedColumns = new HashSet<string>(StringComparer.Ordinal);
         }
         private static bool ValidName(string value) => !string.IsNullOrWhiteSpace(value) && value.All(c => char.IsLetterOrDigit(c) || c == '_');
         private static string Format(object raw)
@@ -427,10 +550,20 @@ namespace D365SolutionComparer.Services.Membership
         internal MembershipSnapshot Snapshot;
         internal string Version, PrimaryId, CandidateField, SchemaFailure;
         internal EntityMetadata Metadata;
+        internal readonly CanvasAppOptionMetadataEvidence OptionMetadata = new CanvasAppOptionMetadataEvidence();
         internal readonly List<ComponentIdentity> Raw = new List<ComponentIdentity>();
         internal readonly SortedDictionary<Guid, CanvasAppRecordEvidence> Rows = new SortedDictionary<Guid, CanvasAppRecordEvidence>();
         internal readonly List<CanvasAppDependencyEvidence> Links = new List<CanvasAppDependencyEvidence>();
         internal readonly List<string> Schema = new List<string>(), Relationships = new List<string>(), Requests = new List<string>(), Pages = new List<string>(), RetrievalDiagnostics = new List<string>();
+    }
+    internal sealed class CanvasAppOptionMetadataEvidence
+    {
+        internal int Attempted, Succeeded, Failed, Skipped;
+        internal DateTimeOffset? TimestampUtc;
+        internal string Endpoint, Status = "Skipped", Limitation = "Not captured";
+        internal bool Complete;
+        internal readonly List<string> Fields = new List<string>();
+        internal readonly SortedDictionary<int, string> Labels = new SortedDictionary<int, string>();
     }
     internal sealed class CanvasAppRecordEvidence
     {
@@ -448,9 +581,23 @@ namespace D365SolutionComparer.Services.Membership
         internal readonly SortedDictionary<string, string> DefinitionValues = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal readonly SortedDictionary<string, string> Fields = new SortedDictionary<string, string>(StringComparer.Ordinal);
         internal readonly SortedDictionary<string, Type31ContentFingerprint> Content = new SortedDictionary<string, Type31ContentFingerprint>(StringComparer.Ordinal);
+        internal readonly Dictionary<string, CanvasAppStringValueEvidence> StringValues = new Dictionary<string, CanvasAppStringValueEvidence>(StringComparer.Ordinal);
         internal readonly List<string> RuntimeColumns = new List<string>();
         internal string Get(string field) => Fields.TryGetValue(field, out var value) ? value : null;
-        internal string Evidence(string field) => Content.TryGetValue(field, out var hash) ? hash.Evidence : Get(field);
+        internal string Evidence(string field) => StringValues.TryGetValue(field, out var value) ? value.Evidence +
+            (Content.TryGetValue(field, out var normalizedHash) ? "; normalizedHash=[" + normalizedHash.Evidence + "]; hashNormalization=Null/Omitted/EmptyStringToEmptyText; hash does not prove representation or eligibility" : "") :
+            Content.TryGetValue(field, out var hash) ? hash.Evidence : Get(field);
+    }
+    internal sealed class CanvasAppStringValueEvidence
+    {
+        internal string Presence;
+        internal int? Length;
+        internal bool QueryColumnCompleted;
+        internal bool? AttributeCollectionContains;
+        internal string NumericClassification;
+        internal string Evidence => "presence=" + Presence + ";length=" + (Length?.ToString(CultureInfo.InvariantCulture) ?? "Unknown") +
+            ";queryColumnCompleted=" + QueryColumnCompleted + ";attributeCollectionContains=" + (AttributeCollectionContains?.ToString() ?? "Unknown") +
+            ";numericClassification=" + NumericClassification;
     }
     internal sealed class CanvasAppDependencyEvidence
     {
@@ -586,6 +733,28 @@ namespace D365SolutionComparer.Services.Membership
                 foreach (var row in s.Rows.Values) foreach (var item in row.KindEvidence) Line(text, label, row.ObjectId, item.Key, item.Value);
             });
             text.AppendLine("Kind roles remain Unresolved. Equal or differing option values alone do not prove structural identity versus mutable definition. No kind is silently inferred or added to P.");
+            text.AppendLine("\nAUTHENTICATED CANVASAPPTYPE OPTION METADATA"); EachSide(text, (s, label) => {
+                var m = s.OptionMetadata;
+                Line(text, label, "Environment=" + s.Snapshot.Environment.DisplayName,
+                    "ConfirmedEndpoint=" + (m.Endpoint ?? "Unavailable; existing transport endpoint not exposed"),
+                    "TimestampUtc=" + m.TimestampUtc?.ToString("O", CultureInfo.InvariantCulture),
+                    "RequestType=RetrieveAttributeRequest", "Entity=canvasapp", "Attribute=canvasapptype",
+                    "RetrievalStatus=" + m.Status, "Gate=" + (m.Complete ? "Complete" : "Unresolved"), "Limitation=" + m.Limitation);
+                foreach (var field in m.Fields) Line(text, label, field);
+            });
+            text.AppendLine("\nOPTION DEFINITION SOURCE / TARGET COMPARISON");
+            var sourceOption = Source.OptionMetadata; var targetOption = Target.OptionMetadata;
+            var commonLanguages = sourceOption.Labels.Keys.Intersect(targetOption.Labels.Keys).OrderBy(l => l).ToArray();
+            bool conflict = commonLanguages.Any(l => !StringComparer.Ordinal.Equals(sourceOption.Labels[l], targetOption.Labels[l]));
+            Line(text, "Comparison=" + (conflict ? "DifferentObserved" : sourceOption.Complete && targetOption.Complete && commonLanguages.Length > 0
+                ? "EqualObservedForSharedLanguages" : "Unresolved"),
+                "OptionEvidenceGate=" + (!conflict && sourceOption.Complete && targetOption.Complete && commonLanguages.Length > 0 ? "Complete" : "Unresolved"),
+                "StructuralScope=Unresolved");
+            foreach (var language in commonLanguages) Line(text, "LanguageCode=" + language, "Source=" + sourceOption.Labels[language],
+                "Target=" + targetOption.Labels[language], "Comparison=" + (StringComparer.Ordinal.Equals(sourceOption.Labels[language], targetOption.Labels[language]) ? "EqualObserved" : "DifferentObserved"));
+            foreach (var language in sourceOption.Labels.Keys.Except(targetOption.Labels.Keys)) Line(text, "SourceOnlyTranslation=" + language, "Not a conflicting option definition");
+            foreach (var language in targetOption.Labels.Keys.Except(sourceOption.Labels.Keys)) Line(text, "TargetOnlyTranslation=" + language, "Not a conflicting option definition");
+            text.AppendLine("Metadata identifiers are audit provenance; GUID differences are not semantic conflicts. Published labels never fill missing live data. Option evidence does not establish structural scope or approve Type 300 identity.");
             text.AppendLine("\nSTRUCTURAL SCOPE / PARENT CLASSIFICATION");
             text.AppendLine("Owner/user/team, organization, solution/lifecycle IDs and AppElement membership are audit-only; they never complete P. AppElement links corroborate local references only.");
             text.AppendLine("No structural scope has yet been independently proven required. Other exposed parent/root/appmodule relationships remain Unresolved, not proof that no parent is required; no environment scan or parent GUID fallback.");
@@ -659,13 +828,20 @@ namespace D365SolutionComparer.Services.Membership
             text.AppendLine("\nEXACT REQUEST LEDGER"); EachSide(text, (s, label) => {
                 foreach (var request in s.Requests) Line(text, label, request);
                 foreach (var group in s.Requests.GroupBy(r => r.StartsWith("Execute", StringComparison.Ordinal) ? r.Split('(')[0] + "(" + r.Split('(')[1].Split(',')[0] + ")" : r.Split(';')[0])) Line(text, label, group.Key, "reads=" + group.Count());
+                var m = s.OptionMetadata;
+                Line(text, label, "TargetedOptionMetadataAttempted=" + m.Attempted, "TargetedOptionMetadataSucceeded=" + m.Succeeded,
+                    "TargetedOptionMetadataFailed=" + m.Failed, "TargetedOptionMetadataSkipped=" + m.Skipped,
+                    "ExistingBackingRequests=" + s.Requests.Count(r => r.StartsWith("RetrieveMultiple canvasapp;", StringComparison.Ordinal)),
+                    "ExistingRelationshipBackingRequests=" + s.Requests.Count(r => r.StartsWith("RetrieveMultiple appelement;", StringComparison.Ordinal)),
+                    "ExistingSchemaMetadataRequests=" + s.Requests.Count(r => r.StartsWith("Execute RetrieveEntity(", StringComparison.Ordinal)));
                 Line(text, label, "TotalReads=" + s.Requests.Count, "AdditionalWhoAmI=0", "Writes=0", "NormalMembershipEvidenceRequests=0");
             }); return text.ToString();
         }
         private void EachSide(StringBuilder text, Action<CanvasAppSideEvidence, string> action) { action(Source, "Source"); action(Target, "Target"); }
         private static string EqualEvidence(string source, string target) => source == null || target == null || source == "Unavailable" || target == "Unavailable"
             ? "Incomplete" : StringComparer.OrdinalIgnoreCase.Equals(source, target) ? "EqualObserved" : "DifferentObserved";
-        private static string NumericEvidence(CanvasAppRecordEvidence row, string field) => row.KindValues.TryGetValue(field, out var value) ? value.ToString(CultureInfo.InvariantCulture) : "Unavailable";
+        private static string NumericEvidence(CanvasAppRecordEvidence row, string field) => row.StringValues.TryGetValue(field, out var text) ? text.Evidence :
+            row.KindValues.TryGetValue(field, out var value) ? value.ToString(CultureInfo.InvariantCulture) : "Unavailable";
         private static string DefinitionValue(CanvasAppRecordEvidence row, string field) => row.DefinitionValues.TryGetValue(field, out var value) ? value : "Unavailable";
     }
 }

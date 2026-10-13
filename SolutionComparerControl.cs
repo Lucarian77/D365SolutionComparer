@@ -721,15 +721,20 @@ namespace D365SolutionComparer
                         {
                             var operation = CreateMembershipComparisonOperation();
                             var source = ReadDefinitionEnvironment(operation, sourceService, sourceName,
-                                solutionUniqueName, worker, cancellation, 2, 46);
+                                solutionUniqueName, worker, cancellation, 2, 46, DisplayEnvironmentSide.Source);
                             ThrowIfMembershipCancelled(worker, cancellation);
                             var target = ReadDefinitionEnvironment(operation, destinationService, destinationName,
-                                solutionUniqueName, worker, cancellation, 51, 47);
+                                solutionUniqueName, worker, cancellation, 51, 47, DisplayEnvironmentSide.Target);
                             ThrowIfMembershipCancelled(worker, cancellation);
                             var membership = new MembershipResultPresenter().Create(
                                 source.Membership, target.Membership);
-                            args.Result = new ComponentDefinitionResultPresenter().Apply(
+                            var finalPresentation = new ComponentDefinitionResultPresenter().Apply(
                                 membership, source.Definitions, target.Definitions);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            var completed = CompleteMembershipComparison(finalPresentation, operation,
+                                source.CacheRead, target.CacheRead, cancellation.Token);
+                            ThrowIfMembershipCancelled(worker, cancellation);
+                            args.Result = completed;
                         }
                         catch (OperationCanceledException)
                         {
@@ -760,13 +765,14 @@ namespace D365SolutionComparer
                             "Compare Membership", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
-                    var presentation = args.Result as MembershipComparisonPresentation;
+                    var completed = args.Result as CompletedMembershipComparison;
+                    var presentation = completed?.Presentation;
                     if (presentation == null)
                     {
                         SetStatusMessage("Membership comparison did not return a result.", Color.Red);
                         return;
                     }
-                    var resultsForm = new MembershipResultsForm(presentation,
+                    var resultsForm = new MembershipResultsForm(completed,
                         selected.SourceVersion, selected.TargetVersion,
                         () => CaptureAppSettingEvidence(presentation), sourceService, destinationService);
 #if DEBUG
@@ -1570,13 +1576,13 @@ namespace D365SolutionComparer
         private static DefinitionEnvironmentReadResult ReadDefinitionEnvironment(
             DataverseComponentDefinitionOperation operation, OrgService service, string environmentName,
             string solutionUniqueName, BackgroundWorker worker, CancellationTokenSource cancellation,
-            int basePercent, int span)
+            int basePercent, int span, DisplayEnvironmentSide side)
         {
             var requestCounter = new DataverseRequestCounter();
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                var snapshot = operation.ReadAndResolve(service, environmentName, solutionUniqueName,
+                var cacheRead = operation.ReadAndResolveWithCache(service, environmentName, solutionUniqueName,
                     cancellation.Token, progress =>
                     {
                         if (worker.CancellationPending) cancellation.Cancel();
@@ -1584,11 +1590,12 @@ namespace D365SolutionComparer
                         var offset = ProgressOffset(progress.Stage, progress.RecordsRetrieved, span);
                         worker.ReportProgress(Math.Min(99, basePercent + offset),
                             new MembershipUiProgress(environmentName + ": " + progress.Message));
-                    }, requestCounter);
+                    }, requestCounter, side);
+                var snapshot = cacheRead.Definitions;
                 stopwatch.Stop();
                 return new DefinitionEnvironmentReadResult(
                     MembershipEnvironmentResult.FromSnapshot(environmentName, snapshot.Membership,
-                        requestCounter.TotalRequests, stopwatch.Elapsed), snapshot);
+                        requestCounter.TotalRequests, stopwatch.Elapsed), snapshot, cacheRead);
             }
             catch (OperationCanceledException)
             {
@@ -1614,6 +1621,67 @@ namespace D365SolutionComparer
             if (worker.CancellationPending) cancellation.Cancel();
             cancellation.Token.ThrowIfCancellationRequested();
         }
+
+        /// <summary>Runs on the membership worker after final definition presentation.</summary>
+        internal static CompletedMembershipComparison CompleteMembershipComparison(
+            MembershipComparisonPresentation presentation, DataverseComponentDefinitionOperation operation,
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult source,
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult target,
+            CancellationToken cancellationToken,
+            Func<MembershipComparisonPresentation, DataverseComponentMetadataCache,
+                DataverseComponentMetadataCache, CancellationToken,
+                IReadOnlyList<ComponentDisplayEvidence>> project = null)
+        {
+            if (presentation == null) throw new ArgumentNullException(nameof(presentation));
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceAssociation = CacheAssociation(source, operation, presentation.Source.Snapshot);
+            var targetAssociation = CacheAssociation(target, operation, presentation.Target.Snapshot);
+            try
+            {
+                var sourceCache = sourceAssociation == DisplayCacheAssociation.Verified ? source.Cache : null;
+                var targetCache = targetAssociation == DisplayCacheAssociation.Verified ? target.Cache : null;
+                var evidence = project == null
+                    ? ComponentDisplayEvidenceProjector.Project(presentation, sourceCache, targetCache, cancellationToken)
+                    : project(presentation, sourceCache, targetCache, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                var completed = new CompletedMembershipComparison(presentation, evidence,
+                    DisplayProjectionOutcome.Completed, sourceAssociation, targetAssociation);
+                return AttachHierarchyParents(completed, operation, source, target, cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Requested cancellation is never optional failure; no exception payload is retained.
+                cancellationToken.ThrowIfCancellationRequested();
+                return new CompletedMembershipComparison(presentation, new ComponentDisplayEvidence[0],
+                    DisplayProjectionOutcome.Failed, sourceAssociation, targetAssociation);
+            }
+        }
+
+        private static CompletedMembershipComparison AttachHierarchyParents(CompletedMembershipComparison completed,
+            DataverseComponentDefinitionOperation operation,
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult source,
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult target, CancellationToken token)
+        {
+            try
+            {
+                Func<DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult, MembershipSnapshot,
+                    DisplayEnvironmentSide, D365SolutionComparer.Models.Presentation.ComponentHierarchyParentEvidence> retain = (read, owner, side) =>
+                    read != null && read.EvidenceBelongsTo(operation, owner, side)
+                    ? ComponentHierarchyProjector.RetainAppSettingParentsFromNormalRead(read.ParentCapture, owner, side,
+                        read.ComparisonInvocationOwner, read.ReadOwner) : null;
+                var sourceParents = retain(source, completed.Presentation.Source.Snapshot, DisplayEnvironmentSide.Source);
+                var targetParents = retain(target, completed.Presentation.Target.Snapshot, DisplayEnvironmentSide.Target);
+                token.ThrowIfCancellationRequested();
+                return new CompletedMembershipComparison(completed, sourceParents, targetParents);
+            }
+            catch (Exception) { token.ThrowIfCancellationRequested(); return completed; }
+        }
+
+        private static DisplayCacheAssociation CacheAssociation(
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult read,
+            DataverseComponentDefinitionOperation operation, MembershipSnapshot snapshot) =>
+            read == null ? DisplayCacheAssociation.NotAvailable : read.BelongsTo(operation, snapshot)
+                ? DisplayCacheAssociation.Verified : DisplayCacheAssociation.Rejected;
 
         private static int ProgressOffset(MembershipOperationStage stage, int recordsRetrieved, int span)
         {
@@ -1651,14 +1719,17 @@ namespace D365SolutionComparer
         private sealed class DefinitionEnvironmentReadResult
         {
             public DefinitionEnvironmentReadResult(MembershipEnvironmentResult membership,
-                ComponentDefinitionSnapshot definitions)
+                ComponentDefinitionSnapshot definitions,
+                DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult cacheRead = null)
             {
                 Membership = membership ?? throw new ArgumentNullException(nameof(membership));
                 Definitions = definitions;
+                CacheRead = cacheRead;
             }
 
             public MembershipEnvironmentResult Membership { get; }
             public ComponentDefinitionSnapshot Definitions { get; }
+            public DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult CacheRead { get; }
         }
 
         private void BtnFilter_Click(object sender, EventArgs e)
