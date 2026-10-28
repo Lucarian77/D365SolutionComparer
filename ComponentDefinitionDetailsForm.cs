@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 using D365SolutionComparer.Models.ComponentDetails;
+using D365SolutionComparer.Models.Presentation;
 
 namespace D365SolutionComparer
 {
@@ -26,7 +27,8 @@ namespace D365SolutionComparer
                 AutoEllipsis = true,
                 Text = detail.ComponentKind + ": " + detail.PortableKey + Environment.NewLine +
                     "Membership: " + detail.MembershipStatus + "    |    Definition: " +
-                    detail.DefinitionStatus + Environment.NewLine + detail.Diagnostic
+                    detail.DefinitionStatus + Environment.NewLine + detail.Diagnostic + Environment.NewLine +
+                    SolutionObjectsExplorerRow.PropertyExplanation(detail.DefinitionStatus, detail.Properties, true)
             };
 
             var grid = new DataGridView
@@ -40,7 +42,7 @@ namespace D365SolutionComparer
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 MultiSelect = false,
                 RowHeadersVisible = false,
-                DataSource = detail.Properties.ToList()
+                DataSource = SolutionObjectsExplorerRow.OrderProperties(detail.Properties).ToList()
             };
             AddColumn(grid, "PropertyName", "Comparable Property", 170);
             AddColumn(grid, "SourceValue", "Source Value", 330);
@@ -48,9 +50,12 @@ namespace D365SolutionComparer
             AddColumn(grid, "Comparison", "Result", 90);
             grid.CellFormatting += (sender, args) =>
             {
-                if (args.RowIndex < 0) return;
+                if (args.RowIndex < 0 || args.ColumnIndex < 0) return;
                 var item = grid.Rows[args.RowIndex].DataBoundItem as ComponentPropertyPresentation;
-                if (item == null || !item.Changed) return;
+                if (item == null) return;
+                if (grid.Columns[args.ColumnIndex].DataPropertyName == "Comparison")
+                { args.Value = SolutionObjectsExplorerRow.PropertyComparison(item); args.FormattingApplied = true; }
+                if (!item.Changed) return;
                 args.CellStyle.BackColor = Color.MistyRose;
                 args.CellStyle.ForeColor = Color.Firebrick;
             };

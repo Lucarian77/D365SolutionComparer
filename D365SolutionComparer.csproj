@@ -29,7 +29,8 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
@@ -145,6 +146,8 @@
     <Compile Include="Services\Membership\MembershipCoverageCsvExporter.cs" />
     <Compile Include="Services\Membership\CanvasAppLifecycleCsvComparer.cs" />
     <Compile Include="Models\Membership\MembershipPresentation.cs" />
+    <Compile Include="Models\Membership\MetadataForArchivalInformation.cs" />
+    <Compile Include="Services\Membership\MetadataForArchivalResolver.cs" />
     <Compile Include="Models\Membership\ComponentDisplayEvidence.cs" />
     <Compile Include="Models\Membership\ComponentObjectMetadataEvidence.cs" />
     <Compile Include="Models\Membership\CompletedMembershipComparison.cs" />
@@ -152,6 +155,11 @@
     <Compile Include="Services\Membership\AppSettingParentEvidenceEmission.cs" />
     <Compile Include="Models\Presentation\MembershipGridRow.cs" />
     <Compile Include="SolutionObjectsExplorerControl.cs" />
+    <Compile Include="SimplifiedSolutionExplorerPanel.cs" />
+    <Compile Include="SolutionObjectsExplorerControl.Objects.cs" />
+    <Compile Include="SolutionObjectsExplorerControl.Appearance.cs" />
+    <Compile Include="Models\Presentation\SolutionObjectNavigation.cs" />
+    <Compile Include="Models\Presentation\MainComparisonSummaryPresentation.cs" />
     <Compile Include="Models\Presentation\SolutionObjectsExplorerProjection.cs" />
     <Compile Include="Services\Membership\SolutionObjectsExplorerProjector.cs" />
     <Compile Include="Models\Presentation\SolutionObjectsExplorerRow.cs" />
@@ -160,6 +168,7 @@
     <Compile Include="MembershipHierarchyControl.cs" />
     <Compile Include="Services\Membership\ComponentHierarchyProjector.cs" />
     <Compile Include="Services\Membership\ComponentDisplayEvidenceProjector.cs" />
+    <Compile Include="Services\Membership\MakerObjectDisplayReader.cs" />
     <Compile Include="Models\ComponentDetails\ComponentDefinition.cs" />
     <Compile Include="Models\ComponentDetails\ComponentDefinitionContractCatalog.cs" />
     <Compile Include="Models\ComponentDetails\ComponentDefinitionSnapshot.cs" />

@@ -216,7 +216,7 @@ namespace D365SolutionComparer.Tests
             var report = Report(new[] { Row(300) }, new[] { Row(300) }).Text;
             StringAssert.Contains(report, "SourceDistinctObjectIds\tSourceBlankObjectIds\tSourceResolved\tSourceUnsupported\tSourceUnresolved\tSourceAmbiguous");
             StringAssert.Contains(report, "TargetSolutions\tSharedSolutions");
-            StringAssert.Contains(report, "Source\tCSC-ROCS-UAT\tsample\tDisplay sample\t1.2.3.4\t2026-10-05T12:00:00.0000000Z\tComplete");
+            StringAssert.Contains(report, "Source\tSYN-THET-IAH\tsample\tDisplay sample\t1.2.3.4\t2026-10-05T12:00:00.0000000Z\tComplete");
             StringAssert.Contains(report, "Source\tsample\tDisplay sample\t1.2.3.4\t300\tUnknown\t1\t1\t0\t0\t1\t0\t0");
             StringAssert.Contains(report, "NEXT RESOLVER CANDIDATES");
             StringAssert.Contains(report, "Dataverse requests: 0; WhoAmI: 0; Writes: 0");

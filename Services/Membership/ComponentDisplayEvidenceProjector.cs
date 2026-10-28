@@ -28,8 +28,8 @@ namespace D365SolutionComparer.Services.Membership
             // Cancellation discards this optional projection, never cancels an authoritative comparison.
             // No partial display inventory is returned.
             if (cancellationToken.IsCancellationRequested) return new ComponentDisplayEvidence[0];
-            var source = View(sourceCache);
-            var target = View(targetCache);
+            var source = View(sourceCache, presentation.Source.Snapshot);
+            var target = View(targetCache, presentation.Target.Snapshot);
             var results = new List<ComponentDisplayEvidence>(presentation.Rows.Count);
             foreach (var row in presentation.Rows)
             {
@@ -41,15 +41,16 @@ namespace D365SolutionComparer.Services.Membership
             return results.AsReadOnly();
         }
 
-        private static CacheView View(DataverseComponentMetadataCache cache)
+        private static CacheView View(DataverseComponentMetadataCache cache, MembershipSnapshot owner)
         {
-            try { return new CacheView(cache); }
-            catch (Exception) { return new CacheView(null, true); }
+            try { return new CacheView(cache, owner); }
+            catch (Exception) { return new CacheView(null, owner, true); }
         }
 
         private sealed class CacheView
         {
             private readonly DataverseComponentMetadataCache cache;
+            private readonly MembershipSnapshot owner;
             private readonly bool failed;
             private readonly Dictionary<Guid, List<OptionSetMetadataBase>> choices =
                 new Dictionary<Guid, List<OptionSetMetadataBase>>();
@@ -60,9 +61,10 @@ namespace D365SolutionComparer.Services.Membership
             private readonly Dictionary<Guid, List<Type92StepEvidence>> steps =
                 new Dictionary<Guid, List<Type92StepEvidence>>();
 
-            internal CacheView(DataverseComponentMetadataCache cache, bool failed = false)
+            internal CacheView(DataverseComponentMetadataCache cache, MembershipSnapshot owner, bool failed = false)
             {
                 this.cache = cache;
+                this.owner = owner;
                 this.failed = failed;
                 foreach (var item in cache?.OptionSetCatalog ?? new OptionSetMetadataBase[0])
                 {
@@ -123,6 +125,46 @@ namespace D365SolutionComparer.Services.Membership
                     return Evidence(identity, side, category, unknown, unknown, DisplayBackingCorrelationStatus.NotAttempted);
                 if (cache == null)
                     return Evidence(identity, side, category, unknown, unknown, DisplayBackingCorrelationStatus.Unavailable);
+
+                if (identity.Record.ComponentType == 10139)
+                {
+                    MetadataForArchivalInformation info;
+                    if (cache.MetadataForArchival != null && cache.MetadataForArchival.TryInformation(owner, identity, side, out info))
+                        return new ComponentSideDisplayEvidence(side, identity.Record.SolutionComponentId, id, 10139, category,
+                            info.Field("Name"), info.Field("Name"), info.Field("Name").Availability == DisplayAvailability.Available
+                                ? DisplayBackingCorrelationStatus.Unique : DisplayBackingCorrelationStatus.Unavailable,
+                            info.Field("Related Table"), archivalInformation: info);
+                    return Evidence(identity, side, category, unknown, unknown, DisplayBackingCorrelationStatus.Unavailable);
+                }
+
+                MakerObjectDisplayEvidence maker;
+                if (cache.TryGetMakerObjectDisplay(owner, identity, out maker))
+                    return Evidence(identity, side, category, maker.FriendlyName, maker.InternalName, maker.Correlation, maker: maker);
+
+                if (identity.Record.ComponentType == 300)
+                {
+                    DataverseComponentMetadataCache.NormalDisplayNameObservation canvas;
+                    return cache.TryGetNormalDisplayName(owner, identity, out canvas)
+                        ? Evidence(identity, side, category, canvas.FriendlyName, canvas.InternalName, canvas.Correlation)
+                        : Evidence(identity, side, category, unknown, unknown, DisplayBackingCorrelationStatus.Unavailable);
+                }
+
+                if (identity.Record.ComponentType == 511 || identity.Record.ComponentType == 59)
+                {
+                    DataverseComponentMetadataCache.NormalDisplayNameObservation retained;
+                    if (cache.TryGetNormalDisplayName(owner, identity, out retained))
+                        return Evidence(identity, side, category, retained.FriendlyName, unknown, retained.Correlation, retained.ParentContext);
+                }
+
+                if (identity.Record.ComponentType == 31 || identity.Record.ComponentType == 36)
+                {
+                    // The coordinator verifies invocation/org/solution ownership before supplying
+                    // the side's cache; the observation also requires its exact final snapshot/record.
+                    DataverseComponentMetadataCache.NormalDisplayNameObservation observation;
+                    return cache.TryGetNormalDisplayName(owner, identity, out observation)
+                        ? Evidence(identity, side, category, observation.FriendlyName, unknown, observation.Correlation)
+                        : Evidence(identity, side, category, unknown, unknown, DisplayBackingCorrelationStatus.Unavailable);
+                }
 
                 EntityMetadata entity;
                 if (identity.Record.ComponentType == 1 && cache.TryGetEntity(id.Value, out entity))
@@ -254,10 +296,10 @@ namespace D365SolutionComparer.Services.Membership
 
         private static ComponentSideDisplayEvidence Evidence(ComponentIdentity identity, DisplayEnvironmentSide side,
             ComponentDisplayValue category, ComponentDisplayValue friendly, ComponentDisplayValue internalName,
-            DisplayBackingCorrelationStatus correlation, ComponentDisplayValue parent = null) =>
+            DisplayBackingCorrelationStatus correlation, ComponentDisplayValue parent = null, MakerObjectDisplayEvidence maker = null) =>
             new ComponentSideDisplayEvidence(side, identity.Record.SolutionComponentId, identity.Record.ObjectId,
                 identity.Record.ComponentType, category, friendly, internalName, correlation,
-                parent ?? Missing(DisplayAvailability.NotRetrieved), ComponentObjectMetadataEvidence.NotRetrieved(side));
+                parent ?? Missing(DisplayAvailability.NotRetrieved), ComponentObjectMetadataEvidence.NotRetrieved(side), maker);
 
         private static bool Fields(ComponentIdentity identity, out string table, out string friendly, out string internalName)
         {
@@ -295,6 +337,7 @@ namespace D365SolutionComparer.Services.Membership
                 case 61: label = "Web Resource"; break;
                 case 62: label = "Site Map"; break;
                 case 80: label = "Model-Driven App"; break;
+                case 10139: label = "MetadataForArchival"; break;
                 case 91: label = "Plug-in Assembly"; break;
                 case 92: label = "SDK Message Processing Step"; break;
                 case 300: label = "Canvas App family"; break;

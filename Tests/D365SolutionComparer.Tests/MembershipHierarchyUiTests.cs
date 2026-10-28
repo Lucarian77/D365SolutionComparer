@@ -24,14 +24,14 @@ namespace D365SolutionComparer.Tests
         public TestContext TestContext { get; set; }
 
         [TestMethod]
-        public void FlatDefaultRetainsOriginalGridAndProjectionIsOncePerCompletedComparison()
+        public void ExplicitFlatRetainsOriginalGridAndProjectionIsOncePerCompletedComparison()
         {
             Sta(() =>
             {
                 var f = Fixture(); var service = new FakeOrganizationService(); int projections = 0;
                 using (var form = new MembershipResultsForm(f.Completed, sourceService: service, targetService: service))
                 {
-                    form.Show(); Application.DoEvents(); var grid = Grid(form); var data = grid.DataSource;
+                    ViewSelector(form).SelectedIndex = 0; form.Show(); Application.DoEvents(); var grid = Grid(form); var data = grid.DataSource;
                     Assert.AreEqual("Flat View", ViewSelector(form).SelectedItem); Assert.IsTrue(grid.Visible);
                     Assert.IsNull(form.HierarchyProjection);
                     form.ProjectHierarchy = token => { Interlocked.Increment(ref projections); return ComponentHierarchyProjector.Project(f.Completed, cancellationToken: token); };
@@ -243,7 +243,7 @@ namespace D365SolutionComparer.Tests
             {
                 var f = Fixture(); using (var form = new MembershipResultsForm(f.Completed))
                 {
-                    form.Show(); Filter(form).SelectedIndex = 2;
+                    ViewSelector(form).SelectedIndex = 0; form.Show(); Filter(form).SelectedIndex = 2;
                     form.ProjectHierarchy = token => mode == "exception" ? throw new InvalidOperationException("secret URL payload") :
                         ComponentHierarchyProjector.ProjectCore(f.Presentation, f.Completed, null, null,
                             mode == "cancelled" ? new CancellationToken(true) : token, _ => { if (mode == "failed") throw new InvalidOperationException("secret"); });
@@ -279,8 +279,9 @@ namespace D365SolutionComparer.Tests
             {
                 var f = Fixture(); using (var started = new ManualResetEventSlim()) using (var exited = new ManualResetEventSlim())
                 {
-                    var form = new MembershipResultsForm(f.Completed); form.Show();
+                    var form = new MembershipResultsForm(f.Completed); ViewSelector(form).SelectedIndex = 0;
                     form.ProjectHierarchy = token => { started.Set(); token.WaitHandle.WaitOne(); exited.Set(); token.ThrowIfCancellationRequested(); return null; };
+                    bool shown = false; form.Shown += (sender, args) => shown = true; form.Show(); Pump(() => shown);
                     ViewSelector(form).SelectedIndex = 1; Assert.IsTrue(started.Wait(5000)); form.Close(); form.Dispose();
                     Assert.IsTrue(exited.Wait(5000)); Application.DoEvents(); Assert.AreEqual(3, f.Presentation.Rows.Count);
                 }
@@ -295,7 +296,9 @@ namespace D365SolutionComparer.Tests
                 var f = Fixture(); using (var gate = new ManualResetEventSlim()) using (var started = new ManualResetEventSlim())
                 using (var form = new MembershipResultsForm(f.Completed))
                 {
-                    form.Show(); form.ProjectHierarchy = token => { started.Set(); gate.Wait(token); return ComponentHierarchyProjector.Project(f.Completed, cancellationToken: token); };
+                    ViewSelector(form).SelectedIndex = 0;
+                    form.ProjectHierarchy = token => { started.Set(); gate.Wait(token); return ComponentHierarchyProjector.Project(f.Completed, cancellationToken: token); };
+                    bool shown = false; form.Shown += (sender, args) => shown = true; form.Show(); Pump(() => shown);
                     ViewSelector(form).SelectedIndex = 1; Assert.IsTrue(started.Wait(5000)); ViewSelector(form).SelectedIndex = 0; gate.Set();
                     var watch = Stopwatch.StartNew(); while (watch.ElapsedMilliseconds < 100) { Application.DoEvents(); Thread.Sleep(1); }
                     Assert.IsTrue(Grid(form).Visible); Assert.IsFalse(form.Controls.OfType<MembershipHierarchyControl>().Any(c => c.Visible));
@@ -504,7 +507,7 @@ namespace D365SolutionComparer.Tests
             {
                 Directory.CreateDirectory(directory); using (var form = new MembershipResultsForm(Fixture().Completed))
                 {
-                    form.Text += " — Synthetic H2A validation fixture"; form.Show(); Application.DoEvents(); Save(form, directory, "01-flat.png");
+                    form.Text += " — Synthetic H2A validation fixture"; ViewSelector(form).SelectedIndex = 0; form.Show(); Application.DoEvents(); Save(form, directory, "01-flat.png");
                     SwitchHierarchy(form); Save(form, directory, "02-hierarchy.png"); ExpandAllBounded(Control(form).Tree, 100);
                     Save(form, directory, "03-expanded.png");
                     Control(form).Tree.SelectedNode = TreeNodes(Control(form).Tree).First(n => (n.Tag as MembershipHierarchyNode)?.Occurrence?.Record.ComponentType == 300);
@@ -531,7 +534,7 @@ namespace D365SolutionComparer.Tests
         { ViewSelector(form).SelectedIndex = 1; Pump(() => form.Controls.OfType<MembershipHierarchyControl>().Any(c => c.Visible) || form.HierarchyDiagnostics.Count > 0); Assert.IsTrue(Control(form).Visible, string.Join(";", form.HierarchyDiagnostics)); }
         private static void Pump(Func<bool> ready)
         { var watch = Stopwatch.StartNew(); while (!ready() && watch.Elapsed.TotalSeconds < 20) { Application.DoEvents(); Thread.Sleep(1); } Application.DoEvents(); Assert.IsTrue(ready(), "Hierarchy UI did not complete."); }
-        private static ToolStrip Bar(MembershipResultsForm f) => f.Controls.OfType<ToolStrip>().Single();
+        private static ToolStrip Bar(MembershipResultsForm f) => f.Controls.OfType<ToolStrip>().Single(bar => bar.Name == "MembershipViewBar");
         private static ToolStripComboBox ViewSelector(MembershipResultsForm f) => Bar(f).Items.OfType<ToolStripComboBox>().Single(i => i.Name == "MembershipViewSelector");
         private static ToolStripComboBox Filter(MembershipResultsForm f) => Bar(f).Items.OfType<ToolStripComboBox>().Single(i => i.Name == "MembershipPresenceFilter");
         private static ToolStripLabel Status(MembershipResultsForm f) => Bar(f).Items.OfType<ToolStripLabel>().Single(i => i.Name == "MembershipViewStatus");
@@ -592,5 +595,158 @@ namespace D365SolutionComparer.Tests
             source.Add(indeterminate()); target.Add(indeterminate()); target.Add(indeterminate());
             return new MembershipResultPresenter().Create(Env(source, false), Env(target, true));
         }
+        #region R2E hierarchy additions
+        [TestMethod, TestCategory("D4T8R2E")]
+        public void R2EHierarchyKeyboardRoutesRetainNativeExpansionAndExactRow()
+        {
+            Sta(() =>
+            {
+                using (var form = new MembershipResultsForm(Fixture().Completed))
+                {
+                    form.Show(); SwitchHierarchy(form); var c = Control(form); var tree = c.Tree; var source = tree.Nodes[0].Nodes[0];
+                    tree.SelectedNode = source; source.Collapse(); tree.Focus(); Assert.IsTrue(tree.Focused);
+                    R2EHierarchyKey(tree, Keys.Right); Application.DoEvents(); Assert.IsTrue(source.IsExpanded);
+                    typeof(System.Windows.Forms.Control).GetMethod("OnKeyDown", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(tree, new object[] { new KeyEventArgs(Keys.Enter) });
+                    Assert.IsFalse(source.IsExpanded); Assert.IsNull(c.SelectedComparison);
+                    c.SelectComparison(0, DisplayEnvironmentSide.Source); Application.DoEvents(); Assert.IsNotNull(c.SelectedComparison);
+                    var row = c.SelectedComparison.AuthoritativeRow; var side = c.SelectedSide;
+                    form.SelectNextControl(tree, true, true, true, true); Application.DoEvents();
+                    Assert.AreSame(row, c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(side, c.SelectedSide); Assert.IsFalse(tree.Focused);
+                    Assert.AreEqual(3, form.CompletedComparison.Presentation.Rows.Count);
+                }
+            });
+        }
+        [TestMethod, TestCategory("D4T8R2E")]
+        public void R2EHierarchyRoundTripRestoresExactOccurrenceAndExpansion()
+        {
+            Sta(() =>
+            {
+                var one = Identity(1, 60, "repeat", objectId: Id(500)); var two = Identity(2, 60, "repeat", objectId: Id(500));
+                var f = Make(new[] { one, two });
+                using (var form = new MembershipResultsForm(f.Completed))
+                {
+                    form.Show(); SwitchHierarchy(form); var c = Control(form); ExpandAllBounded(c.Tree, 100);
+                    var occurrences = TreeNodes(c.Tree).Where(n => (n.Tag as MembershipHierarchyNode)?.Occurrence != null).ToArray(); Assert.AreEqual(2, occurrences.Length);
+                    c.Tree.SelectedNode = occurrences[1]; Application.DoEvents(); var exact = c.SelectedOccurrenceIndex; var row = c.SelectedComparison.AuthoritativeRow;
+                    Assert.AreEqual(((MembershipHierarchyNode)occurrences[1].Tag).Occurrence.OccurrenceIndex, exact); Assert.AreEqual(DisplayEnvironmentSide.Source, c.SelectedSide);
+                    occurrences[1].Expand(); ViewSelector(form).SelectedIndex = 0; SwitchHierarchy(form);
+                    Assert.AreSame(occurrences[1], c.Tree.SelectedNode); Assert.AreEqual(exact, c.SelectedOccurrenceIndex); Assert.AreSame(row, c.SelectedComparison.AuthoritativeRow);
+                    Assert.IsTrue(c.Tree.SelectedNode.IsExpanded); Assert.AreEqual(1, form.HierarchyProjection.ComparisonRows.Count); Assert.AreEqual(2, form.HierarchyProjection.Occurrences.Count);
+                }
+                var pageSource = Enumerable.Range(0, 205).Select(i => Identity(1000 + i, 61, "resource" + i)).Concat(new[] { Identity(9000, 61, "only-source") }).ToArray();
+                var pageTarget = Enumerable.Range(0, 205).Select(i => Identity(3000 + i, 61, "resource" + i)).ToArray();
+                using (var form = new MembershipResultsForm(Make(pageSource, pageTarget).Completed))
+                {
+                    form.Show(); SwitchHierarchy(form); var c = Control(form); var source = c.Tree.Nodes[0].Nodes[0]; source.Expand();
+                    var group = source.Nodes.Cast<TreeNode>().Single(n => (n.Tag as MembershipHierarchyNode)?.Children.Count > 200); group.Expand();
+                    var page = group.Nodes.Cast<TreeNode>().Single(n => n.Tag != null && n.Tag.GetType().Name == "Page" && R2EHierarchyPageStart(n) == 200);
+                    c.Tree.SelectedNode = page; Assert.IsNull(c.SelectedComparison); Assert.AreEqual(200, R2EHierarchyPageStart(c.Tree.SelectedNode));
+                    Filter(form).SelectedIndex = 1; SwitchHierarchy(form);
+                    Assert.IsNull(c.SelectedComparison); Assert.AreEqual("Page", c.Tree.SelectedNode.Tag.GetType().Name); Assert.AreEqual(200, R2EHierarchyPageStart(c.Tree.SelectedNode));
+                    var filteredPage = c.Tree.SelectedNode; ViewSelector(form).SelectedIndex = 0; Assert.IsNull(Grid(form).CurrentCell); SwitchHierarchy(form);
+                    Assert.AreSame(filteredPage, c.Tree.SelectedNode); Assert.IsNull(c.SelectedComparison);
+                    Filter(form).SelectedIndex = 0; SwitchHierarchy(form); Assert.AreEqual(200, R2EHierarchyPageStart(c.Tree.SelectedNode)); Assert.IsNull(c.SelectedComparison);
+                    Assert.AreEqual(206, form.FilteredRows().Count); Assert.AreEqual(411, form.HierarchyProjection.Occurrences.Count);
+                }
+            });
+        }
+        // R2E correction helpers stay within the existing R2E additions.
+        private static int R2EHierarchyPageStart(TreeNode node) => (int)node.Tag.GetType().GetField("Start", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(node.Tag);
+        [TestMethod, TestCategory("D4T8R2E")]
+        public void R2EHierarchyFilterRestoreKeepsContextAncestorsAndNoFalseSelection()
+        {
+            Sta(() =>
+            {
+                var f = Fixture(); using (var form = new MembershipResultsForm(f.Completed))
+                {
+                    form.Show(); SwitchHierarchy(form); var c = Control(form); ExpandAllBounded(c.Tree, 100);
+                    var column = TreeNodes(c.Tree).Single(n => (n.Tag as MembershipHierarchyNode)?.Occurrence?.Record.ComponentType == 2);
+                    c.Tree.SelectedNode = column; var row = c.SelectedComparison.AuthoritativeRow; var raw = c.SelectedOccurrenceIndex;
+                    Filter(form).SelectedIndex = 2; SwitchHierarchy(form); Assert.AreSame(row, c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(raw, c.SelectedOccurrenceIndex);
+                    ExpandAllBounded(c.Tree, 100); var context = TreeNodes(c.Tree).Single(n => (n.Tag as MembershipHierarchyNode)?.Occurrence?.Record.ComponentType == 1);
+                    Assert.IsTrue(((MembershipHierarchyNode)context.Tag).NavigationContext); c.Tree.SelectedNode = context; Assert.IsNull(c.SelectedComparison);
+                    var reset = form.Controls.OfType<ToolStrip>().SelectMany(t => t.Items.OfType<ToolStripButton>()).Single(x => x.Name == "MembershipResetFiltersAction");
+                    reset.PerformClick(); SwitchHierarchy(form); Assert.AreEqual(0, Filter(form).SelectedIndex); Assert.IsNull(c.SelectedComparison); Assert.AreSame(c.Tree.Nodes[0], c.Tree.SelectedNode);
+                    Assert.AreEqual(f.Presentation.Rows.Count, form.FilteredRows().Count);
+                    Assert.IsTrue(form.HierarchyProjection.Occurrences.Any(o => o.Placement == HierarchyPlacement.VerifiedInclusionRoot));
+                    var sourceCategory = c.Tree.Nodes[0].Nodes[0]; c.Tree.SelectedNode = sourceCategory; Assert.IsNull(c.SelectedComparison);
+                    Filter(form).SelectedIndex = 1; SwitchHierarchy(form);
+                    Assert.IsNull(c.SelectedComparison); Assert.AreSame(c.Tree.Nodes[0].Nodes[0], c.Tree.SelectedNode);
+                    ViewSelector(form).SelectedIndex = 0; Assert.IsNull(Grid(form).CurrentCell); SwitchHierarchy(form);
+                    Assert.IsNull(c.SelectedComparison); Assert.AreSame(c.Tree.Nodes[0].Nodes[0], c.Tree.SelectedNode);
+                    c.ClearNavigationSelection(); Assert.IsNull(c.Tree.SelectedNode); Assert.IsNull(c.SelectedComparison);
+                    Filter(form).SelectedIndex = 0; SwitchHierarchy(form); Assert.IsNull(c.Tree.SelectedNode); Assert.IsNull(c.SelectedComparison);
+                    ViewSelector(form).SelectedIndex = 0; Assert.IsNull(Grid(form).CurrentCell); SwitchHierarchy(form);
+                    Assert.IsNull(c.Tree.SelectedNode); Assert.IsNull(c.SelectedComparison);
+                    ViewSelector(form).SelectedIndex = 0; var flat = Grid(form); var current = (MembershipGridRow)flat.Rows[0].DataBoundItem;
+                    flat.CurrentCell = flat.Rows[0].Cells[0];
+                    typeof(DataGridView).GetMethod("OnCellClick", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(flat, new object[] { new DataGridViewCellEventArgs(0, 0) });
+                    SwitchHierarchy(form); Assert.IsNotNull(c.SelectedComparison); Assert.AreSame(current.AuthoritativeRow, c.SelectedComparison.AuthoritativeRow);
+                }
+            });
+        }
+        [TestMethod, TestCategory("D4T8R2E")]
+        public void R2EHierarchyFocusScrollAndCloseKeepOwnerGuards()
+        {
+            Sta(() =>
+            {
+                int calls = 0; string ownerText = "OWNER-ONE"; Form host = null; bool closeDuringFormat = false; var published = new List<string>();
+                var first = Fixture(); var second = Make(new[] { Identity(91, 61, "replacement") }); var ownerOne = new object(); var ownerTwo = new object();
+                using (host = new Form { Size = new Size(1100, 700), StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false })
+                using (var c = new MembershipHierarchyControl(row =>
+                {
+                    calls++;
+                    if (ownerText == "OWNER-TWO") Assert.AreSame(second.Presentation.Rows[0], row.AuthoritativeRow);
+                    if (closeDuringFormat) host.Close();
+                    return ownerText + "|ROW=" + row.OriginalRowIndex;
+                }, _ => { }))
+                {
+                    c.Visible = false; var input = new TextBox { Dock = DockStyle.Top }; host.Controls.Add(c); host.Controls.Add(input);
+                    var evidence = c.Controls.OfType<SplitContainer>().Single().Panel2.Controls.OfType<TextBox>().Single();
+                    evidence.TextChanged += (sender, args) => published.Add(evidence.Text);
+                    c.Bind(Model(first), ownerOne); host.Show(); Application.DoEvents(); c.SelectComparison(0, DisplayEnvironmentSide.Source); Application.DoEvents();
+                    Assert.IsNotNull(c.SelectedComparison); Assert.AreSame(first.Presentation.Rows[0], c.SelectedComparison.AuthoritativeRow);
+                    Assert.AreEqual(DisplayEnvironmentSide.Source, c.SelectedSide); Assert.AreEqual(0, calls, "Post-show hidden selection must not format full evidence.");
+                    var bookmark = c.CaptureNavigation(); input.Focus(); Assert.IsTrue(input.Focused);
+                    c.RestoreNavigation(bookmark, 0, DisplayEnvironmentSide.Source); Assert.AreEqual(0, calls); Assert.IsTrue(input.Focused); Assert.AreEqual("", evidence.Text);
+                    c.Visible = true; Application.DoEvents(); Assert.AreEqual(1, calls); StringAssert.Contains(evidence.Text, "OWNER-ONE|ROW=0"); Assert.IsTrue(input.Focused);
+                    c.Visible = false; c.RestoreNavigation(bookmark, 0, DisplayEnvironmentSide.Source); Assert.AreEqual(1, calls); Assert.AreEqual("", evidence.Text); Assert.IsTrue(input.Focused);
+                    ownerText = "OWNER-TWO"; c.Bind(Model(second), ownerTwo); c.RestoreNavigation(bookmark, 0, DisplayEnvironmentSide.Source);
+                    Assert.IsNull(c.SelectedComparison); Assert.AreEqual(1, calls); Assert.IsFalse(evidence.Text.Contains("OWNER-ONE"));
+                    c.SelectComparison(0, DisplayEnvironmentSide.Source); Assert.AreSame(second.Presentation.Rows[0], c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(1, calls);
+                    c.Visible = true; Application.DoEvents(); Assert.AreEqual(2, calls); StringAssert.Contains(evidence.Text, "OWNER-TWO|ROW=0"); Assert.IsFalse(evidence.Text.Contains("OWNER-ONE")); Assert.IsTrue(input.Focused);
+                    c.Visible = false; c.RestoreNavigation(c.CaptureNavigation(), 0, DisplayEnvironmentSide.Source); Assert.AreEqual(2, calls);
+                    ownerText = "CLOSED-PUBLICATION"; closeDuringFormat = true; c.Visible = true; Application.DoEvents();
+                    Assert.IsTrue(host.IsDisposed); Assert.AreEqual(3, calls); Assert.IsFalse(published.Any(text => text.Contains("CLOSED-PUBLICATION")), "A closed control cannot publish a retained formatter result.");
+                }
+                var newer = Make(new[] { Identity(101, 61, "one"), Identity(102, 61, "two") }, new[] { Identity(201, 61, "one"), Identity(202, 61, "two") });
+                int newerCalls = 0;
+                using (var nextHost = new Form { Size = new Size(1100, 700), StartPosition = FormStartPosition.Manual, Location = new Point(-4000, -4000), ShowInTaskbar = false })
+                using (var c = new MembershipHierarchyControl(row => { newerCalls++; return "CURRENT-OWNER|ROW=" + row.OriginalRowIndex; }, _ => { }))
+                {
+                    c.Visible = false; nextHost.Controls.Add(c); var input = new TextBox { Dock = DockStyle.Top }; nextHost.Controls.Add(input);
+                    c.Bind(Model(newer), newer.Presentation); nextHost.Show(); Application.DoEvents(); c.SelectComparison(0, DisplayEnvironmentSide.Source);
+                    Assert.AreSame(newer.Presentation.Rows[0], c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(DisplayEnvironmentSide.Source, c.SelectedSide); Assert.AreEqual(0, newerCalls);
+                    var sourceBookmark = c.CaptureNavigation(); c.SelectComparison(0, DisplayEnvironmentSide.Target);
+                    c.RestoreNavigation(sourceBookmark, 0, DisplayEnvironmentSide.Target);
+                    Assert.AreEqual(DisplayEnvironmentSide.Target, c.SelectedSide); Assert.AreSame(newer.Presentation.Rows[0], c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(0, newerCalls);
+                    c.SelectComparison(1, DisplayEnvironmentSide.Target); c.RestoreNavigation(sourceBookmark, 1, DisplayEnvironmentSide.Target);
+                    Assert.AreEqual(DisplayEnvironmentSide.Target, c.SelectedSide); Assert.AreSame(newer.Presentation.Rows[1], c.SelectedComparison.AuthoritativeRow); Assert.AreEqual(0, newerCalls);
+                    input.Focus(); c.Visible = true; Application.DoEvents(); Assert.IsTrue(input.Focused); Assert.AreEqual(1, newerCalls);
+                    var text = c.Controls.OfType<SplitContainer>().Single().Panel2.Controls.OfType<TextBox>().Single(); StringAssert.Contains(text.Text, "CURRENT-OWNER|ROW=1"); Assert.IsFalse(text.Text.Contains("CURRENT-OWNER|ROW=0"));
+                    c.Visible = false; var rowBookmark = c.CaptureNavigation(); c.Tree.SelectedNode = c.Tree.Nodes[0].Nodes[0];
+                    c.RestoreNavigation(rowBookmark, null, null); Assert.IsNull(c.SelectedComparison); Assert.AreSame(c.Tree.Nodes[0].Nodes[0], c.Tree.SelectedNode); Assert.AreEqual(1, newerCalls);
+                    c.ClearNavigationSelection(); c.RestoreNavigation(rowBookmark, null, null); Assert.IsNull(c.SelectedComparison); Assert.IsNull(c.Tree.SelectedNode); Assert.AreEqual(1, newerCalls);
+                }
+            });
+        }
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+        private static extern IntPtr R2EHierarchySendKey(IntPtr window, int message, IntPtr key, IntPtr detail);
+        private static void R2EHierarchyKey(TreeView tree, Keys key)
+        {
+            R2EHierarchySendKey(tree.Handle, 0x100, (IntPtr)(int)key, IntPtr.Zero);
+            R2EHierarchySendKey(tree.Handle, 0x101, (IntPtr)(int)key, IntPtr.Zero);
+        }
+        #endregion
     }
 }

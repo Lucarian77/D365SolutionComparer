@@ -572,6 +572,272 @@ namespace D365SolutionComparer.Tests
             }
         }
 
+        [DataTestMethod, TestCategory("H2E2C3FA1"), DataRow(31, 2), DataRow(36, 4)]
+        public void A1NormalFriendlyNamesKeepUnsignedRowsUnpairedAndExportsByteIdentical(int rawType, int perSide)
+        {
+            var operation = new DataverseComponentDefinitionOperation();
+            var sourceRows = Enumerable.Range(0, perSide).Select(i => ComponentDisplayEvidenceTests.A1NameRow(rawType,
+                Guid.NewGuid(), rawType == 36 ? "Same synthetic title" : "Synthetic report " + i)).ToArray();
+            var targetRows = Enumerable.Range(0, perSide).Select(i => ComponentDisplayEvidenceTests.A1NameRow(rawType,
+                Guid.NewGuid(), rawType == 36 ? "Same synthetic title" : "Synthetic report " + i, true)).ToArray();
+            if (rawType == 36) for (int i = 0; i < perSide; i++)
+            { sourceRows[i]["templatetypecode"] = targetRows[i]["templatetypecode"] = i % 2 == 0 ? "contact" : "account"; }
+            FakeOrganizationService sourceSpy, targetSpy;
+            var source = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Source, rawType, sourceRows, false, out sourceSpy);
+            var target = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Target, rawType, targetRows, false, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target);
+            var beforeRows = presentation.Rows.ToArray(); var csv = new MembershipCoverageCsvExporter().CreateCsv(presentation);
+            var result = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            Assert.AreSame(presentation, result.Presentation); CollectionAssert.AreEqual(beforeRows, result.Presentation.Rows.ToArray());
+            Assert.AreEqual(perSide * 2, result.DisplayEvidence.Count); Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+            Assert.AreEqual(perSide * 2, presentation.Summary.IndeterminateUnsupported);
+            foreach (var display in result.DisplayEvidence)
+            {
+                var local = display.SourceDisplayEvidence.HasLocalObservation ? display.SourceDisplayEvidence : display.TargetDisplayEvidence;
+                var identity = presentation.Rows[display.RowIndex].SourceIdentity ?? presentation.Rows[display.RowIndex].TargetIdentity;
+                Assert.AreEqual(IdentityResolutionStatus.Unsupported, identity.Status); Assert.IsNull(identity.ComparisonKey);
+                Assert.AreEqual(MembershipPresence.Indeterminate, presentation.Rows[display.RowIndex].Presence);
+                Assert.AreEqual(DisplayAvailability.Available, local.FriendlyName.Availability);
+                Assert.AreEqual(DisplayBackingCorrelationStatus.Unique, local.BackingCorrelationStatus);
+                Assert.AreEqual(DisplayAvailability.NotRetrieved, local.InternalName.Availability);
+                Assert.AreEqual(identity.Record.ObjectId, local.LocalObjectId);
+                var expectedRows = local.EnvironmentSide == DisplayEnvironmentSide.Source ? sourceRows : targetRows;
+                Assert.AreEqual((string)expectedRows.Single(row => row.Id == local.LocalObjectId)[rawType == 31 ? "name" : "title"], local.FriendlyName.Value);
+                Assert.AreSame(beforeRows[display.RowIndex].DefinitionDetail, presentation.Rows[display.RowIndex].DefinitionDetail);
+            }
+            CollectionAssert.AreEqual(System.Text.Encoding.UTF8.GetBytes(csv),
+                System.Text.Encoding.UTF8.GetBytes(new MembershipCoverageCsvExporter().CreateCsv(presentation)));
+            Assert.AreEqual(3, sourceSpy.Calls); Assert.AreEqual(3, targetSpy.Calls);
+            Assert.AreEqual(1, sourceSpy.ExecuteCalls); Assert.AreEqual(1, targetSpy.ExecuteCalls);
+            Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        [TestMethod, TestCategory("H2E2C3FA1")]
+        public void A1SignedReportDisplayDoesNotReplaceSignatureKeyOrUnavailableDefinition()
+        {
+            var operation = new DataverseComponentDefinitionOperation(); var signature = Guid.NewGuid();
+            var left = ComponentDisplayEvidenceTests.A1NameRow(31, Guid.NewGuid(), "Synthetic source report", false, signature);
+            var right = ComponentDisplayEvidenceTests.A1NameRow(31, Guid.NewGuid(), "Renamed synthetic target report", true, signature);
+            FakeOrganizationService sourceSpy, targetSpy;
+            var source = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Source, 31, new[] { left }, false, out sourceSpy);
+            var target = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Target, 31, new[] { right }, false, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target); var before = presentation.Rows.Single();
+            var result = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            Assert.AreEqual(1, result.DisplayEvidence.Count); Assert.AreEqual(MembershipPresence.PresentInBoth, before.Presence);
+            Assert.AreEqual(signature.ToString("D"), before.SourceIdentity.ComparisonKey);
+            Assert.AreEqual(signature.ToString("D"), before.TargetIdentity.ComparisonKey);
+            Assert.AreEqual("Not Compared", before.DefinitionStatus);
+            Assert.AreSame(before, result.Presentation.Rows.Single());
+            Assert.AreEqual("Synthetic source report", result.DisplayEvidence[0].SourceDisplayEvidence.FriendlyName.Value);
+            Assert.AreEqual("Renamed synthetic target report", result.DisplayEvidence[0].TargetDisplayEvidence.FriendlyName.Value);
+            Assert.AreEqual(6, sourceSpy.Calls + targetSpy.Calls); Assert.AreEqual(2, sourceSpy.ExecuteCalls + targetSpy.ExecuteCalls);
+            Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1"), DataRow(31), DataRow(36)]
+        public void A1SameGuidsAndRepeatedRawReferencesKeepIndependentSideNamesAndAllRows(int rawType)
+        {
+            var operation = new DataverseComponentDefinitionOperation(); var id = Guid.NewGuid();
+            FakeOrganizationService sourceSpy, targetSpy;
+            var source = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Source, rawType,
+                new[] { ComponentDisplayEvidenceTests.A1NameRow(rawType, id, "Source-only synthetic label") }, true, out sourceSpy);
+            var target = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Target, rawType,
+                new[] { ComponentDisplayEvidenceTests.A1NameRow(rawType, id, "Target-only synthetic label", true) }, false, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target);
+            var result = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            Assert.AreEqual(2, source.Definitions.Membership.Components.Count); Assert.AreEqual(1, target.Definitions.Membership.Components.Count);
+            Assert.AreEqual(3, presentation.Rows.Count); Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+            Assert.AreEqual(2, result.DisplayEvidence.Count(d => d.SourceDisplayEvidence.FriendlyName.Value == "Source-only synthetic label"));
+            Assert.AreEqual(1, result.DisplayEvidence.Count(d => d.TargetDisplayEvidence.FriendlyName.Value == "Target-only synthetic label"));
+            Assert.AreEqual(2, source.Definitions.Membership.Components.Select(i => i.Record.SolutionComponentId).Distinct().Count());
+            Assert.AreEqual(6, sourceSpy.Calls + targetSpy.Calls); Assert.AreEqual(2, sourceSpy.ExecuteCalls + targetSpy.ExecuteCalls);
+            Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1")]
+        [DataRow("WrongOrganization"), DataRow("WrongSolution"), DataRow("WrongInvocation")]
+        [DataRow("CopiedSnapshot"), DataRow("SwappedSide"), DataRow("WrongReadCache")]
+        public void A1CompletedNameHandoffRejectsMisassociationWithoutRequests(string problem)
+        {
+            var operation = new DataverseComponentDefinitionOperation(); FakeOrganizationService sourceSpy, targetSpy;
+            var source = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Source, 31,
+                new[] { ComponentDisplayEvidenceTests.A1NameRow(31, Guid.NewGuid(), "Source synthetic") }, false, out sourceSpy);
+            var target = A1ReadFamily(operation, Solution(), DisplayEnvironmentSide.Target, 31,
+                new[] { ComponentDisplayEvidenceTests.A1NameRow(31, Guid.NewGuid(), "Target synthetic", true) }, false, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target); var supplied = source;
+            if (problem == "WrongOrganization" || problem == "WrongSolution")
+                supplied = new DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult(source.Definitions, source.Cache,
+                    Token(operation), problem == "WrongOrganization" ? Guid.NewGuid() : source.Definitions.Membership.Environment.OrganizationId,
+                    problem == "WrongSolution" ? "another-solution" : "sample");
+            if (problem == "WrongInvocation") supplied = Envelope(source.Definitions.Membership, source.Cache, new DataverseComponentDefinitionOperation());
+            if (problem == "CopiedSnapshot") supplied = Envelope(MembershipSnapshot.Complete(source.Definitions.Membership.Solution,
+                source.Definitions.Membership.Components, source.Definitions.Membership.CapturedAt), source.Cache, operation);
+            if (problem == "SwappedSide") supplied = target;
+            if (problem == "WrongReadCache") supplied = Envelope(source.Definitions.Membership, target.Cache, operation);
+            var result = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, supplied, target, CancellationToken.None);
+            var name = result.DisplayEvidence.Single(d => d.SourceDisplayEvidence.HasLocalObservation).SourceDisplayEvidence.FriendlyName;
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, name.Availability); Assert.IsNull(name.Value);
+            Assert.AreEqual(problem == "WrongReadCache" ? DisplayCacheAssociation.Verified : DisplayCacheAssociation.Rejected, result.SourceCacheAssociation);
+            Assert.AreSame(presentation, result.Presentation); Assert.AreEqual(2, presentation.Summary.IndeterminateUnsupported);
+            Assert.AreEqual(6, sourceSpy.Calls + targetSpy.Calls); Assert.AreEqual(2, sourceSpy.ExecuteCalls + targetSpy.ExecuteCalls);
+            Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        // D4-T6A-R1: selected-ID normal reads, synthetic offline fixtures only.
+        [DataTestMethod, TestCategory("D4T6AType300Display")]
+        [DataRow("EqualNames"), DataRow("DifferentNames"), DataRow("SameIdDifferentNames")]
+        public void T6ANormalCanvasDisplayStaysSideLocalAndNeverMatchesOrChangesExports(string scenario)
+        {
+            var operation = new DataverseComponentDefinitionOperation();
+            var left = ComponentDisplayEvidenceTests.T6ACanvasRow(Guid.NewGuid(), "Source synthetic", "synthetic_internal");
+            var right = ComponentDisplayEvidenceTests.T6ACanvasRow(scenario == "SameIdDifferentNames" ? left.Id : Guid.NewGuid(),
+                scenario == "EqualNames" ? "Source synthetic" : "Target synthetic", "synthetic_internal");
+            right["ismanaged"] = true;
+            FakeOrganizationService sourceSpy, targetSpy;
+            var source = T6AReadCanvas(operation, DisplayEnvironmentSide.Source, new[] { left }, false, false, null, out sourceSpy);
+            var target = T6AReadCanvas(operation, DisplayEnvironmentSide.Target, new[] { right }, false, false, null, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target); var before = presentation.Rows.ToArray();
+            var csv = new MembershipCoverageCsvExporter().CreateCsv(presentation);
+            var signatures = source.Definitions.Membership.Components.Concat(target.Definitions.Membership.Components).Select(IdentitySignature).ToArray();
+            var completed = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            Assert.AreSame(presentation, completed.Presentation); CollectionAssert.AreEqual(before, completed.Presentation.Rows.ToArray());
+            Assert.AreEqual(2, completed.DisplayEvidence.Count); Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+            Assert.AreEqual(2, presentation.Summary.IndeterminateUnsupported);
+            var sourceDisplay = completed.DisplayEvidence.Single(d => d.SourceDisplayEvidence.HasLocalObservation).SourceDisplayEvidence;
+            var targetDisplay = completed.DisplayEvidence.Single(d => d.TargetDisplayEvidence.HasLocalObservation).TargetDisplayEvidence;
+            Assert.AreEqual((string)left["displayname"], sourceDisplay.FriendlyName.Value);
+            Assert.AreEqual((string)right["displayname"], targetDisplay.FriendlyName.Value);
+            Assert.AreEqual(left.Id, sourceDisplay.LocalObjectId); Assert.AreEqual(right.Id, targetDisplay.LocalObjectId);
+            Assert.AreEqual("synthetic_internal", sourceDisplay.InternalName.Value); Assert.AreEqual("synthetic_internal", targetDisplay.InternalName.Value);
+            foreach (var row in presentation.Rows)
+            {
+                var identity = row.SourceIdentity ?? row.TargetIdentity;
+                Assert.AreEqual(IdentityResolutionStatus.Unsupported, identity.Status); Assert.IsNull(identity.ComparisonKey);
+                Assert.AreEqual(MembershipPresence.Indeterminate, row.Presence); Assert.AreEqual("Unsupported", row.DefinitionStatus);
+            }
+            var grid = MembershipGridRow.CreateRows(presentation, completed);
+            StringAssert.Contains(grid.Single(r => r.SourceDisplayEvidence.HasLocalObservation).ComponentText, (string)left["displayname"]);
+            StringAssert.Contains(grid.Single(r => r.TargetDisplayEvidence.HasLocalObservation).ComponentText, (string)right["displayname"]);
+            CollectionAssert.AreEqual(signatures, source.Definitions.Membership.Components.Concat(target.Definitions.Membership.Components).Select(IdentitySignature).ToArray());
+            Assert.AreEqual(csv, new MembershipCoverageCsvExporter().CreateCsv(completed.Presentation));
+            Assert.AreEqual(3, sourceSpy.Calls); Assert.AreEqual(3, targetSpy.Calls);
+            Assert.AreEqual(1, sourceSpy.ExecuteCalls); Assert.AreEqual(1, targetSpy.ExecuteCalls);
+            Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("D4T6AType300Display"), DataRow(false), DataRow(true)]
+        public void T6AAccountingRetainsRepeatedBlankAndIndependentSideOccurrencesWithExplorerAndCsvParity(bool emptyTarget)
+        {
+            var operation = new DataverseComponentDefinitionOperation();
+            var rows = new[] { ComponentDisplayEvidenceTests.T6ACanvasRow(Guid.NewGuid(), "First synthetic", "first_internal"),
+                ComponentDisplayEvidenceTests.T6ACanvasRow(Guid.NewGuid(), null, "second_internal") };
+            rows[1].Attributes.Remove("displayname");
+            FakeOrganizationService sourceSpy, targetSpy;
+            var source = T6AReadCanvas(operation, DisplayEnvironmentSide.Source, rows, true, true, null, out sourceSpy);
+            var target = T6AReadCanvas(operation, DisplayEnvironmentSide.Target, emptyTarget ? new Entity[0] : new[] {
+                ComponentDisplayEvidenceTests.T6ACanvasRow(Guid.NewGuid(), "First synthetic", "first_internal") }, false, false, null, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target); var csv = new MembershipCoverageCsvExporter().CreateCsv(presentation);
+            var completed = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            int targetCount = emptyTarget ? 0 : 1;
+            Assert.AreEqual(4 + targetCount, presentation.Rows.Count); Assert.AreEqual(4 + targetCount, presentation.Summary.IndeterminateUnsupported);
+            Assert.AreEqual(0, presentation.Summary.PresentInBoth + presentation.Summary.SourceOnly + presentation.Summary.TargetOnly);
+            var sourceCoverage = new MembershipCoverageDiagnosticsBuilder().Build(source.Definitions.Membership);
+            var targetCoverage = new MembershipCoverageDiagnosticsBuilder().Build(target.Definitions.Membership);
+            Assert.AreEqual(4, sourceCoverage.TotalCandidates); Assert.AreEqual(targetCount, targetCoverage.TotalCandidates);
+            Assert.AreEqual(4, sourceCoverage.SemanticKinds.Single(b => b.SemanticKind == "unsupported:componenttype:300").AuditEvidence.Count);
+            var hierarchy = ComponentHierarchyProjector.Project(completed);
+            var explorer = SolutionObjectsExplorerProjector.Project(presentation, completed, hierarchy);
+            Assert.AreEqual(4 + targetCount, explorer.Rows.Count); Assert.AreEqual(4 + targetCount, explorer.Occurrences.Count);
+            Assert.AreEqual(4, explorer.SourceOccurrenceCount); Assert.AreEqual(targetCount, explorer.TargetOccurrenceCount);
+            Assert.AreEqual(4, explorer.Category("all").SourceOccurrences.Count); Assert.AreEqual(targetCount, explorer.Category("all").TargetOccurrences.Count);
+            Assert.AreEqual(2, completed.DisplayEvidence.Count(d => d.SourceDisplayEvidence.FriendlyName.Value == "First synthetic"));
+            Assert.AreEqual(1, completed.DisplayEvidence.Count(d => d.SourceDisplayEvidence.InternalName.Value == "second_internal"));
+            Assert.AreEqual(1, completed.DisplayEvidence.Count(d => d.SourceDisplayEvidence.HasLocalObservation &&
+                d.SourceDisplayEvidence.BackingCorrelationStatus == DisplayBackingCorrelationStatus.NotAttempted));
+            Assert.AreEqual(csv, new MembershipCoverageCsvExporter().CreateCsv(completed.Presentation));
+            var summary = source.Definitions.Membership.Components.SelectMany(i => i.DiagnosticEvidence).Single(e => e.StartsWith("Canvas App diagnostic summary:", StringComparison.Ordinal));
+            StringAssert.Contains(summary, "RawType300MembershipCount=4"); StringAssert.Contains(summary, "DistinctNonemptyObjectIdCount=2");
+            Assert.AreEqual(3, sourceSpy.Calls); Assert.AreEqual(emptyTarget ? 2 : 3, targetSpy.Calls);
+            Assert.AreEqual(2, sourceSpy.ExecuteCalls + targetSpy.ExecuteCalls); Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("D4T6AType300Display")]
+        [DataRow("Missing"), DataRow("Duplicate"), DataRow("Conflict"), DataRow("Fault"), DataRow("MoreRecords")]
+        public void T6ANormalCanvasFailuresKeepRawRowsAndNeverFabricateNames(string scenario)
+        {
+            var operation = new DataverseComponentDefinitionOperation(); FakeOrganizationService sourceSpy, targetSpy;
+            var source = T6AReadCanvas(operation, DisplayEnvironmentSide.Source,
+                new[] { ComponentDisplayEvidenceTests.T6ACanvasRow(Guid.NewGuid(), "Unverified synthetic", "unverified") }, false, false, scenario, out sourceSpy);
+            var target = T6AReadCanvas(operation, DisplayEnvironmentSide.Target, new Entity[0], false, false, null, out targetSpy);
+            var presentation = A1DefinitionPresentation(source, target);
+            var completed = SolutionComparerControl.CompleteMembershipComparison(presentation, operation, source, target, CancellationToken.None);
+            var local = completed.DisplayEvidence.Single().SourceDisplayEvidence;
+            Assert.IsNull(local.FriendlyName.Value); Assert.IsNull(local.InternalName.Value);
+            Assert.AreEqual(scenario == "Duplicate" ? DisplayAvailability.Ambiguous : DisplayAvailability.Unavailable, local.FriendlyName.Availability);
+            Assert.AreEqual(1, presentation.Rows.Count); Assert.AreEqual(1, presentation.Summary.IndeterminateUnsupported);
+            Assert.AreEqual(MembershipPresence.Indeterminate, presentation.Rows.Single().Presence);
+            Assert.AreEqual("Unsupported", presentation.Rows.Single().DefinitionStatus);
+            Assert.AreEqual(3, sourceSpy.Calls); Assert.AreEqual(2, targetSpy.Calls);
+            Assert.AreEqual(2, sourceSpy.ExecuteCalls + targetSpy.ExecuteCalls); Assert.AreEqual(0, sourceSpy.WriteCalls + targetSpy.WriteCalls);
+        }
+
+        private static DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult T6AReadCanvas(
+            DataverseComponentDefinitionOperation operation, DisplayEnvironmentSide side, Entity[] backingRows,
+            bool repeated, bool blankObjectId, string problem, out FakeOrganizationService service)
+        {
+            var solution = Solution();
+            var components = backingRows.Select(row => { var member = ComponentRow(solution, 300); member["objectid"] = row.Id; return member; }).ToList();
+            if (repeated) { var repeat = ComponentRow(solution, 300); repeat["objectid"] = backingRows[0].Id; components.Add(repeat); }
+            if (blankObjectId) { var blank = ComponentRow(solution, 300); blank.Attributes.Remove("objectid"); components.Add(blank); }
+            service = Service(solution, query =>
+            {
+                if (query.EntityName == "solution") return Rows(SolutionRow(solution));
+                if (query.EntityName == "solutioncomponent") return Rows(components.ToArray());
+                Assert.AreEqual("canvasapp", query.EntityName); Assert.IsTrue(backingRows.Length > 0);
+                Assert.IsFalse(query.ColumnSet.AllColumns);
+                CollectionAssert.AreEquivalent(new[] { "canvasappid", "name", "displayname", "uniquecanvasappid", "componentstate", "ismanaged", "canvasapptype" }, query.ColumnSet.Columns.ToArray());
+                var condition = query.Criteria.Conditions.Single(); Assert.AreEqual("canvasappid", condition.AttributeName);
+                Assert.AreEqual(Microsoft.Xrm.Sdk.Query.ConditionOperator.In, condition.Operator);
+                CollectionAssert.AreEquivalent(backingRows.Select(row => row.Id).Distinct().ToArray(), condition.Values.Cast<Guid>().ToArray());
+                Assert.IsTrue(condition.Values.Count <= 200);
+                if (problem == "Fault") throw new System.ServiceModel.FaultException("Synthetic diagnostic fault");
+                if (problem == "Missing") return Rows();
+                if (problem == "Duplicate") return Rows(backingRows[0], backingRows[0]);
+                if (problem == "Conflict") { var bad = ComponentDisplayEvidenceTests.T6ACanvasRow(backingRows[0].Id, "Conflict", "conflict"); bad["canvasappid"] = Guid.NewGuid(); return Rows(bad); }
+                var result = Rows(backingRows); if (problem == "MoreRecords") result.MoreRecords = true;
+                return result;
+            });
+            return operation.ReadAndResolveWithCache(service, "Synthetic " + side, solution.UniqueName, CancellationToken.None, null, null, side);
+        }
+        // End D4-T6A-R1 additions.
+
+        private static DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult A1ReadFamily(
+            DataverseComponentDefinitionOperation operation, SolutionIdentity solution, DisplayEnvironmentSide side, int rawType,
+            Entity[] backingRows, bool repeatedReference, out FakeOrganizationService service)
+        {
+            var components = backingRows.Select(row =>
+            { var member = ComponentRow(solution, rawType); member["objectid"] = row.Id; return member; }).ToList();
+            if (repeatedReference) { var repeat = ComponentRow(solution, rawType); repeat["objectid"] = backingRows[0].Id; components.Add(repeat); }
+            service = Service(solution, query =>
+            {
+                if (query.EntityName == "solution") return Rows(SolutionRow(solution));
+                if (query.EntityName == "solutioncomponent") return Rows(components.ToArray());
+                ComponentIdentityResolverTests.A1AssertNameQuery(rawType, query);
+                CollectionAssert.AreEquivalent(backingRows.Select(row => row.Id).ToArray(), query.Criteria.Conditions.Single().Values.Cast<Guid>().ToArray());
+                return Rows(backingRows);
+            });
+            return operation.ReadAndResolveWithCache(service, "Synthetic " + side, solution.UniqueName,
+                CancellationToken.None, null, null, side);
+        }
+
+        private static MembershipComparisonPresentation A1DefinitionPresentation(
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult source,
+            DataverseComponentDefinitionOperation.DefinitionReadWithCacheResult target)
+        {
+            var presentation = new MembershipResultPresenter().Create(Environment(source.Definitions.Membership), Environment(target.Definitions.Membership));
+            return new ComponentDefinitionResultPresenter().Apply(presentation, source.Definitions, target.Definitions);
+        }
+
         private static string IdentitySignature(ComponentIdentity i) => i.Record.SolutionComponentId + ":" + i.Record.ObjectId + ":" + i.Status + ":" + i.ComponentTypeKey + ":" + i.ComparisonKey;
         private static string DefinitionSignature(ComponentDefinition d) => IdentitySignature(d.Identity) + ":" + d.Status + ":" + string.Join(";", d.ComparableProperties.Select(p => p.Key + "=" + p.Value));
         private static string Summary(MembershipComparisonPresentation p) => MembershipResultsForm.FormatSummary(p.Summary);

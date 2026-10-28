@@ -568,6 +568,227 @@ namespace D365SolutionComparer.Tests
             Assert.IsNull(evidence.Owner.Value); Assert.IsNull(evidence.ObjectStatus.Value);
         }
 
+        [DataTestMethod, TestCategory("H2E2C3FA1")]
+        [DataRow(31, "Nonblank"), DataRow(36, "Nonblank")]
+        [DataRow(31, "Omitted"), DataRow(36, "Omitted")]
+        [DataRow(31, "Null"), DataRow(36, "Null")]
+        [DataRow(31, "Empty"), DataRow(36, "Empty")]
+        [DataRow(31, "Blank"), DataRow(36, "Blank")]
+        [DataRow(31, "Malformed"), DataRow(36, "Malformed")]
+        [DataRow(31, "Missing"), DataRow(36, "Missing")]
+        [DataRow(31, "Duplicate"), DataRow(36, "Duplicate")]
+        [DataRow(31, "Conflict"), DataRow(36, "Conflict")]
+        [DataRow(31, "FailedOrIncomplete"), DataRow(36, "FailedOrIncomplete")]
+        public void A1TypedNormalNamesPreserveFieldAvailabilityWithoutIdentity(int rawType, string state)
+        {
+            var identity = Identity(rawType, IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { identity }, new ComponentIdentity[0]);
+            string field = rawType == 31 ? "name" : "title", primary = rawType == 31 ? "reportid" : "templateid";
+            var row = A1NameRow(rawType, identity.Record.ObjectId.Value, "Synthetic friendly");
+            if (state == "Omitted") row.Attributes.Remove(field);
+            if (state == "Null") row[field] = null;
+            if (state == "Empty") row[field] = string.Empty;
+            if (state == "Blank") row[field] = "  ";
+            if (state == "Malformed") row[field] = new OptionSetValue(1);
+            if (state == "Conflict") row[primary] = Guid.NewGuid();
+            var returned = state == "Missing" ? new Entity[0] : state == "Duplicate" ? new[] { row, row } : new[] { row };
+            var cache = A1NameCache(presentation.Source.Snapshot, rawType, returned, state == "FailedOrIncomplete");
+            var evidence = ComponentDisplayEvidenceProjector.Project(presentation, cache, null)[0].SourceDisplayEvidence;
+            var expected = state == "Omitted" ? DisplayAvailability.AttributeOmitted :
+                state == "Duplicate" || state == "Conflict" ? DisplayAvailability.Ambiguous :
+                state == "Malformed" || state == "Missing" || state == "FailedOrIncomplete" ? DisplayAvailability.Unavailable : DisplayAvailability.Available;
+            Assert.AreEqual(expected, evidence.FriendlyName.Availability);
+            Assert.AreEqual(expected == DisplayAvailability.Available ? (string)row[field] : null, evidence.FriendlyName.Value);
+            Assert.AreEqual("NormalMembershipDiagnostic." + (rawType == 31 ? "report.name" : "template.title"),
+                evidence.FriendlyName.DisplayEvidenceSource);
+            Assert.AreEqual(state == "Missing" ? DisplayBackingCorrelationStatus.Missing :
+                state == "Duplicate" || state == "Conflict" ? DisplayBackingCorrelationStatus.Ambiguous :
+                state == "FailedOrIncomplete" ? DisplayBackingCorrelationStatus.Unavailable : DisplayBackingCorrelationStatus.Unique,
+                evidence.BackingCorrelationStatus);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, evidence.InternalName.Availability);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, identity.Status); Assert.IsNull(identity.ComparisonKey);
+            Assert.AreEqual(MembershipPresence.Indeterminate, presentation.Rows.Single().Presence);
+            Assert.AreEqual(1, presentation.Summary.IndeterminateUnsupported);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1"), DataRow(31), DataRow(36)]
+        public void A1NamesRejectCopiedSnapshotsRecordsAndOppositeSideEvenWithSameLocalIds(int rawType)
+        {
+            var identity = Identity(rawType, IdentityResolutionStatus.Unsupported);
+            var target = new ComponentIdentity(new SolutionComponentRecord(identity.Record.SolutionComponentId,
+                rawType, identity.Record.ObjectId), IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { identity }, new[] { target });
+            var cache = A1NameCache(presentation.Source.Snapshot, rawType,
+                new[] { A1NameRow(rawType, identity.Record.ObjectId.Value, "Source only label") });
+            var correct = ComponentDisplayEvidenceProjector.Project(presentation, cache, cache);
+            Assert.AreEqual("Source only label", correct.Single(x => x.SourceDisplayEvidence.HasLocalObservation).SourceDisplayEvidence.FriendlyName.Value);
+            Assert.IsTrue(correct.All(x => x.TargetDisplayEvidence.FriendlyName.Availability != DisplayAvailability.Available));
+            var copied = MembershipSnapshot.Complete(presentation.Source.Snapshot.Solution,
+                presentation.Source.Snapshot.Components, presentation.Source.Snapshot.CapturedAt);
+            DataverseComponentMetadataCache.NormalDisplayNameObservation observation;
+            Assert.IsFalse(cache.TryGetNormalDisplayName(copied, identity, out observation));
+            Assert.IsFalse(cache.TryGetNormalDisplayName(presentation.Source.Snapshot, target, out observation));
+            Assert.AreEqual(2, presentation.Rows.Count); Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1"), DataRow(31), DataRow(36)]
+        public void A1DiagnosticOrGenericEntityRowsCannotSupplyNormalFriendlyNames(int rawType)
+        {
+            var identity = new ComponentIdentity(Record(rawType), IdentityResolutionStatus.Unsupported,
+                diagnosticEvidence: new[] { "name='Synthetic unverified diagnostic'; title='Synthetic unverified title'" });
+            var cache = Cache(A1NameRow(rawType, identity.Record.ObjectId.Value, "Not a normal observation"));
+            var evidence = Project(identity, cache);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, evidence.FriendlyName.Availability);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, evidence.InternalName.Availability);
+            Assert.IsNull(evidence.FriendlyName.Value); Assert.IsNull(identity.ComparisonKey);
+        }
+
+        [TestMethod, TestCategory("H2E2C3FA1")]
+        public void A1NormalNameCopiesOnlyImmutableScalarAndCannotRebindReadOwner()
+        {
+            var identity = Identity(31, IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { identity }, new ComponentIdentity[0]);
+            var row = A1NameRow(31, identity.Record.ObjectId.Value, "Original synthetic name");
+            var cache = A1NameCache(presentation.Source.Snapshot, 31, new[] { row });
+            row["name"] = "Changed SDK payload";
+            var retained = ComponentDisplayEvidenceProjector.Project(presentation, cache, null)[0].SourceDisplayEvidence;
+            Assert.AreEqual("Original synthetic name", retained.FriendlyName.Value);
+            cache.BeginNormalDisplayNames(presentation.Source.Snapshot);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved,
+                ComponentDisplayEvidenceProjector.Project(presentation, cache, null)[0].SourceDisplayEvidence.FriendlyName.Availability);
+            Assert.AreEqual("Original synthetic name", retained.FriendlyName.Value);
+        }
+
+        internal static Entity A1NameRow(int rawType, Guid id, string name, bool managed = false, Guid? signature = null)
+        {
+            var row = new Entity(rawType == 31 ? "report" : "template", id)
+            { [rawType == 31 ? "reportid" : "templateid"] = id,
+              [rawType == 31 ? "name" : "title"] = name,
+              [rawType == 31 ? "reportidunique" : "templateidunique"] = Guid.NewGuid(),
+              ["componentstate"] = new OptionSetValue(0), ["ismanaged"] = managed };
+            if (rawType == 31)
+            {
+                row["filename"] = "synthetic.rdl"; row["reporttypecode"] = new OptionSetValue(1);
+                if (signature.HasValue) { row["signatureid"] = signature.Value; row["signaturelcid"] = 1033; }
+            }
+            else { row["templatetypecode"] = "contact"; row["languagecode"] = 1033; row["ispersonal"] = false; }
+            return row;
+        }
+
+        internal static DataverseComponentMetadataCache A1NameCache(MembershipSnapshot owner, int rawType,
+            Entity[] returned, bool failedOrIncomplete = false)
+        {
+            var ids = owner.Components.Where(i => i.Record.ComponentType == rawType && i.Record.ObjectId.HasValue &&
+                i.Record.ObjectId.Value != Guid.Empty).Select(i => i.Record.ObjectId.Value).Distinct().ToList();
+            var rows = ids.ToDictionary(id => id, id => returned.Where(row => row.Id == id).ToList());
+            var failures = new Dictionary<Guid, string>();
+            if (failedOrIncomplete) foreach (var id in ids) failures.Add(id, "Synthetic failure/incomplete; not parsed");
+            var retrieval = new DiagnosticQueryResult(ids, rows, failures,
+                ids.ToDictionary(id => id, id => new List<Entity>()), returned.Length, !failedOrIncomplete);
+            var cache = new DataverseComponentMetadataCache(); cache.BeginNormalDisplayNames(owner);
+            cache.ObserveNormalDisplayNames(rawType, retrieval); cache.SealNormalDisplayNames(owner); return cache;
+        }
+
+        // D4-T6A-R1: synthetic side-local Canvas App display evidence only.
+        [DataTestMethod, TestCategory("D4T6AType300Display")]
+        [DataRow("Nonblank"), DataRow("Omitted"), DataRow("Null"), DataRow("Empty"), DataRow("Blank")]
+        [DataRow("Malformed"), DataRow("Missing"), DataRow("Duplicate"), DataRow("Conflict")]
+        [DataRow("WrongTable"), DataRow("FailedOrIncomplete")]
+        public void T6ACanvasDisplayCopiesOnlyVerifiedLocalScalarsWithExactAvailability(string state)
+        {
+            var identity = Identity(300, IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { identity }, new ComponentIdentity[0]);
+            var row = T6ACanvasRow(identity.Record.ObjectId.Value, "Synthetic display", "synthetic_internal");
+            if (state == "Omitted") { row.Attributes.Remove("name"); row.Attributes.Remove("displayname"); }
+            if (state == "Null") { row["name"] = null; row["displayname"] = null; }
+            if (state == "Empty") { row["name"] = ""; row["displayname"] = ""; }
+            if (state == "Blank") { row["name"] = "  "; row["displayname"] = "  "; }
+            if (state == "Malformed") { row["name"] = new OptionSetValue(1); row["displayname"] = new OptionSetValue(1); }
+            if (state == "Conflict") row["canvasappid"] = Guid.NewGuid();
+            if (state == "WrongTable") row.LogicalName = "appmodule";
+            var returned = state == "Missing" ? new Entity[0] : state == "Duplicate" ? new[] { row, row } : new[] { row };
+            var cache = T6ACanvasCache(presentation.Source.Snapshot, returned, state == "FailedOrIncomplete");
+            var display = ComponentDisplayEvidenceProjector.Project(presentation, cache, null).Single().SourceDisplayEvidence;
+            var expected = state == "Omitted" ? DisplayAvailability.AttributeOmitted :
+                state == "Duplicate" || state == "Conflict" || state == "WrongTable" ? DisplayAvailability.Ambiguous :
+                state == "Malformed" || state == "Missing" || state == "FailedOrIncomplete" ? DisplayAvailability.Unavailable : DisplayAvailability.Available;
+            Assert.AreEqual(expected, display.FriendlyName.Availability); Assert.AreEqual(expected, display.InternalName.Availability);
+            Assert.AreEqual(expected == DisplayAvailability.Available ? (string)row["displayname"] : null, display.FriendlyName.Value);
+            Assert.AreEqual(expected == DisplayAvailability.Available ? (string)row["name"] : null, display.InternalName.Value);
+            Assert.AreEqual("NormalMembershipDiagnostic.canvasapp.displayname", display.FriendlyName.DisplayEvidenceSource);
+            Assert.AreEqual("NormalMembershipDiagnostic.canvasapp.name", display.InternalName.DisplayEvidenceSource);
+            Assert.AreEqual(state == "Missing" ? DisplayBackingCorrelationStatus.Missing :
+                state == "Duplicate" || state == "Conflict" || state == "WrongTable" ? DisplayBackingCorrelationStatus.Ambiguous :
+                state == "FailedOrIncomplete" ? DisplayBackingCorrelationStatus.Unavailable : DisplayBackingCorrelationStatus.Unique,
+                display.BackingCorrelationStatus);
+            AssertObjectNotRetrieved(display.ObjectMetadata);
+            Assert.AreEqual(IdentityResolutionStatus.Unsupported, identity.Status); Assert.IsNull(identity.ComparisonKey);
+            Assert.AreEqual(MembershipPresence.Indeterminate, presentation.Rows.Single().Presence);
+            Assert.AreEqual(1, presentation.Summary.IndeterminateUnsupported);
+        }
+
+        [TestMethod, TestCategory("D4T6AType300Display")]
+        public void T6ACanvasFieldsAreIndependentImmutableAndCannotImportUnrequestedKindOrSubtype()
+        {
+            var identity = Identity(300, IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { identity }, new ComponentIdentity[0]);
+            var row = T6ACanvasRow(identity.Record.ObjectId.Value, null, "synthetic_internal");
+            row.Attributes.Remove("displayname");
+            // Extra synthetic SDK values are not part of the approved normal display contract.
+            row["canvasapptype"] = new OptionSetValue(1); row["canvasappsubtype"] = "invented";
+            var cache = T6ACanvasCache(presentation.Source.Snapshot, new[] { row });
+            row["name"] = "Mutated SDK payload";
+            var side = ComponentDisplayEvidenceProjector.Project(presentation, cache, null).Single().SourceDisplayEvidence;
+            Assert.AreEqual(DisplayAvailability.AttributeOmitted, side.FriendlyName.Availability);
+            Assert.AreEqual("synthetic_internal", side.InternalName.Value);
+            AssertObjectNotRetrieved(side.ObjectMetadata);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, side.ParentDisplayContext.Availability);
+            Assert.AreEqual("Canvas App family", side.ComponentCategory.Value);
+            Assert.IsNull(identity.ComparisonKey);
+            var completed = new CompletedMembershipComparison(presentation, ComponentDisplayEvidenceProjector.Project(presentation, cache, null), DisplayProjectionOutcome.Completed);
+            StringAssert.Contains(D365SolutionComparer.Models.Presentation.MembershipGridRow.CreateRows(presentation, completed).Single().ComponentText, "synthetic_internal");
+            cache.BeginNormalDisplayNames(presentation.Source.Snapshot);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved,
+                ComponentDisplayEvidenceProjector.Project(presentation, cache, null).Single().SourceDisplayEvidence.InternalName.Availability);
+        }
+
+        [TestMethod, TestCategory("D4T6AType300Display")]
+        public void T6ACanvasDisplayRejectsWrongSnapshotOppositeSideAndGenericCacheEvenForSameLocalIds()
+        {
+            var source = Identity(300, IdentityResolutionStatus.Unsupported);
+            var target = new ComponentIdentity(new SolutionComponentRecord(source.Record.SolutionComponentId, 300, source.Record.ObjectId), IdentityResolutionStatus.Unsupported);
+            var presentation = Present(new[] { source }, new[] { target });
+            var row = T6ACanvasRow(source.Record.ObjectId.Value, "Source synthetic", "source_internal");
+            var cache = T6ACanvasCache(presentation.Source.Snapshot, new[] { row });
+            var projected = ComponentDisplayEvidenceProjector.Project(presentation, cache, cache);
+            Assert.AreEqual("Source synthetic", projected.Single(d => d.SourceDisplayEvidence.HasLocalObservation).SourceDisplayEvidence.FriendlyName.Value);
+            Assert.IsTrue(projected.All(d => d.TargetDisplayEvidence.FriendlyName.Availability != DisplayAvailability.Available));
+            DataverseComponentMetadataCache.NormalDisplayNameObservation observation;
+            var copy = MembershipSnapshot.Complete(presentation.Source.Snapshot.Solution, presentation.Source.Snapshot.Components, presentation.Source.Snapshot.CapturedAt);
+            Assert.IsFalse(cache.TryGetNormalDisplayName(copy, source, out observation));
+            Assert.IsFalse(cache.TryGetNormalDisplayName(presentation.Source.Snapshot, target, out observation));
+            var generic = Cache(row);
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, ComponentDisplayEvidenceProjector.Project(presentation, generic, null)
+                .Single(d => d.SourceDisplayEvidence.HasLocalObservation).SourceDisplayEvidence.InternalName.Availability);
+            Assert.AreEqual(2, presentation.Rows.Count); Assert.AreEqual(0, presentation.Summary.PresentInBoth);
+        }
+
+        internal static Entity T6ACanvasRow(Guid id, string display, string name) => new Entity("canvasapp", id)
+        { ["canvasappid"] = id, ["displayname"] = display, ["name"] = name,
+          ["uniquecanvasappid"] = "synthetic_local_installation", ["componentstate"] = new OptionSetValue(0), ["ismanaged"] = false };
+
+        private static DataverseComponentMetadataCache T6ACanvasCache(MembershipSnapshot owner, Entity[] returned, bool failed = false)
+        {
+            var ids = owner.Components.Select(i => i.Record.ObjectId.Value).Distinct().ToList();
+            var failures = new Dictionary<Guid, string>();
+            if (failed) foreach (var id in ids) failures.Add(id, "Synthetic fault or incomplete batch; not parsed");
+            var retrieval = new DiagnosticQueryResult(ids, ids.ToDictionary(id => id, id => returned.Where(r => r.Id == id).ToList()),
+                failures, ids.ToDictionary(id => id, id => new List<Entity>()), returned.Length, !failed);
+            var cache = new DataverseComponentMetadataCache(); cache.BeginNormalDisplayNames(owner);
+            cache.ObserveCanvasAppDisplayNames(retrieval); cache.SealNormalDisplayNames(owner); return cache;
+        }
+        // End D4-T6A-R1 additions.
+
         public TestContext TestContext { get; set; }
 
         private static EntityMetadata Parent(AttributeMetadata[] attributes)

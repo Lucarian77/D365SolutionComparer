@@ -27,6 +27,7 @@ namespace D365SolutionComparer.Models.Membership
         /// <summary>System Form semantic family.</summary>
         public const string SystemForm = "systemform";
         /// <summary>Plug-in Assembly semantic family.</summary>
+        public const string MetadataForArchival = "metadataforarchival";
         public const string PluginAssembly = "pluginassembly";
         /// <summary>SDK Message Processing Step semantic family.</summary>
         public const string SdkMessageProcessingStep = "sdkmessageprocessingstep";
@@ -50,7 +51,7 @@ namespace D365SolutionComparer.Models.Membership
             44, 45, 46, 47, 48, 49, 50, 52, 53, 55, 59, 60, 61, 62, 63, 64, 65, 66, 68,
             70, 71, 80, 90, 91, 92, 93, 95, 150, 151, 152, 153, 154, 155, 161, 162, 165, 166,
             201, 202, 203, 204, 205, 206, 207, 208, 210, 300, 371, 372, 380, 381,
-            400, 401, 402, 430, 431, 432
+            400, 401, 402, 430, 431, 432, 10139
         };
 
         internal static bool IsKnownBuiltInType(int componentType) => KnownBuiltInTypes.Contains(componentType);
@@ -83,6 +84,7 @@ namespace D365SolutionComparer.Models.Membership
                 case 61: return WebResource;
                 case 62: return SiteMap;
                 case 80: return AppModule;
+                case 10139: return MetadataForArchival;
                 case 91: return PluginAssembly;
                 case 92: return SdkMessageProcessingStep;
                 case 380: return EnvironmentVariableDefinition;

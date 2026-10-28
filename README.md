@@ -115,7 +115,7 @@ NuGet package:
 
 ## Current Version
 
-`1.2026.1.3`
+`1.2026.2.0`
 
 ## Author
 

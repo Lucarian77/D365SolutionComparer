@@ -2,7 +2,7 @@
 <package>
 	<metadata>
 		<id>D365SolutionComparer</id>
-		<version>1.2026.1.3</version>
+		<version>1.2026.2.0</version>
 		<title>D365 Solution Comparer</title>
 		<authors>Adrian Lucaci</authors>
 		<owners>Adrian Lucaci</owners>
@@ -18,7 +18,12 @@
 		<summary>Compare Microsoft Dynamics 365 and Dataverse solutions across source and target environments.</summary>
 
 		<releaseNotes>
-			1.2026.1.3
+			1.2026.2.0
+			- Includes the accepted component coverage and presentation improvements, including MetadataForArchival
+			- Simplifies the main summary with a collapsed detailed breakdown and accessible status-colour help
+			- Labels overlapping package indicators without changing comparison or export semantics
+
+			Previous release: 1.2026.1.3
 			- Added XLSX export as the default workbook export format
 			- Kept Excel XML Spreadsheet 2003 export as a readable Excel-friendly fallback
 			- Kept CSV export as a plain-text export option

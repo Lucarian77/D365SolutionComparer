@@ -19,6 +19,7 @@ using McTools.Xrm.Connection;
 using D365SolutionComparer.Infrastructure;
 using D365SolutionComparer.Models.ComponentDetails;
 using D365SolutionComparer.Models.Membership;
+using D365SolutionComparer.Models.Presentation;
 using D365SolutionComparer.Services;
 using D365SolutionComparer.Services.ComponentDetails;
 using D365SolutionComparer.Services.Membership;
@@ -60,6 +61,17 @@ namespace D365SolutionComparer
         private Label lblStatusMessage;
         private Label lblSummary;
         private Label lblLegend;
+        private LinkLabel detailedBreakdown;
+        private ToolTip summaryToolTip;
+        private readonly MainComparisonSummaryPresentation summaryDisclosure = new MainComparisonSummaryPresentation();
+        private Label lblSourceState;
+        private Label lblTargetState;
+        private Label lblDashboardScope;
+        private Label[] dashboardValues;
+        private Panel dashboardPanel;
+        private Panel dashboardCards;
+        private bool applyingDashboardLayout;
+        private bool applyingToolbarLayout;
 
         private ConnectionDetail targetConnectionDetail;
         private OrgService targetService;
@@ -83,6 +95,8 @@ namespace D365SolutionComparer
         private List<ModelSolutionInfo> sourceSolutions = new List<ModelSolutionInfo>();
         private List<ModelSolutionInfo> targetSolutions = new List<ModelSolutionInfo>();
         private List<CompareResult> comparisonResults = new List<CompareResult>();
+        private readonly Dictionary<string, int> savedComparisonColumnWidths = new Dictionary<string, int>(StringComparer.Ordinal);
+        private bool applyingComparisonColumnLayout;
 
         public SolutionComparerControl()
         {
@@ -95,25 +109,27 @@ namespace D365SolutionComparer
         private void BuildUi()
         {
             Controls.Clear();
+            Font = MainPresentationFont(9F);
 
             lblTitle = new Label
             {
                 Text = "D365 Solution Comparer v" + GetProductVersion(),
                 Dock = DockStyle.Top,
-                Height = 40,
-                Font = new Font("Segoe UI", 12F, FontStyle.Bold),
-                Padding = new Padding(10, 8, 0, 0),
-                BackColor = Color.White
+                Height = MainUiPixels(42),
+                Font = MainPresentationFont(13F, FontStyle.Bold),
+                Padding = new Padding(12, 8, 0, 0),
+                ForeColor = Color.FromArgb(15, 23, 42),
+                BackColor = Color.FromArgb(241, 245, 249)
             };
 
             topPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Top,
                 Height = 45,
-                Padding = new Padding(10, 5, 10, 5),
+                Padding = new Padding(10, 4, 10, 4),
                 BackColor = Color.White,
-                AutoScroll = true,
-                WrapContents = false
+                AutoScroll = false,
+                WrapContents = true
             };
 
             btnLoadSource = new Button { Text = "Load Source", Width = 110, Height = 30 };
@@ -170,23 +186,11 @@ namespace D365SolutionComparer
             topPanel.Controls.Add(chkChangedOnly);
             topPanel.Controls.Add(chkPackageTypeMismatchOnly);
 
-            lblSourceEnv = new Label
-            {
-                Text = "Source: Current XrmToolBox connection",
-                Dock = DockStyle.Top,
-                Height = 24,
-                Padding = new Padding(10, 0, 0, 0),
-                BackColor = Color.White
-            };
-
-            lblTargetEnv = new Label
-            {
-                Text = "Target: Not connected",
-                Dock = DockStyle.Top,
-                Height = 24,
-                Padding = new Padding(10, 0, 0, 0),
-                BackColor = Color.White
-            };
+            StyleMainToolbar();
+            topPanel.SizeChanged += (sender, args) => ApplyResponsiveTopPanelLayout();
+            btnFilter.TextChanged += (sender, args) => ApplyResponsiveTopPanelLayout();
+            var environmentPanels = BuildEnvironmentPanels();
+            var dashboard = BuildComparisonDashboard();
 
             lblStatusMessage = new Label
             {
@@ -203,17 +207,21 @@ namespace D365SolutionComparer
             {
                 Text = "Summary: No comparison results yet",
                 Dock = DockStyle.Top,
-                Height = 44,
+                Visible = false,
+                Height = 0,
                 Padding = new Padding(10, 4, 10, 4),
                 BackColor = Color.White,
-                AutoEllipsis = false
+                AutoEllipsis = false,
+                Font = MainPresentationFont(9F),
+                ForeColor = Color.FromArgb(51, 65, 85)
             };
 
             lblLegend = new Label
             {
-                Text = "Legend: Match | Version Mismatch | Publisher/Display Name Mismatch | Package Type Mismatch | Multiple Differences | Missing",
+                Text = MainComparisonSummaryPresentation.StatusHelp,
                 Dock = DockStyle.Top,
-                Height = 32,
+                Visible = false,
+                Height = 0,
                 Padding = new Padding(10, 0, 0, 0),
                 BackColor = Color.White,
                 ForeColor = Color.DimGray,
@@ -227,12 +235,17 @@ namespace D365SolutionComparer
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
                 AutoGenerateColumns = true,
+                AllowUserToResizeColumns = true,
+                ScrollBars = ScrollBars.Both,
+                ShowCellToolTips = true,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 BackgroundColor = Color.White,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 MultiSelect = false
             };
 
+            ConfigureComparisonGridAppearance();
+            dgvResults.ColumnWidthChanged += DgvResults_ColumnWidthChanged;
             dgvResults.CellFormatting += DgvResults_CellFormatting;
             dgvResults.CellDoubleClick += DgvResults_CellDoubleClick;
             dgvResults.CellToolTipTextNeeded += DgvResults_CellToolTipTextNeeded;
@@ -242,16 +255,241 @@ namespace D365SolutionComparer
             Controls.Add(dgvResults);
             Controls.Add(lblLegend);
             Controls.Add(lblSummary);
+            Controls.Add(dashboard);
             Controls.Add(lblStatusMessage);
-            Controls.Add(lblTargetEnv);
-            Controls.Add(lblSourceEnv);
+            Controls.Add(environmentPanels);
             Controls.Add(topPanel);
             Controls.Add(lblTitle);
 
+            RefreshEnvironmentLabels();
+            RefreshComparisonDashboard();
             ApplySavedFilterState();
             ApplyResponsiveTopPanelLayout();
             UpdateActionButtonStates();
             UpdateLayoutHeights();
+        }
+
+        private Font MainPresentationFont(float size, FontStyle style = FontStyle.Regular)
+        {
+            var font = new Font("Segoe UI", size, style, GraphicsUnit.Point);
+            Disposed += (sender, args) => font.Dispose();
+            return font;
+        }
+
+        private int MainUiPixels(int logical) => (int)Math.Ceiling(logical * Math.Max(96, DeviceDpi) / 96d);
+
+        private Panel CreateEnvironmentPanel(string role, Label name, Label state)
+        {
+            var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(248, 250, 252),
+                Margin = new Padding(4, 0, 4, 0), Padding = new Padding(12, 5, 12, 5) };
+            var heading = new Label { Text = role, Dock = DockStyle.Top, Height = MainUiPixels(18),
+                Font = MainPresentationFont(8F, FontStyle.Bold), ForeColor = Color.FromArgb(71, 85, 105) };
+            name.Dock = DockStyle.Top; name.Height = MainUiPixels(22);
+            name.Font = MainPresentationFont(10F, FontStyle.Bold); name.AutoEllipsis = true;
+            name.ForeColor = Color.FromArgb(15, 23, 42);
+            state.Dock = DockStyle.Fill; state.Font = MainPresentationFont(9F);
+            state.ForeColor = Color.FromArgb(71, 85, 105); state.AutoEllipsis = true;
+            panel.Controls.Add(state); panel.Controls.Add(name); panel.Controls.Add(heading);
+            return panel;
+        }
+
+        private TableLayoutPanel BuildEnvironmentPanels()
+        {
+            var panels = new TableLayoutPanel { Dock = DockStyle.Top, Height = MainUiPixels(76), ColumnCount = 2,
+                RowCount = 1, Padding = new Padding(6, 3, 6, 3), BackColor = Color.White, Margin = Padding.Empty };
+            panels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            panels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            panels.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            lblSourceEnv = new Label(); lblTargetEnv = new Label();
+            lblSourceState = new Label(); lblTargetState = new Label();
+            panels.Controls.Add(CreateEnvironmentPanel("Source", lblSourceEnv, lblSourceState), 0, 0);
+            panels.Controls.Add(CreateEnvironmentPanel("Target", lblTargetEnv, lblTargetState), 1, 0);
+            return panels;
+        }
+
+        private Panel BuildComparisonDashboard()
+        {
+            dashboardPanel = new Panel { Dock = DockStyle.Top, Height = MainUiPixels(62),
+                Padding = new Padding(10, 0, 10, 4), BackColor = Color.White, Margin = Padding.Empty };
+            lblDashboardScope = new Label { Dock = DockStyle.Top, Visible = false, Height = 0, TextAlign = ContentAlignment.MiddleLeft,
+                Font = MainPresentationFont(8F), ForeColor = Color.FromArgb(71, 85, 105), Margin = Padding.Empty };
+            dashboardCards = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = Padding.Empty };
+            dashboardValues = new Label[4];
+            for (int i = 0; i < dashboardValues.Length; i++)
+            {
+                dashboardValues[i] = new Label { TextAlign = ContentAlignment.MiddleLeft,
+                    Padding = new Padding(10, 0, 4, 0), Margin = Padding.Empty,
+                    BackColor = Color.FromArgb(248, 250, 252), ForeColor = Color.FromArgb(51, 65, 85),
+                    Font = MainPresentationFont(10F, FontStyle.Bold) };
+                dashboardCards.Controls.Add(dashboardValues[i]);
+            }
+            summaryToolTip = new ToolTip();
+            Disposed += (sender, args) => summaryToolTip.Dispose();
+            detailedBreakdown = new LinkLabel { Dock = DockStyle.Bottom, Height = MainUiPixels(22),
+                Text = summaryDisclosure.Caption, Font = MainPresentationFont(9F),
+                LinkColor = Color.FromArgb(29, 78, 216), ActiveLinkColor = Color.FromArgb(30, 64, 175),
+                LinkBehavior = LinkBehavior.HoverUnderline, TabStop = true,
+                AccessibleName = "Detailed breakdown", TextAlign = ContentAlignment.MiddleLeft };
+            detailedBreakdown.LinkClicked += (sender, args) =>
+            {
+                summaryDisclosure.Toggle(); detailedBreakdown.Text = summaryDisclosure.Caption;
+                detailedBreakdown.AccessibleDescription = summaryDisclosure.Expanded ? "Expanded; activate to collapse" : "Collapsed; activate to expand";
+                UpdateLayoutHeights();
+            };
+            detailedBreakdown.AccessibleDescription = "Collapsed; activate to expand";
+            dashboardPanel.Controls.Add(dashboardCards); dashboardPanel.Controls.Add(detailedBreakdown);
+            dashboardPanel.Controls.Add(lblDashboardScope);
+            dashboardPanel.SizeChanged += (sender, args) => ApplyMainDashboardLayout();
+            lblDashboardScope.TextChanged += (sender, args) => ApplyMainDashboardLayout();
+            foreach (var value in dashboardValues) value.TextChanged += (sender, args) => ApplyMainDashboardLayout();
+            return dashboardPanel;
+        }
+
+        internal static Rectangle[] MainDashboardCardBounds(int availableWidth, int dpi, int cardHeight)
+        {
+            double scale = Math.Max(96, dpi) / 96d;
+            int available = Math.Max(1, availableWidth), width = Math.Min(available, (int)Math.Ceiling(176 * scale));
+            int gap = (int)Math.Ceiling(12 * scale), height = Math.Max(1, cardHeight), x = 0, y = 0;
+            var bounds = new Rectangle[4];
+            for (int i = 0; i < bounds.Length; i++)
+            {
+                if (x > 0 && x + width > available) { x = 0; y += height + gap; }
+                bounds[i] = new Rectangle(x, y, width, height); x += width + gap;
+            }
+            return bounds;
+        }
+
+        private void ApplyMainDashboardLayout()
+        {
+            if (dashboardPanel == null || dashboardCards == null || dashboardValues == null || applyingDashboardLayout) return;
+            applyingDashboardLayout = true;
+            dashboardPanel.SuspendLayout();
+            try
+            {
+                dashboardPanel.Padding = new Padding(MainUiPixels(10), 0, MainUiPixels(10), MainUiPixels(4));
+                int available = Math.Max(1, dashboardPanel.ClientSize.Width - dashboardPanel.Padding.Horizontal);
+                int width = MainDashboardCardBounds(available, DeviceDpi, 1)[0].Width;
+                int cardHeight = MainUiPixels(40);
+                foreach (var value in dashboardValues)
+                {
+                    value.Padding = new Padding(MainUiPixels(10), 0, MainUiPixels(4), 0);
+                    int measured = TextRenderer.MeasureText(value.Text, value.Font,
+                        new Size(Math.Max(1, width - value.Padding.Horizontal), int.MaxValue), TextFormatFlags.WordBreak).Height;
+                    cardHeight = Math.Max(cardHeight, measured + MainUiPixels(12));
+                }
+                var bounds = MainDashboardCardBounds(available, DeviceDpi, cardHeight);
+                for (int i = 0; i < dashboardValues.Length; i++) dashboardValues[i].Bounds = bounds[i];
+                lblDashboardScope.Height = 0;
+                detailedBreakdown.Height = Math.Max(MainUiPixels(22), TextRenderer.MeasureText(detailedBreakdown.Text,
+                    detailedBreakdown.Font, new Size(available, int.MaxValue), TextFormatFlags.WordBreak).Height + MainUiPixels(4));
+                dashboardPanel.Height = detailedBreakdown.Height + bounds.Max(b => b.Bottom) + dashboardPanel.Padding.Vertical;
+            }
+            finally { dashboardPanel.ResumeLayout(true); applyingDashboardLayout = false; }
+        }
+
+        private void StyleMainToolbar()
+        {
+            int index = 0;
+            foreach (Control control in topPanel.Controls)
+            {
+                control.Font = MainPresentationFont(9F); control.TabIndex = index++;
+                control.Margin = new Padding(0, 3, 6, 3);
+                control.ForeColor = Color.FromArgb(51, 65, 85);
+                if (control is Button button)
+                {
+                    button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderSize = 1;
+                    button.FlatAppearance.BorderColor = Color.FromArgb(203, 213, 225);
+                    button.UseVisualStyleBackColor = false; button.BackColor = Color.White;
+                }
+            }
+            btnCompare.EnabledChanged += (sender, args) => ApplyCompareButtonPresentation();
+            btnCompare.GotFocus += (sender, args) => ApplyCompareButtonPresentation();
+            btnCompare.LostFocus += (sender, args) => ApplyCompareButtonPresentation();
+            ApplyCompareButtonPresentation();
+        }
+
+        // WinForms retains normal mouse/keyboard press and focus tracking; only its palette changes.
+        internal static Color[] MainCompareButtonColors(bool enabled, bool focused)
+        {
+            if (!enabled) return new[] { Color.FromArgb(241, 245, 249), Color.FromArgb(71, 85, 105),
+                Color.FromArgb(241, 245, 249), Color.FromArgb(241, 245, 249), Color.FromArgb(203, 213, 225) };
+            return new[] { Color.FromArgb(29, 78, 216), Color.White, Color.FromArgb(30, 64, 175),
+                Color.FromArgb(30, 58, 138), focused ? Color.FromArgb(15, 23, 42) : Color.FromArgb(29, 78, 216) };
+        }
+
+        private void ApplyCompareButtonPresentation()
+        {
+            if (btnCompare == null) return;
+            var colors = MainCompareButtonColors(btnCompare.Enabled, btnCompare.Focused);
+            btnCompare.BackColor = colors[0]; btnCompare.ForeColor = colors[1];
+            btnCompare.FlatAppearance.MouseOverBackColor = colors[2];
+            btnCompare.FlatAppearance.MouseDownBackColor = colors[3];
+            btnCompare.FlatAppearance.BorderColor = colors[4];
+        }
+
+        internal static int MainToolbarAvailableWidth(int clientWidth, int horizontalPadding) => Math.Max(1, clientWidth - horizontalPadding);
+
+        // Presentation only: loaded counts come from the existing side-owned snapshots.
+        internal static string[] MainEnvironmentPresentation(string name, bool connected, bool loaded, int count)
+        {
+            string displayName = string.IsNullOrWhiteSpace(name) ? "Environment name unavailable" : name;
+            string state = connected ? "Connected" : "Not connected";
+            string solutions = loaded ? Math.Max(0, count) + " loaded solutions" : "Solutions not loaded";
+            return new[] { displayName, state + "  |  " + solutions };
+        }
+
+        // Margins are included in item sizes, matching FlowLayoutPanel's left-to-right wrapping.
+        internal static int MainToolbarWrappedHeight(int availableWidth, IReadOnlyList<Size> items, int verticalPadding)
+        {
+            int available = Math.Max(1, availableWidth), used = 0, rowHeight = 0, height = verticalPadding;
+            foreach (var item in items)
+            {
+                if (used > 0 && used + item.Width > available) { height += rowHeight; used = 0; rowHeight = 0; }
+                used += item.Width; rowHeight = Math.Max(rowHeight, item.Height);
+            }
+            return height + rowHeight;
+        }
+
+        // Total, Match, Different, Missing, unavailable. Never infer status from overlapping flags.
+        internal static int[] MainComparisonDashboardCounts(IEnumerable<CompareResult> results)
+        {
+            var counts = new int[5];
+            foreach (var result in results ?? Enumerable.Empty<CompareResult>())
+            {
+                counts[0]++;
+                string status = result?.Status;
+                if (string.Equals(status, "Match", StringComparison.OrdinalIgnoreCase)) counts[1]++;
+                else if (string.Equals(status, "Missing in Source", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Missing in Target", StringComparison.OrdinalIgnoreCase)) counts[3]++;
+                else if (string.Equals(status, "Version Mismatch", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Publisher Mismatch", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Display Name Mismatch", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Managed/Unmanaged Mismatch", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Package Type Mismatch", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(status, "Multiple Differences", StringComparison.OrdinalIgnoreCase)) counts[2]++;
+                else counts[4]++;
+            }
+            return counts;
+        }
+
+        private void RefreshComparisonDashboard()
+        {
+            if (dashboardValues == null) return;
+            var counts = MainComparisonDashboardCounts(comparisonResults);
+            string[] titles = { "Total", "Match", "Different", "Missing" };
+            for (int i = 0; i < titles.Length; i++)
+                dashboardValues[i].Text = titles[i] + "   " + (counts[4] == 0 ? counts[i].ToString() : "Unavailable");
+            lblDashboardScope.Text = counts[4] == 0
+                ? MainComparisonSummaryPresentation.ScopeText(counts[0], GetVisibleComparisonResultCount())
+                : "Summary unavailable: an Overall Status is not established. Comparison results are unchanged.";
+            string help = lblDashboardScope.Text + Environment.NewLine + MainComparisonSummaryPresentation.StatusHelp;
+            detailedBreakdown.AccessibleDescription = (summaryDisclosure.Expanded ? "Expanded. " : "Collapsed. ") + lblDashboardScope.Text;
+            summaryToolTip.SetToolTip(detailedBreakdown, help);
+            foreach (var value in dashboardValues)
+            {
+                value.AccessibleDescription = lblDashboardScope.Text;
+                summaryToolTip.SetToolTip(value, help);
+            }
         }
 
         private void BuildFilterMenu()
@@ -366,41 +604,41 @@ namespace D365SolutionComparer
 
         private void ApplyResponsiveTopPanelLayout()
         {
-            if (topPanel == null)
+            if (topPanel == null || applyingToolbarLayout) return;
+            applyingToolbarLayout = true;
+            topPanel.SuspendLayout();
+            try
             {
-                return;
+                topPanel.Padding = new Padding(MainUiPixels(10), MainUiPixels(4), MainUiPixels(10), MainUiPixels(4));
+                // The docked toolbar can be narrower than the parent. Re-measure after its own SizeChanged.
+                int available = MainToolbarAvailableWidth(topPanel.ClientSize.Width, topPanel.Padding.Horizontal);
+                foreach (Control control in topPanel.Controls)
+                {
+                    control.Margin = new Padding(0, MainUiPixels(3), MainUiPixels(6), MainUiPixels(3));
+                    int baseWidth = ReferenceEquals(control, btnCompareMembership) ? 184 : ReferenceEquals(control, btnFilter) ? 176 : 132;
+                    int textWidth = TextRenderer.MeasureText(control.Text, control.Font).Width + MainUiPixels(28);
+                    int desiredWidth = control is CheckBox ? textWidth : Math.Max(MainUiPixels(baseWidth), textWidth);
+                    control.AutoSize = false;
+                    control.Width = Math.Max(1, Math.Min(desiredWidth, Math.Max(1, available - control.Margin.Horizontal)));
+                    int textHeight = TextRenderer.MeasureText(control.Text, control.Font,
+                        new Size(Math.Max(1, control.Width - MainUiPixels(24)), int.MaxValue), TextFormatFlags.WordBreak).Height;
+                    control.Height = Math.Max(MainUiPixels(32), textHeight + MainUiPixels(10));
+                }
+                var sizes = topPanel.Controls.Cast<Control>().Select(control => new Size(
+                    control.Width + control.Margin.Horizontal, control.Height + control.Margin.Vertical)).ToArray();
+                topPanel.Height = MainToolbarWrappedHeight(available, sizes, topPanel.Padding.Vertical);
             }
-
-            var compact = ClientSize.Width > 0 && ClientSize.Width < 1450;
-            var wrapped = ClientSize.Width > 0 && ClientSize.Width < 1280;
-
-            btnLoadSource.Width = compact ? 105 : 110;
-            btnConnectTarget.Width = compact ? 115 : 120;
-            btnLoadTarget.Width = compact ? 105 : 110;
-            btnCompare.Width = compact ? 105 : 110;
-            btnCompareMembership.Width = compact ? 145 : 155;
-            btnExport.Width = compact ? 105 : 110;
-            btnFilter.Width = compact ? 165 : 220;
-            btnResetFilters.Width = compact ? 100 : 110;
-            btnAbout.Width = compact ? 75 : 90;
-
-            if (chkPackageTypeMismatchOnly != null)
-            {
-                chkPackageTypeMismatchOnly.Text = compact
-                    ? "Managed/unmanaged only"
-                    : "Managed/unmanaged differences only";
-            }
-
-            topPanel.WrapContents = wrapped;
-            topPanel.AutoScroll = !wrapped;
-            topPanel.Height = wrapped ? 78 : 45;
+            finally { topPanel.ResumeLayout(true); applyingToolbarLayout = false; }
+            ApplyMainDashboardLayout();
         }
 
         public override void UpdateConnection(OrgService newService, ConnectionDetail detail, string actionName, object parameter)
         {
             base.UpdateConnection(newService, detail, actionName, parameter);
 
-            if (!sourceLoaded)
+            // The base class routes this explicit action to the additional Target connection,
+            // without replacing the primary Source service or connection detail.
+            if (!string.Equals(actionName, "AdditionalOrganization", StringComparison.Ordinal))
             {
                 sourceConnectionName = detail != null && !string.IsNullOrWhiteSpace(detail.ConnectionName)
                     ? detail.ConnectionName
@@ -477,13 +715,10 @@ namespace D365SolutionComparer
 
         private void RefreshEnvironmentLabels()
         {
-            lblSourceEnv.Text = sourceLoaded && sourceSolutions.Count > 0
-                ? $"Source: {sourceConnectionName} ({sourceSolutions.Count} solutions)"
-                : "Source: " + sourceConnectionName;
-
-            lblTargetEnv.Text = targetLoaded && targetSolutions.Count > 0
-                ? $"Target: {targetConnectionName} ({targetSolutions.Count} solutions)"
-                : "Target: " + targetConnectionName;
+            var source = MainEnvironmentPresentation(sourceConnectionName, Service != null, sourceLoaded, sourceSolutions.Count);
+            var target = MainEnvironmentPresentation(targetConnectionName, targetService != null, targetLoaded, targetSolutions.Count);
+            lblSourceEnv.Text = source[0]; lblSourceState.Text = source[1];
+            lblTargetEnv.Text = target[0]; lblTargetState.Text = target[1];
         }
 
         private void BtnLoadSource_Click(object sender, EventArgs e)
@@ -811,6 +1046,7 @@ namespace D365SolutionComparer
                     resultsForm.CaptureType300Evidence = () => CaptureType300Evidence(presentation,
                         selected.SourceVersion, selected.TargetVersion, sourceService, destinationService, evidence => completedType300Evidence = evidence);
 #endif
+                    resultsForm.UseSimplifiedExplorer();
                     var owner = FindForm();
                     if (owner == null) resultsForm.Show(); else resultsForm.Show(owner);
                     SetStatusMessage("Membership comparison completed for " + presentation.SolutionUniqueName + ".",
@@ -824,7 +1060,7 @@ namespace D365SolutionComparer
         /// </summary>
         internal static DataverseComponentDefinitionOperation CreateMembershipComparisonOperation()
         {
-            return new DataverseComponentDefinitionOperation();
+            return new DataverseComponentDefinitionOperation(enableMakerObjectDisplay: true);
         }
 
 #if DEBUG
@@ -1767,7 +2003,9 @@ namespace D365SolutionComparer
                 "XLSX is the default Excel workbook export format.\n" +
                 "Excel XML remains available for readable Excel-friendly output without extra libraries.\n" +
                 "CSV remains available for plain-text exports.\n" +
-                "On some machines, .xml files open more reliably when opened from inside Excel.";
+                "On some machines, .xml files open more reliably when opened from inside Excel.\n\n" +
+                MainComparisonSummaryPresentation.StatusHelp + "\n\n" +
+                "Summary cards count all comparison results; the detailed breakdown follows the current filters.";
 
             MessageBox.Show(
                 message,
@@ -1985,10 +2223,22 @@ namespace D365SolutionComparer
 
             var finalResults = filteredResults.ToList();
 
-            dgvResults.DataSource = null;
-            dgvResults.DataSource = finalResults;
-
-            ApplyComparisonGridLayout();
+            // A filter rebind keeps user widths; a first comparison still gets its initial layout.
+            var columnWidths = dgvResults.DataSource is IEnumerable<CompareResult>
+                ? dgvResults.Columns.Cast<DataGridViewColumn>().ToDictionary(column => column.Name, column => column.Width)
+                : new Dictionary<string, int>();
+            foreach (var pair in columnWidths)
+                RememberComparisonColumnWidth(savedComparisonColumnWidths, pair.Key, pair.Value, true, false);
+            applyingComparisonColumnLayout = true;
+            try
+            {
+                dgvResults.DataSource = null;
+                dgvResults.DataSource = finalResults;
+                ApplyComparisonGridLayout();
+                foreach (DataGridViewColumn column in dgvResults.Columns)
+                    if (savedComparisonColumnWidths.TryGetValue(column.Name, out var width)) column.Width = width;
+            }
+            finally { applyingComparisonColumnLayout = false; }
             ResetGridScrollPosition();
             UpdateSummary(finalResults);
             UpdateActionButtonStates();
@@ -2154,14 +2404,14 @@ namespace D365SolutionComparer
 
             if (dgvResults.Columns["PackageTypeStatus"] != null)
             {
-                dgvResults.Columns["PackageTypeStatus"].Width = 170;
+                dgvResults.Columns["PackageTypeStatus"].Width = ComparisonColumnWidth("PackageTypeStatus", ComparisonStatusDefaultWidth(dgvResults.DeviceDpi), savedComparisonColumnWidths);
                 dgvResults.Columns["PackageTypeStatus"].HeaderText = "Package Type Status";
                 dgvResults.Columns["PackageTypeStatus"].DisplayIndex = 9;
             }
 
             if (dgvResults.Columns["Status"] != null)
             {
-                dgvResults.Columns["Status"].Width = 170;
+                dgvResults.Columns["Status"].Width = ComparisonColumnWidth("Status", ComparisonStatusDefaultWidth(dgvResults.DeviceDpi), savedComparisonColumnWidths);
                 dgvResults.Columns["Status"].HeaderText = "Overall Status";
                 dgvResults.Columns["Status"].DisplayIndex = 10;
             }
@@ -2221,6 +2471,7 @@ namespace D365SolutionComparer
         private void SetSummaryText(string text)
         {
             lblSummary.Text = text;
+            RefreshComparisonDashboard();
             UpdateLayoutHeights();
         }
 
@@ -2237,8 +2488,10 @@ namespace D365SolutionComparer
                 return;
             }
 
-            lblSummary.Height = GetPreferredLabelHeight(lblSummary, 36);
-            lblLegend.Height = GetPreferredLabelHeight(lblLegend, 24);
+            lblSummary.Visible = summaryDisclosure.Expanded;
+            lblSummary.Height = summaryDisclosure.DetailsHeight(GetPreferredLabelHeight(lblSummary, MainUiPixels(36)));
+            lblLegend.Visible = false;
+            lblLegend.Height = 0;
         }
 
         private int GetPreferredLabelHeight(Label label, int minimumHeight)
@@ -2248,7 +2501,7 @@ namespace D365SolutionComparer
                 return minimumHeight;
             }
 
-            var availableWidth = Math.Max(200, ClientSize.Width - label.Padding.Left - label.Padding.Right - 24);
+            var availableWidth = Math.Max(1, ClientSize.Width - label.Padding.Left - label.Padding.Right - 24);
             var proposedSize = new Size(availableWidth, int.MaxValue);
             var flags = TextFormatFlags.WordBreak;
             var measured = TextRenderer.MeasureText(label.Text ?? string.Empty, label.Font, proposedSize, flags);
@@ -2258,22 +2511,27 @@ namespace D365SolutionComparer
 
         private void DgvResults_CellToolTipTextNeeded(object sender, DataGridViewCellToolTipTextNeededEventArgs e)
         {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0)
-            {
-                return;
-            }
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            e.ToolTipText = ComparisonCellToolTip(dgvResults.Columns[e.ColumnIndex].DataPropertyName,
+                dgvResults.Rows[e.RowIndex].Cells[e.ColumnIndex].Value);
+        }
 
-            var value = dgvResults.Rows[e.RowIndex].Cells[e.ColumnIndex].Value;
-            if (value == null)
-            {
-                return;
-            }
-
-            var text = Convert.ToString(value);
-            if (!string.IsNullOrWhiteSpace(text) && text.Length > 24)
-            {
-                e.ToolTipText = text;
-            }
+        internal static int ComparisonStatusDefaultWidth(int dpi) => (int)Math.Ceiling(260d * Math.Max(96, dpi) / 96d);
+        internal static int ComparisonColumnWidth(string name, int defaultWidth, IReadOnlyDictionary<string, int> saved) =>
+            saved != null && saved.TryGetValue(name, out var width) && width > 0 ? width : defaultWidth;
+        internal static void RememberComparisonColumnWidth(IDictionary<string, int> saved, string name, int width,
+            bool comparisonBound, bool applyingLayout)
+        {
+            if (comparisonBound && !applyingLayout && !string.IsNullOrEmpty(name) && width > 0) saved[name] = width;
+        }
+        private void DgvResults_ColumnWidthChanged(object sender, DataGridViewColumnEventArgs e) =>
+            RememberComparisonColumnWidth(savedComparisonColumnWidths, e.Column.Name, e.Column.Width,
+                dgvResults.DataSource is IEnumerable<CompareResult>, applyingComparisonColumnLayout);
+        internal static string ComparisonCellToolTip(string propertyName, object value)
+        {
+            string text = Convert.ToString(value);
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            return propertyName == "Status" || propertyName == "PackageTypeStatus" || text.Length > 24 ? text : string.Empty;
         }
 
         private void UpdateSummary(List<CompareResult> results)
@@ -2284,23 +2542,25 @@ namespace D365SolutionComparer
                 return;
             }
 
-            int total = results.Count;
-            int match = results.Count(r => string.Equals(r.Status, "Match", StringComparison.OrdinalIgnoreCase));
-            int versionMismatch = results.Count(r => string.Equals(r.Status, "Version Mismatch", StringComparison.OrdinalIgnoreCase));
-            int publisherMismatch = results.Count(r => string.Equals(r.Status, "Publisher Mismatch", StringComparison.OrdinalIgnoreCase));
-            int displayNameMismatch = results.Count(r => string.Equals(r.Status, "Display Name Mismatch", StringComparison.OrdinalIgnoreCase));
-            int packageTypeDifference = results.Count(IsAnyPackageTypeDifference);
-            int managedUnmanagedDifference = results.Count(IsManagedUnmanagedDifference);
-            int multipleDifferences = results.Count(r => string.Equals(r.Status, "Multiple Differences", StringComparison.OrdinalIgnoreCase));
-            int missingInSource = results.Count(r => string.Equals(r.Status, "Missing in Source", StringComparison.OrdinalIgnoreCase));
-            int missingInTarget = results.Count(r => string.Equals(r.Status, "Missing in Target", StringComparison.OrdinalIgnoreCase));
-
-            SetSummaryText(
-                $"Summary: Total={total} | Match={match} | Version={versionMismatch} | Publisher={publisherMismatch} | Display Name={displayNameMismatch}\r\n" +
-                $"Package Type Differences={packageTypeDifference} | Managed/Unmanaged Differences={managedUnmanagedDifference} | Multiple={multipleDifferences} | Missing in Source={missingInSource} | Missing in Target={missingInTarget}");
+            SetSummaryText(MainComparisonSummaryPresentation.Breakdown(MainDetailedSummaryCounts(results)));
         }
 
-        private bool IsAnyPackageTypeDifference(CompareResult result)
+        // Retains the original filtered detailed-summary arithmetic; package indicators overlap statuses.
+        internal static int[] MainDetailedSummaryCounts(IEnumerable<CompareResult> results)
+        {
+            var rows = (results ?? Enumerable.Empty<CompareResult>()).ToList();
+            return new[] { rows.Count,
+                rows.Count(r => string.Equals(r.Status, "Match", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(r => string.Equals(r.Status, "Version Mismatch", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(r => string.Equals(r.Status, "Publisher Mismatch", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(r => string.Equals(r.Status, "Display Name Mismatch", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(IsAnyPackageTypeDifference), rows.Count(IsManagedUnmanagedDifference),
+                rows.Count(r => string.Equals(r.Status, "Multiple Differences", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(r => string.Equals(r.Status, "Missing in Source", StringComparison.OrdinalIgnoreCase)),
+                rows.Count(r => string.Equals(r.Status, "Missing in Target", StringComparison.OrdinalIgnoreCase)) };
+        }
+
+        private static bool IsAnyPackageTypeDifference(CompareResult result)
         {
             if (result == null)
             {
@@ -2330,7 +2590,7 @@ namespace D365SolutionComparer
             return !string.Equals(sourceType, targetType, StringComparison.OrdinalIgnoreCase);
         }
 
-        private bool IsManagedUnmanagedDifference(CompareResult result)
+        private static bool IsManagedUnmanagedDifference(CompareResult result)
         {
             if (result == null)
             {
@@ -2363,13 +2623,13 @@ namespace D365SolutionComparer
             return !string.Equals(sourceType, targetType, StringComparison.OrdinalIgnoreCase);
         }
 
-        private bool IsManagedOrUnmanagedLabel(string value)
+        private static bool IsManagedOrUnmanagedLabel(string value)
         {
             return string.Equals(value, "Managed", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(value, "Unmanaged", StringComparison.OrdinalIgnoreCase);
         }
 
-        private bool IsChangedResult(CompareResult result)
+        private static bool IsChangedResult(CompareResult result)
         {
             if (result == null)
             {
@@ -2391,80 +2651,85 @@ namespace D365SolutionComparer
             lblStatusMessage.ForeColor = color;
         }
 
-        private void DgvResults_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        private void ConfigureComparisonGridAppearance()
         {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            var bodyFont = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            var headerFont = new Font(bodyFont, FontStyle.Bold);
+            dgvResults.Font = bodyFont;
+            dgvResults.EnableHeadersVisualStyles = false;
+            dgvResults.GridColor = ComparisonGridColor(0xE2E8F0);
+            dgvResults.BorderStyle = BorderStyle.FixedSingle;
+            dgvResults.CellBorderStyle = DataGridViewCellBorderStyle.Single;
+            dgvResults.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
+            dgvResults.DefaultCellStyle = CreateComparisonRowStyle(false);
+            dgvResults.AlternatingRowsDefaultCellStyle = CreateComparisonRowStyle(true);
+            dgvResults.ColumnHeadersDefaultCellStyle = CreateComparisonHeaderStyle();
+            dgvResults.ColumnHeadersDefaultCellStyle.Font = headerFont;
+            dgvResults.RowHeadersDefaultCellStyle = CreateComparisonRowStyle(false);
+            dgvResults.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
+            Action updateMetrics = () =>
             {
-                return;
-            }
+                if (dgvResults.IsDisposed || dgvResults.Disposing) return;
+                dgvResults.RowTemplate.Height = ComparisonGridRowHeight(dgvResults.Font.Height, dgvResults.DeviceDpi);
+                dgvResults.ColumnHeadersHeight = dgvResults.RowTemplate.Height + Math.Max(4, (int)Math.Ceiling(4d * dgvResults.DeviceDpi / 96d));
+            };
+            updateMetrics();
+            dgvResults.FontChanged += (sender, args) => updateMetrics();
+            dgvResults.Disposed += (sender, args) => { headerFont.Dispose(); bodyFont.Dispose(); };
+        }
 
-            var column = dgvResults.Columns[e.ColumnIndex];
-            var dataPropertyName = column.DataPropertyName;
-
-            if (e.Value == null)
-            {
-                return;
-            }
-
-            var style = dgvResults.Rows[e.RowIndex].Cells[e.ColumnIndex].Style;
-            style.SelectionBackColor = SystemColors.Highlight;
-            style.SelectionForeColor = SystemColors.HighlightText;
-
-            if (dataPropertyName != "Status" && dataPropertyName != "PackageTypeStatus")
-            {
-                return;
-            }
-
-            var status = e.Value.ToString();
-            if (string.IsNullOrWhiteSpace(status))
-            {
-                return;
-            }
-
-            style.Font = dataPropertyName == "Status"
-                ? new Font(dgvResults.Font, FontStyle.Bold)
-                : dgvResults.Font;
-
+        internal static int ComparisonGridRowHeight(int fontHeight, int dpi)
+        {
+            double scale = Math.Max(96, dpi) / 96d;
+            return Math.Max((int)Math.Ceiling(24 * scale), fontHeight + (int)Math.Ceiling(8 * scale));
+        }
+        private static Color ComparisonGridColor(int rgb) => Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+        internal static DataGridViewCellStyle CreateComparisonRowStyle(bool alternate) => new DataGridViewCellStyle
+        {
+            BackColor = ComparisonGridColor(alternate ? 0xF8FAFC : 0xFFFFFF), ForeColor = ComparisonGridColor(0x0F172A),
+            SelectionBackColor = ComparisonGridColor(0x1D4ED8), SelectionForeColor = Color.White,
+            Padding = new Padding(4, 2, 4, 2), WrapMode = DataGridViewTriState.False
+        };
+        internal static DataGridViewCellStyle CreateComparisonHeaderStyle() => new DataGridViewCellStyle
+        {
+            BackColor = ComparisonGridColor(0xF1F5F9), ForeColor = ComparisonGridColor(0x334155),
+            SelectionBackColor = ComparisonGridColor(0xF1F5F9), SelectionForeColor = ComparisonGridColor(0x334155),
+            Padding = new Padding(4, 3, 4, 3), Alignment = DataGridViewContentAlignment.MiddleLeft
+        };
+        internal static void ApplyComparisonCellStyle(DataGridViewCellStyle style, string propertyName, string status, bool alternate)
+        {
+            if (style == null) throw new ArgumentNullException(nameof(style));
+            style.BackColor = ComparisonGridColor(alternate ? 0xF8FAFC : 0xFFFFFF);
+            style.ForeColor = ComparisonGridColor(0x0F172A);
+            style.SelectionBackColor = ComparisonGridColor(0x1D4ED8);
+            style.SelectionForeColor = Color.White;
+            if (propertyName != "Status" && propertyName != "PackageTypeStatus") return;
             switch (status)
             {
                 case "Match":
-                    style.ForeColor = Color.FromArgb(47, 98, 69);
-                    style.BackColor = Color.FromArgb(243, 247, 244);
-                    break;
-
+                    if (propertyName == "PackageTypeStatus") { style.ForeColor = ComparisonGridColor(0x475569); return; }
+                    style.ForeColor = ComparisonGridColor(0x166534); style.BackColor = ComparisonGridColor(0xF0FDF4); break;
                 case "Version Mismatch":
-                    style.ForeColor = Color.FromArgb(122, 87, 0);
-                    style.BackColor = Color.FromArgb(255, 247, 232);
-                    break;
-
+                    style.ForeColor = ComparisonGridColor(0x92400E); style.BackColor = ComparisonGridColor(0xFFFBEB); break;
                 case "Publisher Mismatch":
                 case "Display Name Mismatch":
-                    style.ForeColor = Color.FromArgb(77, 93, 112);
-                    style.BackColor = Color.FromArgb(243, 245, 248);
-                    break;
-
+                    style.ForeColor = ComparisonGridColor(0x1D4ED8); style.BackColor = ComparisonGridColor(0xEFF6FF); break;
                 case "Package Type Mismatch":
                 case "Managed/Unmanaged Mismatch":
-                    style.ForeColor = Color.FromArgb(122, 87, 0);
-                    style.BackColor = Color.FromArgb(255, 247, 232);
-                    break;
-
+                    style.ForeColor = ComparisonGridColor(0x9A3412); style.BackColor = ComparisonGridColor(0xFFF7ED); break;
                 case "Multiple Differences":
-                    style.ForeColor = Color.FromArgb(81, 75, 97);
-                    style.BackColor = Color.FromArgb(242, 241, 245);
-                    break;
-
+                    style.ForeColor = ComparisonGridColor(0x6D28D9); style.BackColor = ComparisonGridColor(0xF5F3FF); break;
                 case "Missing in Source":
                 case "Missing in Target":
-                    style.ForeColor = Color.FromArgb(138, 63, 66);
-                    style.BackColor = Color.FromArgb(251, 239, 239);
-                    break;
-
-                default:
-                    style.ForeColor = dgvResults.ForeColor;
-                    style.BackColor = Color.White;
-                    break;
+                    style.ForeColor = ComparisonGridColor(0xB91C1C); style.BackColor = ComparisonGridColor(0xFEF2F2); break;
             }
+        }
+
+        private void DgvResults_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            ApplyComparisonCellStyle(e.CellStyle, dgvResults.Columns[e.ColumnIndex].DataPropertyName,
+                e.Value as string, (e.RowIndex & 1) != 0);
         }
 
         private void DgvResults_CellDoubleClick(object sender, DataGridViewCellEventArgs e)

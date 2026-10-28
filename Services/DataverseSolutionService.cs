@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
+using D365SolutionComparer.Infrastructure;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
 using ModelSolutionInfo = D365SolutionComparer.Models.SolutionInfo;
@@ -30,9 +32,10 @@ namespace D365SolutionComparer.Services
 
             query.Criteria.AddCondition("isvisible", ConditionOperator.Equal, true);
 
-            var response = service.RetrieveMultiple(query);
+            // Publish an inventory only after terminal retrieval; preserve the existing visibility rule.
+            var response = new DataversePagedReader(service).ReadAll(query, "solutionid", CancellationToken.None);
 
-            foreach (var entity in response.Entities)
+            foreach (var entity in response)
             {
                 var publisherName = string.Empty;
 

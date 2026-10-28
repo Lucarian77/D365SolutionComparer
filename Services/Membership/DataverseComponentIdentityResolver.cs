@@ -42,7 +42,9 @@ namespace D365SolutionComparer.Services.Membership
         {
             if (component == null) throw new ArgumentNullException(nameof(component));
             var context = new DataverseReadContext(service, environment, cancellationToken);
-            return component.ComponentType == 92
+            return component.ComponentType == MetadataForArchivalResolver.ComponentType
+                ? new MetadataForArchivalResolver().Resolve(context, component, cancellationToken)
+                : component.ComponentType == 92
                 ? new Type92MembershipResolver().Resolve(context, component, cancellationToken)
                 : new ResolutionContext(context, entityKeyResolutionEnabled)
                     .Resolve(component, cancellationToken);
@@ -78,11 +80,15 @@ namespace D365SolutionComparer.Services.Membership
             if (snapshot.State != MembershipSnapshotState.Complete) return snapshot;
             if (context.Environment.OrganizationId != snapshot.Environment.OrganizationId)
                 throw new InvalidOperationException("The verified context belongs to a different environment.");
+            context.MetadataCache.BeginNormalDisplayNames(snapshot);
             var resolved = new ResolutionContext(context, entityKeyResolutionEnabled, evidenceSink)
                 .ResolveAll(snapshot.Components, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            return new Type92MembershipResolver().Apply(context,
+            var finalSnapshot = new Type92MembershipResolver().Apply(context,
                 MembershipSnapshot.Complete(snapshot.Solution, resolved, snapshot.CapturedAt), cancellationToken);
+            finalSnapshot = new MetadataForArchivalResolver().Apply(context, finalSnapshot, cancellationToken);
+            context.MetadataCache.SealNormalDisplayNames(finalSnapshot);
+            return finalSnapshot;
         }
 
         private sealed class ResolutionContext
@@ -468,6 +474,9 @@ namespace D365SolutionComparer.Services.Membership
                     case PluginAssemblyComponentType:
                         kind = ComponentSemanticKinds.PluginAssembly;
                         break;
+                    case 10139: return new ComponentIdentity(record, IdentityResolutionStatus.Unresolved,
+                        diagnostic: "Archival metadata resolution is pending.", componentTypeKey: ComponentSemanticKinds.MetadataForArchival,
+                        semanticKind: ComponentSemanticKinds.MetadataForArchival);
                     case 29: kind = "process"; break;
                     case SavedQueryComponentType: return ResolveSavedQuery(record);
                     case SavedQueryVisualizationComponentType: return ResolveSavedQueryVisualization(record);
@@ -1048,7 +1057,10 @@ namespace D365SolutionComparer.Services.Membership
                     identityCache[activation.Key] = parentWorkflowCache[activation.ParentWorkflowId];
                     Entity definition;
                     if (context.MetadataCache.WorkflowDefinitions.TryGetValue(activation.ParentWorkflowId, out definition))
+                    {
                         context.MetadataCache.WorkflowDefinitions[activation.Key.ObjectId] = definition;
+                        context.MetadataCache.WorkflowDisplayAliases[activation.Key.ObjectId] = definition.Id;
+                    }
                 }
                 if (activations.Any(item => identityCache[item.Key].Status != IdentityResolutionStatus.Resolved))
                     workflowLookupIncomplete = true;
@@ -1646,6 +1658,8 @@ namespace D365SolutionComparer.Services.Membership
                     cancellationToken);
                 if (componentType == SavedQueryComponentType) savedQueryRetrieval = retrieval;
                 if (componentType == SavedQueryVisualizationComponentType) savedQueryVisualizationRetrieval = retrieval;
+                if (componentType == EmailTemplateComponentType || componentType == SavedQueryVisualizationComponentType)
+                    context.MetadataCache.ObserveNormalDisplayNames(componentType, retrieval);
                 var objectIds = retrieval.ObjectIds;
                 int returnedCount = retrieval.ReturnedRowCount;
                 bool countUnavailable = !retrieval.CountsAvailable;
@@ -1875,6 +1889,7 @@ namespace D365SolutionComparer.Services.Membership
                     "Signed Report diagnostic lookup returned an incomplete result set.",
                     "Signed Report diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => "Signed Report diagnostic lookup failed: " + ex.Message, cancellationToken);
+                context.MetadataCache.ObserveNormalDisplayNames(ReportComponentType, retrieval);
                 var objectIds = retrieval.ObjectIds;
                 int returnedCount = retrieval.ReturnedRowCount;
                 bool countUnavailable = !retrieval.CountsAvailable;
@@ -2652,10 +2667,11 @@ namespace D365SolutionComparer.Services.Membership
                 canvasAppDiagnosticsLoaded = true;
                 canvasAppSummaryComponentId = records[0].SolutionComponentId;
                 var retrieval = new BatchedDiagnosticQueryReader(context).Read(records, "canvasapp", "canvasappid",
-                    new[] { "canvasappid", "name", "displayname", "uniquecanvasappid", "componentstate", "ismanaged" },
+                    new[] { "canvasappid", "name", "displayname", "uniquecanvasappid", "componentstate", "ismanaged", "canvasapptype" },
                     "Canvas App diagnostic lookup returned an incomplete result set.",
                     "Canvas App diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => "Canvas App diagnostic lookup failed: " + ex.Message, cancellationToken);
+                context.MetadataCache.ObserveCanvasAppDisplayNames(retrieval);
                 var objectIds = retrieval.ObjectIds;
                 int returnedCount = retrieval.ReturnedRowCount;
                 bool countUnavailable = !retrieval.CountsAvailable;
@@ -3114,6 +3130,7 @@ namespace D365SolutionComparer.Services.Membership
                     "TeamTemplate diagnostic lookup returned conflicting or incomplete primary-key data.",
                     ex => "TeamTemplate diagnostic lookup failed: " + ex.Message, cancellationToken);
                 var objectIds = retrieval.ObjectIds;
+                context.MetadataCache.ObserveNormalDisplayNames(TeamTemplateComponentType, retrieval);
                 var entityLogicalNames = ResolveEntityLogicalNameDiagnostics(retrieval.ReturnedRows
                     .Select(ReadObjectTypeCode).Where(item => item.HasValue)
                     .Select(item => item.Value).Distinct().OrderBy(item => item).ToList(), cancellationToken);

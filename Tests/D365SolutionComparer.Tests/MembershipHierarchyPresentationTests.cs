@@ -205,8 +205,8 @@ namespace D365SolutionComparer.Tests
                 var f = AppSettings(); var spy = new FakeOrganizationService(); var csv = Csv(f); int calls = 0;
                 using (var form = new MembershipResultsForm(f.Completed, sourceService: spy, targetService: spy))
                 {
-                    form.Show(); Application.DoEvents(); Assert.AreEqual("Flat View", Selector(form).SelectedItem);
-                    CollectionAssert.AreEqual(new[] { "Flat View", "Hierarchy View", "Differences Only" }, Selector(form).Items.Cast<string>().ToArray());
+                    Selector(form).SelectedIndex = 0; form.Show(); Application.DoEvents(); Assert.AreEqual("Flat View", Selector(form).SelectedItem);
+                    CollectionAssert.AreEqual(new[] { "Flat View", "Hierarchy View", "Differences Only", "Solution Objects Explorer" }, Selector(form).Items.Cast<string>().ToArray());
                     var originalProjection = form.ProjectHierarchy; form.ProjectHierarchy = token => { calls++; return originalProjection(token); };
                     Switch(form); var control = form.Controls.OfType<MembershipHierarchyControl>().Single();
                     Assert.IsTrue(WalkNative(control.Tree).Any(n => n.Text == "Source: SYN-THET-IAB"));
@@ -278,7 +278,7 @@ namespace D365SolutionComparer.Tests
                 Directory.CreateDirectory(path); var f = AppSettings();
                 using (var form = new MembershipResultsForm(f.Completed))
                 {
-                    form.Text += " — Synthetic H2C presentation fixture"; form.Show(); Save(form, path, "01-flat.png"); Switch(form);
+                    form.Text += " — Synthetic H2C presentation fixture"; Selector(form).SelectedIndex = 0; form.Show(); Save(form, path, "01-flat.png"); Switch(form);
                     var control = form.Controls.OfType<MembershipHierarchyControl>().Single(); control.SelectComparison(2, DisplayEnvironmentSide.Source); Save(form, path, "02-appsettings.png");
                     control.SelectComparison(2, DisplayEnvironmentSide.Target); Save(form, path, "03-target-appsetting.png");
                 }

@@ -4354,7 +4354,7 @@ namespace D365SolutionComparer.Tests
                         "isappaware", "sitemapxml", "componentstate", "ismanaged" };
                 case 300:
                     return new[] { "canvasappid", "name", "displayname", "uniquecanvasappid",
-                        "componentstate", "ismanaged" };
+                        "componentstate", "ismanaged", "canvasapptype" };
                 default:
                     throw new ArgumentOutOfRangeException(nameof(componentType));
             }
@@ -4508,6 +4508,136 @@ namespace D365SolutionComparer.Tests
             return new[] { "savedqueryvisualizationid", "name", "primaryentitytypecode", "type",
                 "charttype", "savedqueryvisualizationidunique", "componentstate", "ismanaged" };
         }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1")]
+        [DataRow(31, 200, 1), DataRow(31, 201, 2), DataRow(36, 200, 1), DataRow(36, 201, 2)]
+        public void A1NormalNameRetentionPreservesSelectedBatchColumnsAndExactRequestCounts(int rawType, int count, int batches)
+        {
+            var solution = Solution();
+            var identities = Enumerable.Range(0, count).Select(i => new ComponentIdentity(
+                new SolutionComponentRecord(Guid.NewGuid(), rawType, Guid.NewGuid()), IdentityResolutionStatus.Unresolved)).ToArray();
+            var rows = identities.ToDictionary(i => i.Record.ObjectId.Value,
+                i => ComponentDisplayEvidenceTests.A1NameRow(rawType, i.Record.ObjectId.Value, "Synthetic display"));
+            var service = Service(solution, query =>
+            {
+                A1AssertNameQuery(rawType, query);
+                var requested = query.Criteria.Conditions.Single().Values.Cast<Guid>().ToArray();
+                Assert.IsTrue(requested.Length <= 200); Assert.AreEqual(requested.Length, requested.Distinct().Count());
+                Assert.IsTrue(requested.All(rows.ContainsKey)); return Rows(requested.Select(id => rows[id]).ToArray());
+            });
+            var context = new DataverseReadContext(service, solution.Environment, CancellationToken.None);
+            var snapshot = new DataverseComponentIdentityResolver().ResolveSnapshot(context,
+                MembershipSnapshot.Complete(solution, identities, DateTimeOffset.UtcNow), CancellationToken.None);
+            var presentation = A1PresentSnapshot(snapshot);
+            var display = ComponentDisplayEvidenceProjector.Project(presentation, context.MetadataCache, null);
+            Assert.AreEqual(count, display.Count); Assert.IsTrue(display.All(d => d.SourceDisplayEvidence.FriendlyName.Value == "Synthetic display"));
+            Assert.IsTrue(snapshot.Components.All(i => i.Status == IdentityResolutionStatus.Unsupported && i.ComparisonKey == null));
+            Assert.AreEqual(batches, service.Calls); Assert.AreEqual(1, service.ExecuteCalls); Assert.AreEqual(0, service.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1")]
+        [DataRow(31, "Missing"), DataRow(36, "Missing")]
+        [DataRow(31, "Duplicate"), DataRow(36, "Duplicate")]
+        [DataRow(31, "ConflictingPrimary"), DataRow(36, "ConflictingPrimary")]
+        [DataRow(31, "WrongTable"), DataRow(36, "WrongTable")]
+        [DataRow(31, "UnrequestedId"), DataRow(36, "UnrequestedId")]
+        [DataRow(31, "EmptyEntityId"), DataRow(36, "EmptyEntityId")]
+        [DataRow(31, "MoreRecords"), DataRow(36, "MoreRecords")]
+        [DataRow(31, "Fault"), DataRow(36, "Fault")]
+        [DataRow(31, "TerminalCookie"), DataRow(36, "TerminalCookie")]
+        public void A1NormalNameCorrelationUsesExistingFailureAndTerminalRules(int rawType, string scenario)
+        {
+            var solution = Solution(); var id = Guid.NewGuid();
+            var raw = new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), rawType, id), IdentityResolutionStatus.Unresolved);
+            var row = ComponentDisplayEvidenceTests.A1NameRow(rawType, id, "Synthetic retained name");
+            if (scenario == "ConflictingPrimary") row[rawType == 31 ? "reportid" : "templateid"] = Guid.NewGuid();
+            if (scenario == "WrongTable") row.LogicalName = "unrelated";
+            if (scenario == "UnrequestedId")
+            { row.Id = Guid.NewGuid(); row[rawType == 31 ? "reportid" : "templateid"] = row.Id; }
+            if (scenario == "EmptyEntityId") row.Id = Guid.Empty;
+            var service = Service(solution, query =>
+            {
+                A1AssertNameQuery(rawType, query);
+                if (scenario == "Fault") throw new FaultException("Synthetic fault; no payload");
+                var result = scenario == "Missing" ? Rows() : scenario == "Duplicate" ? Rows(row, row) : Rows(row);
+                result.MoreRecords = scenario == "MoreRecords";
+                result.PagingCookie = scenario == "TerminalCookie" ? "synthetic cookie not an identity" : null;
+                return result;
+            });
+            var context = new DataverseReadContext(service, solution.Environment, CancellationToken.None);
+            var resolved = new DataverseComponentIdentityResolver().ResolveSnapshot(context,
+                MembershipSnapshot.Complete(solution, new[] { raw }, DateTimeOffset.UtcNow), CancellationToken.None);
+            var presentation = A1PresentSnapshot(resolved);
+            var display = ComponentDisplayEvidenceProjector.Project(presentation, context.MetadataCache, null).Single().SourceDisplayEvidence;
+            Assert.AreEqual(scenario == "TerminalCookie" ? DisplayAvailability.Available : scenario == "Duplicate" || scenario == "EmptyEntityId"
+                ? DisplayAvailability.Ambiguous : DisplayAvailability.Unavailable, display.FriendlyName.Availability);
+            Assert.AreEqual(scenario == "TerminalCookie" ? "Synthetic retained name" : null, display.FriendlyName.Value);
+            Assert.IsNull(resolved.Components.Single().ComparisonKey);
+            Assert.AreEqual(MembershipPresence.Indeterminate, presentation.Rows.Single().Presence);
+            Assert.AreEqual(1, service.Calls); Assert.AreEqual(1, service.ExecuteCalls); Assert.AreEqual(0, service.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1")]
+        [DataRow("Omitted"), DataRow("Null"), DataRow("Empty"), DataRow("Blank"), DataRow("Nonblank")]
+        public void A1SignedReportNameAvailabilityNeverRepairsSignatureCompleteness(string state)
+        {
+            var solution = Solution(); var id = Guid.NewGuid(); var signature = Guid.NewGuid();
+            var row = Report(id, "Synthetic signed report", "synthetic.rdl", 1, signature, 1033, Guid.NewGuid(), false);
+            if (state == "Omitted") row.Attributes.Remove("name");
+            if (state == "Null") row["name"] = null;
+            if (state == "Empty") row["name"] = string.Empty;
+            if (state == "Blank") row["name"] = "  ";
+            var record = new SolutionComponentRecord(Guid.NewGuid(), 31, id);
+            var service = ReportService(solution, query => { AssertReportQuery(query, id); return Rows(row); });
+            var context = new DataverseReadContext(service, solution.Environment, CancellationToken.None);
+            var resolved = new DataverseComponentIdentityResolver().ResolveSnapshot(context,
+                MembershipSnapshot.Complete(solution, new[] { new ComponentIdentity(record, IdentityResolutionStatus.Unresolved) }, DateTimeOffset.UtcNow),
+                CancellationToken.None);
+            var oldContract = new DataverseComponentIdentityResolver().Resolve(
+                ReportService(solution, query => Rows(row)), solution.Environment, record, CancellationToken.None);
+            var identity = resolved.Components.Single();
+            Assert.AreEqual(oldContract.Status, identity.Status); Assert.AreEqual(oldContract.ComparisonKey, identity.ComparisonKey);
+            Assert.AreEqual(oldContract.ComponentTypeKey, identity.ComponentTypeKey);
+            CollectionAssert.AreEqual(oldContract.DiagnosticEvidence.ToArray(), identity.DiagnosticEvidence.ToArray());
+            Assert.AreEqual(state == "Nonblank" ? IdentityResolutionStatus.Resolved : IdentityResolutionStatus.Unresolved, identity.Status);
+            Assert.AreEqual(state == "Nonblank" ? signature.ToString("D") : null, identity.ComparisonKey);
+            var name = ComponentDisplayEvidenceProjector.Project(A1PresentSnapshot(resolved), context.MetadataCache, null).Single().SourceDisplayEvidence.FriendlyName;
+            Assert.AreEqual(state == "Omitted" ? DisplayAvailability.AttributeOmitted : DisplayAvailability.Available, name.Availability);
+            Assert.AreEqual(state == "Omitted" || state == "Null" ? null : (string)row["name"], name.Value);
+            Assert.AreEqual(1, service.Calls); Assert.AreEqual(1, service.ExecuteCalls); Assert.AreEqual(0, service.WriteCalls);
+        }
+
+        [DataTestMethod, TestCategory("H2E2C3FA1"), DataRow(31), DataRow(36)]
+        public void A1BlankObjectIdNamesDoNotAddBackingRequests(int rawType)
+        {
+            var solution = Solution(); var service = Service(solution, query => { Assert.Fail("No selected nonblank ID"); return Rows(); });
+            var context = new DataverseReadContext(service, solution.Environment, CancellationToken.None);
+            var snapshot = new DataverseComponentIdentityResolver().ResolveSnapshot(context,
+                MembershipSnapshot.Complete(solution, new[] { new ComponentIdentity(new SolutionComponentRecord(Guid.NewGuid(), rawType, null),
+                    IdentityResolutionStatus.Unresolved) }, DateTimeOffset.UtcNow), CancellationToken.None);
+            var display = ComponentDisplayEvidenceProjector.Project(A1PresentSnapshot(snapshot), context.MetadataCache, null).Single().SourceDisplayEvidence;
+            Assert.AreEqual(DisplayAvailability.NotRetrieved, display.FriendlyName.Availability);
+            Assert.AreEqual(DisplayBackingCorrelationStatus.NotAttempted, display.BackingCorrelationStatus);
+            Assert.AreEqual(0, service.Calls); Assert.AreEqual(1, service.ExecuteCalls); Assert.AreEqual(0, service.WriteCalls);
+        }
+
+        internal static void A1AssertNameQuery(int rawType, QueryExpression query)
+        {
+            Assert.AreEqual(rawType == 31 ? "report" : "template", query.EntityName);
+            CollectionAssert.AreEquivalent(rawType == 31
+                ? new[] { "reportid", "name", "filename", "reporttypecode", "signatureid", "signaturelcid", "reportidunique", "componentstate", "ismanaged" }
+                : new[] { "templateid", "title", "templatetypecode", "templateidunique", "ispersonal", "languagecode", "componentstate", "ismanaged" },
+                query.ColumnSet.Columns.ToArray());
+            Assert.AreEqual(1, query.Criteria.Conditions.Count);
+            Assert.AreEqual(rawType == 31 ? "reportid" : "templateid", query.Criteria.Conditions.Single().AttributeName);
+            Assert.AreEqual(ConditionOperator.In, query.Criteria.Conditions.Single().Operator);
+            Assert.IsNull(query.TopCount);
+        }
+
+        private static MembershipComparisonPresentation A1PresentSnapshot(MembershipSnapshot snapshot) =>
+            new MembershipResultPresenter().Create(MembershipEnvironmentResult.FromSnapshot("Synthetic source", snapshot, 0, TimeSpan.Zero),
+                MembershipEnvironmentResult.FromSnapshot("Synthetic target", MembershipSnapshot.Complete(Solution(snapshot.SolutionUniqueName),
+                    new ComponentIdentity[0], snapshot.CapturedAt), 0, TimeSpan.Zero));
 
         private static FakeOrganizationService ReportService(SolutionIdentity solution,
             Func<QueryExpression, EntityCollection> reportQuery)
@@ -4793,7 +4923,7 @@ namespace D365SolutionComparer.Tests
         {
             Assert.AreEqual("canvasapp", query.EntityName);
             CollectionAssert.AreEquivalent(new[] { "canvasappid", "name", "displayname",
-                "uniquecanvasappid", "componentstate", "ismanaged" }, query.ColumnSet.Columns.ToArray());
+                "uniquecanvasappid", "componentstate", "ismanaged", "canvasapptype" }, query.ColumnSet.Columns.ToArray());
             Assert.AreEqual(1, query.Criteria.Conditions.Count);
             var condition = query.Criteria.Conditions.Single();
             Assert.AreEqual("canvasappid", condition.AttributeName);

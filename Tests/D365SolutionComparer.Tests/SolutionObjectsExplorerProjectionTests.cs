@@ -155,6 +155,91 @@ namespace D365SolutionComparer.Tests
             var p = ExplorerFixture.Project(f); Assert.AreEqual(1, p.Rows.Count); Assert.AreEqual(1, p.Occurrences.Count);
             Assert.IsNull(p.Rows[0].SourceDisplay); Assert.AreSame(f.Presentation.Rows[0], p.Rows[0].Original.AuthoritativeRow);
         }
+        [TestMethod, TestCategory("H2E2B1")]
+        public void WorkspaceSideUnitsNeverBorrowUnionCandidateCountOrMakerBenchmark()
+        {
+            var f = ExplorerFixture.Make(Enumerable.Range(0, 179).Select(i => ExplorerFixture.Identity(61, "resource" + i)),
+                new[] { ExplorerFixture.Identity(61, "resource0") }); var p = ExplorerFixture.Project(f);
+            Assert.AreEqual(179, p.Category("objects").RowIndices.Count);
+            var target = p.WorkspaceCategories(ObjectsWorkspaceScope.Target, Enumerable.Range(0, p.Rows.Count), true).First();
+            Assert.AreEqual(1, target.TargetOccurrences.Count); Assert.AreEqual(0, target.SourceOccurrences.Count); Assert.AreEqual(1, target.RowIndices.Count);
+            Assert.AreNotEqual(150, target.TargetOccurrences.Count); Assert.AreNotEqual(179, target.TargetOccurrences.Count);
+            var compare = p.WorkspaceCategories(ObjectsWorkspaceScope.Compare, Enumerable.Range(0, p.Rows.Count), true).First();
+            Assert.AreEqual(179, compare.RowIndices.Count);
+        }
+        [DataTestMethod, TestCategory("H2E2B1"), DataRow(29), DataRow(60), DataRow(300)]
+        public void IncompleteSubtypeContractNeverManufacturesMakerCategory(int raw)
+        {
+            var identity = ExplorerFixture.Identity(raw, "diagnostic", status: raw == 300 ? IdentityResolutionStatus.Unsupported : IdentityResolutionStatus.Resolved).WithWorkflowCategory(raw == 29 ? (int?)5 : null);
+            var p = ExplorerFixture.Project(ExplorerFixture.Make(new[] { identity }, new[] { identity }));
+            Assert.IsTrue(p.Occurrences.All(o => o.PrimaryCategory == null));
+            var cats = p.WorkspaceCategories(ObjectsWorkspaceScope.Target, Enumerable.Range(0, p.Rows.Count), true);
+            Assert.AreEqual(0, cats.First().TargetOccurrences.Count); Assert.AreEqual(1, cats.Last().TargetOccurrences.Count);
+            Assert.IsFalse(cats.Any(c => c.Name == "Cloud flows" || c.Name == "Dashboards" || c.Name == "Component libraries"));
+        }
+        [TestMethod, TestCategory("H2E2B1")]
+        public void WorkspaceConservesEduRowsOccurrencesAndExcludesStandaloneSettings()
+        {
+            var f = ExplorerFixture.Saa(); var csv = ExplorerFixture.Csv(f); var p = ExplorerFixture.Project(f);
+            Assert.AreEqual(840, p.Rows.Count); Assert.AreEqual(1512, p.Occurrences.Count); Assert.AreEqual(792, p.SourceOccurrenceCount); Assert.AreEqual(720, p.TargetOccurrenceCount);
+            var compare = p.WorkspaceCategories(ObjectsWorkspaceScope.Compare, Enumerable.Range(0, 840), true).First();
+            CollectionAssert.AreEqual(p.Occurrences.Where(o => o.PrimaryCategory != null).SelectMany(o => o.Original.ComparisonRowIndices).Distinct().OrderBy(i => i).ToArray(), compare.RowIndices.ToArray());
+            Assert.AreEqual(840, p.Category("all").RowIndices.Count, "Technical All remains complete.");
+            for (int i = 0; i < 840; i++) Assert.AreSame(f.Presentation.Rows[i], p.Rows[i].Original.AuthoritativeRow);
+            var apps = ExplorerFixture.Project(ExplorerFixture.Apps());
+            Assert.IsFalse(apps.WorkspaceCategories(ObjectsWorkspaceScope.Target, Enumerable.Range(0, apps.Rows.Count), true).Any(c => c.Name == "AppSettings"));
+            Assert.AreEqual(10, apps.Occurrences.Count(o => o.Original.Record.ComponentType == 10075));
+            Assert.AreEqual(10, apps.Occurrences.Sum(o => o.Children.Count(l => l.Group == "AppSettings" && l.OriginalAssociation.Kind == HierarchyRelationshipKind.StructuralParent)));
+            Assert.AreEqual(csv, ExplorerFixture.Csv(f));
+        }
+        [TestMethod, TestCategory("H2E2B1")]
+        public void RepeatedRawOccurrenceIsNotDeduplicatedIntoVerifiedLocalObjects()
+        {
+            var identity = ExplorerFixture.Identity(61, "repeated"); var p = ExplorerFixture.Project(ExplorerFixture.Make(new[] { identity, identity }));
+            var local = p.WorkspaceCategories(ObjectsWorkspaceScope.Source, Enumerable.Range(0, p.Rows.Count), true).First();
+            Assert.AreEqual(2, local.SourceOccurrences.Count); Assert.AreEqual(2, p.Occurrences.Count);
+            Assert.AreEqual(p.Rows.Count, local.RowIndices.Count);
+        }
+
+        [TestMethod, TestCategory("H2E2C2A")]
+        public void CandidateUnionPreservesRepeatedAliasesOneSidedAndExcludedRecords()
+        {
+            var shared = ExplorerFixture.Identity(61, "shared");
+            var sourceOnly = ExplorerFixture.Identity(61, "source");
+            var f = ExplorerFixture.Make(new[] { shared, sourceOnly, sourceOnly, ExplorerFixture.Identity(300, null, status: IdentityResolutionStatus.Unsupported) },
+                new[] { ExplorerFixture.Identity(61, "shared"), ExplorerFixture.Identity(80, "target"), ExplorerFixture.Identity(29, null, status: IdentityResolutionStatus.Ambiguous) });
+            var original = ExplorerFixture.Project(f); var csv = ExplorerFixture.Csv(f);
+            // Synthetic navigation aliases exercise projection union, never production cross-family matching.
+            var aliases = new SolutionObjectsExplorerProjection(original.Owner, original.Rows, original.Occurrences.Select(o =>
+                new SolutionObjectsExplorerOccurrence(o.Original, o.Category, o.Label, o.ObjectCandidate, o.Children,
+                    o.PrimaryCategory != null && o.Original.Side == DisplayEnvironmentSide.Target ? "Apps" : o.PrimaryCategory)), original.Categories, original.Diagnostics);
+            var allowed = Enumerable.Range(0, aliases.Rows.Count).ToArray(); var categories = aliases.WorkspaceCategories(ObjectsWorkspaceScope.Compare, allowed, true);
+            var expected = aliases.Occurrences.Where(o => o.PrimaryCategory != null).SelectMany(o => o.Original.ComparisonRowIndices).Distinct().OrderBy(i => i).ToArray();
+            CollectionAssert.AreEqual(expected, categories.First().RowIndices.ToArray());
+            Assert.IsTrue(categories.Skip(1).SelectMany(c => c.RowIndices).GroupBy(i => i).Any(g => g.Count() > 1));
+            Assert.AreEqual(expected.Length, categories.First().RowIndices.Distinct().Count());
+            Assert.AreEqual(7, aliases.Occurrences.Count); Assert.AreEqual(4, aliases.SourceOccurrenceCount); Assert.AreEqual(3, aliases.TargetOccurrenceCount);
+            Assert.AreEqual(aliases.Rows.Count, aliases.Category("all").RowIndices.Count); Assert.IsTrue(expected.Length < aliases.Rows.Count);
+            var source = aliases.WorkspaceCategories(ObjectsWorkspaceScope.Source, allowed, true).First(); Assert.AreEqual(3, source.SourceOccurrences.Count); Assert.AreEqual(0, source.TargetOccurrences.Count);
+            var filtered = expected.Take(1).ToArray(); CollectionAssert.AreEqual(filtered, aliases.WorkspaceCategories(ObjectsWorkspaceScope.Compare, filtered, false).First().RowIndices.ToArray());
+            Assert.AreEqual(csv, ExplorerFixture.Csv(f));
+        }
+
+        [TestMethod, TestCategory("H2E2C2A")]
+        public void CandidateEligibilityRemainsUnchangedAndDifferencesUseOriginalRows()
+        {
+            var f = ExplorerFixture.Make(new[] { ExplorerFixture.Identity(36, null, status: IdentityResolutionStatus.Unsupported),
+                ExplorerFixture.Identity(511, null, status: IdentityResolutionStatus.Unsupported), ExplorerFixture.Identity(29, "workflow"), ExplorerFixture.Identity(60, "form"),
+                ExplorerFixture.Identity(300, null, status: IdentityResolutionStatus.Unsupported) }); var p = ExplorerFixture.Project(f);
+            Assert.IsNotNull(p.Occurrences.Single(o => o.Original.Record.ComponentType == 36).PrimaryCategory);
+            Assert.IsNotNull(p.Occurrences.Single(o => o.Original.Record.ComponentType == 511).PrimaryCategory);
+            Assert.IsTrue(p.Occurrences.Where(o => new[] { 29, 60, 300 }.Contains(o.Original.Record.ComponentType)).All(o => o.PrimaryCategory == null));
+            var differences = p.Rows.Where(row => row.Original.AuthoritativeRow.Presence != MembershipPresence.PresentInBoth || row.Original.DefinitionStatus == "Different").Select(row => row.OriginalRowIndex).ToArray();
+            var eligible = p.Occurrences.Where(o => o.PrimaryCategory != null).SelectMany(o => o.Original.ComparisonRowIndices).Distinct().Where(differences.Contains).OrderBy(i => i).ToArray();
+            CollectionAssert.AreEqual(eligible, p.WorkspaceCategories(ObjectsWorkspaceScope.Compare, differences, false).First().RowIndices.ToArray());
+            Assert.AreEqual(5, p.Category("all").RowIndices.Count);
+        }
+
     }
 
     internal sealed class ExplorerFixture

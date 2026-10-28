@@ -276,7 +276,7 @@ namespace D365SolutionComparer.Tests
                 using (var form = completed ? new MembershipResultsForm(f.Completed, captureAppSettingEvidence: () => captures++, sourceService: service, targetService: service)
                     : new MembershipResultsForm(f.Presentation, captureAppSettingEvidence: () => captures++, sourceService: service, targetService: service))
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     var grid = form.Controls.OfType<DataGridView>().Single();
                     var columns = new[] { "ComponentText", "TypeText", "MembershipStatus", "DefinitionStatusText",
                         "ManagedText", "CustomizedText", "LastModifiedText", "OwnerText", "ObjectStatusText" };
@@ -371,7 +371,7 @@ namespace D365SolutionComparer.Tests
                 using (var form = new MembershipResultsForm(f.Completed))
                 using (var timer = new System.Windows.Forms.Timer { Interval = 25 })
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     var adapter = (MembershipGridRow)form.Controls.OfType<DataGridView>().Single().Rows[0].DataBoundItem;
                     Assert.AreSame(f.Presentation.Rows[0].DefinitionDetail, adapter.AuthoritativeRow.DefinitionDetail);
                     bool opened = false;
@@ -411,7 +411,7 @@ namespace D365SolutionComparer.Tests
                     captureAppSettingEvidence: () => captures++, sourceService: service, targetService: service))
                 using (var timer = new System.Windows.Forms.Timer { Interval = 25 })
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     // Existing double-click remains a no-op when there is no definition detail.
                     typeof(MembershipResultsForm).GetMethod("ResultsGrid_CellDoubleClick", BindingFlags.Instance | BindingFlags.NonPublic)
                         .Invoke(form, new object[] { null, new DataGridViewCellEventArgs(0, 0) });
@@ -475,7 +475,7 @@ namespace D365SolutionComparer.Tests
                 var spy = new RequestSpy();
                 using (var form = new MembershipResultsForm(f.Completed, sourceService: spy, targetService: spy))
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     var grid = form.Controls.OfType<DataGridView>().Single();
                     var row = (MembershipGridRow)grid.Rows[0].DataBoundItem;
                     Assert.AreEqual(9, grid.Columns.Count);
@@ -528,7 +528,7 @@ namespace D365SolutionComparer.Tests
                 {
                     var constructMs = watch.Elapsed.TotalMilliseconds;
                     form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-4000, -4000);
-                    watch.Restart(); form.Show(); Application.DoEvents();
+                    watch.Restart(); SelectFlat(form); form.Show(); Application.DoEvents();
                     var paintMs = watch.Elapsed.TotalMilliseconds;
                     var grid = form.Controls.OfType<DataGridView>().Single();
                     watch.Restart(); grid.FirstDisplayedScrollingRowIndex = count - 1; Application.DoEvents();
@@ -602,7 +602,7 @@ namespace D365SolutionComparer.Tests
                     captureAppSettingEvidence: () => captures++, sourceService: spy, targetService: spy))
                 using (var timer = new System.Windows.Forms.Timer { Interval = 25 })
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     timer.Tick += (s, e) =>
                     {
                         var dialog = Application.OpenForms.Cast<Form>().OfType<MembershipCoverageDetailsForm>().FirstOrDefault();
@@ -749,7 +749,7 @@ namespace D365SolutionComparer.Tests
                 var completed = WithObjects(f, source, ComponentObjectMetadataEvidence.NotRetrieved(DisplayEnvironmentSide.Target));
                 using (var form = new MembershipResultsForm(completed, sourceService: spy, targetService: spy))
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     var grid = form.Controls.OfType<DataGridView>().Single(); var row = (MembershipGridRow)grid.Rows[0].DataBoundItem;
                     StringAssert.Contains(grid.Columns["ObjectStatusText"].ToolTipText, "not Membership Status");
                     Assert.AreEqual(row.MembershipStatus, grid.Rows[0].Cells["MembershipStatus"].Value);
@@ -767,6 +767,11 @@ namespace D365SolutionComparer.Tests
                 }
             });
         }
+
+        // These tests exercise native Flat-grid layout, accessibility and actions.
+        private static void SelectFlat(MembershipResultsForm form) => form.Controls.OfType<ToolStrip>()
+            .Single(t => t.Name == "MembershipViewBar").Items.OfType<ToolStripComboBox>()
+            .Single(c => c.Name == "MembershipViewSelector").SelectedIndex = 0;
 
         private static ComponentObjectMetadataValue<T> Observed<T>(T value) =>
             new ComponentObjectMetadataValue<T>(DisplayAvailability.Available, value, "synthetic.object.field", true);
@@ -937,7 +942,7 @@ namespace D365SolutionComparer.Tests
                 var csv = new MembershipCoverageCsvExporter().CreateCsv(f.Presentation);
                 using (var form = new MembershipResultsForm(f.Completed, sourceService: spy, targetService: spy))
                 {
-                    form.Show(); Application.DoEvents();
+                    SelectFlat(form); form.Show(); Application.DoEvents();
                     var grid = form.Controls.OfType<DataGridView>().Single();
                     var toggle = form.Controls.OfType<Panel>().Single().Controls.OfType<Panel>().Single().Controls.OfType<CheckBox>().Single();
                     CollectionAssert.AreEqual(new[] { "Component", "Type", "Membership Status", "Definition Status" },

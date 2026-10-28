@@ -21,7 +21,9 @@ namespace D365SolutionComparer.Services.ComponentDetails
             new DataverseComponentIdentityResolver();
         private readonly DataverseComponentDefinitionReader definitionReader =
             new DataverseComponentDefinitionReader();
-        internal DataverseComponentDefinitionOperation() { }
+        private readonly bool enableMakerObjectDisplay;
+        internal DataverseComponentDefinitionOperation(bool enableMakerObjectDisplay = false)
+        { this.enableMakerObjectDisplay = enableMakerObjectDisplay; }
         private readonly object invocationIdentity = new object();
 
         public ComponentDefinitionSnapshot ReadAndResolve(IOrganizationService service,
@@ -102,6 +104,8 @@ namespace D365SolutionComparer.Services.ComponentDetails
                 Report(progress, MembershipOperationStage.ReadingDefinitions,
                     "Reading component definitions...");
             var definitions = definitionReader.Read(context, resolved, cancellationToken);
+            if (enableMakerObjectDisplay && definitions.Membership.State == MembershipSnapshotState.Complete)
+                new MakerObjectDisplayReader().Read(context, definitions.Membership, cancellationToken);
             Report(progress, MembershipOperationStage.Completed,
                 "Membership and component definition comparison data completed.");
             AppSettingParentCapture capture = null;

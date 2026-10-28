@@ -17,5 +17,6 @@ using System.Runtime.InteropServices;
 
 [assembly: InternalsVisibleTo("D365SolutionComparer.Tests")]
 
-[assembly: AssemblyVersion("1.2026.1.3")]
-[assembly: AssemblyFileVersion("1.2026.1.3")]
+[assembly: AssemblyVersion("1.2026.2.0")]
+[assembly: AssemblyFileVersion("1.2026.2.0")]
+[assembly: AssemblyInformationalVersion("1.2026.2.0")]

@@ -54,7 +54,7 @@ namespace D365SolutionComparer.Services.Membership
                 }
             }
             var occurrences = hierarchy.Occurrences.Select((item, index) => new SolutionObjectsExplorerOccurrence(item,
-                categories[index], labels[index], candidates[index], children[index])).ToList();
+                categories[index], labels[index], candidates[index], children[index], PrimaryCategory(item))).ToList();
             var resultCategories = new List<SolutionObjectsExplorerCategory>();
             Action<string, string, IEnumerable<SolutionObjectsExplorerOccurrence>, IEnumerable<int>> add = (key, name, selected, extra) =>
             {
@@ -108,6 +108,22 @@ namespace D365SolutionComparer.Services.Membership
                 case 10075: objectCandidate = false; return "AppSettings";
                 default:
                     return item.Identity.SemanticKind == ComponentSemanticKinds.ConnectionReference ? "Connection References" : "Other / unclassified components";
+            }
+        }
+        // Category names only: never top-level proof, identity, matching or absence.
+        // Detached workflow/form/library evidence cannot prove all subtype + eligibility gates.
+        // These families, AppSettings and unverified registrations remain technical.
+        private static string PrimaryCategory(ComponentHierarchyOccurrence item)
+        {
+            switch (item.Record.ComponentType)
+            {
+                case 1: return "Tables"; case 80: return "Apps"; case 9: return "Choices";
+                case 61: return "Web resources"; case 380: return "Environment variables";
+                case 62: return "Site maps"; case 31: return "Reports"; case 36: return "Email templates";
+                case 511: return "Team template";
+                case 74: return Registered(item, "maskingrule") ? "Secured Masking Rule" : null;
+                case 29: case 60: case 300: case 10075: return null;
+                default: return item.Identity.SemanticKind == ComponentSemanticKinds.ConnectionReference ? "Connection references" : null;
             }
         }
         private static bool Registered(ComponentHierarchyOccurrence item, string backing) =>
